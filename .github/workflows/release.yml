@@ -1,0 +1,95 @@
+name: Release Windows installer
+
+# Triggers when you push a tag like v0.1.0 — produces a Windows installer
+# and attaches it to a GitHub Release.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version (without leading v)"
+        required: true
+        default: "0.1.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Set up Node.js + pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "pnpm"
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Install Inno Setup 6
+        uses: DokuBot/setup-Inno-Setup@v1.2.0
+        # Adds ISCC.exe to PATH.
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if ($env:GITHUB_REF -match 'refs/tags/v(.+)') {
+            $v = $Matches[1]
+          } elseif ($env:WF_INPUT_VERSION) {
+            $v = $env:WF_INPUT_VERSION
+          } else {
+            $v = (Select-String -Path backend/pyproject.toml -Pattern 'version = "(.*)"').Matches.Groups[1].Value
+          }
+          Write-Host "version=$v"
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+        env:
+          WF_INPUT_VERSION: ${{ github.event.inputs.version }}
+
+      - name: Run build script
+        run: pwsh packaging/build.ps1
+        env:
+          # No API key baked in — first-run prompt in the app collects it.
+          SONIOX_API_KEY: ""
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SonioxLiveTranslate-Setup-${{ steps.ver.outputs.version }}
+          path: dist/SonioxLiveTranslate-Setup-*.exe
+          if-no-files-found: error
+
+      - name: Create / update GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/SonioxLiveTranslate-Setup-*.exe
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(steps.ver.outputs.version, '-') }}

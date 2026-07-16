@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Soniox Live Translate — Setup</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body class="setup-body">
+  <div class="setup-card">
+    <div class="setup-brand">
+      <span class="brand-logo">soniox</span>
+      <span class="brand-name">speech translation</span>
+    </div>
+
+    <h1>Welcome</h1>
+    <p class="setup-lead">
+      Enter your Soniox API key to get started. It is stored locally on this
+      machine only (in <code id="cfg-path"></code>) and never sent anywhere
+      except directly to the Soniox API.
+    </p>
+
+    <form id="setup-form">
+      <label class="setup-field">
+        <span>Soniox API key</span>
+        <input
+          type="password"
+          id="api-key"
+          placeholder="578c…"
+          autocomplete="off"
+          required
+          spellcheck="false"
+        >
+      </label>
+
+      <div class="setup-row">
+        <label class="setup-field setup-field--small">
+          <span>Host</span>
+          <input type="text" id="host" value="127.0.0.1" autocomplete="off">
+        </label>
+        <label class="setup-field setup-field--small">
+          <span>Port</span>
+          <input type="number" id="port" value="8765" min="1024" max="65535" autocomplete="off">
+        </label>
+      </div>
+
+      <button type="submit" class="setup-submit">Save and open app</button>
+      <p id="setup-msg" class="setup-msg" role="alert"></p>
+    </form>
+
+    <p class="setup-footer">
+      Get a key at
+      <a href="https://soniox.com" target="_blank" rel="noopener">soniox.com</a>
+      → dashboard. You can change it later from the tray menu → Settings.
+    </p>
+  </div>
+
+  <script>
+    (async function () {
+      const cfgPathEl = document.getElementById("cfg-path");
+      // Best-effort display; backend doesn't expose the path yet, so show a hint.
+      cfgPathEl.textContent = "%APPDATA%\\SonioxLiveTranslate\\config.json";
+
+      const status = await fetch("/setup/status").then((r) => r.json()).catch(() => null);
+      if (status && status.configured) {
+        document.getElementById("setup-msg").textContent =
+          "Already configured — submitting a new key will replace it.";
+      }
+
+      document.getElementById("setup-form").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const msg = document.getElementById("setup-msg");
+        const key = document.getElementById("api-key").value.trim();
+        const host = document.getElementById("host").value.trim();
+        const port = parseInt(document.getElementById("port").value, 10);
+        if (!key) {
+          msg.textContent = "API key is required.";
+          return;
+        }
+        const btn = e.target.querySelector(".setup-submit");
+        btn.disabled = true;
+        btn.textContent = "Saving…";
+        try {
+          const res = await fetch("/setup", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ soniox_api_key: key, host, port }),
+          });
+          const data = await res.json();
+          if (data.ok) {
+            msg.textContent = "Saved. Opening app…";
+            setTimeout(() => { window.location.href = "/"; }, 600);
+          } else {
+            msg.textContent = data.error || "Failed to save.";
+            btn.disabled = false;
+            btn.textContent = "Save and open app";
+          }
+        } catch (err) {
+          msg.textContent = `Error: ${err.message}`;
+          btn.disabled = false;
+          btn.textContent = "Save and open app";
+        }
+      });
+    })();
+  </script>
+</body>
+</html>
