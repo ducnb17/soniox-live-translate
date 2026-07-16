@@ -44,10 +44,15 @@ async def pipe_browser_to_stt(
 async def stream_url_to_stt(
     audio_url: str, duration: float, stt_ws, browser_ws: WebSocket
 ) -> None:
-    """Stream a hosted audio file to STT at real-time pace (file test mode)."""
+    """Stream a hosted audio file to STT at real-time pace (file test mode).
+
+    Always sends the b"" end-of-stream signal to STT, even if the download
+    fails partway — otherwise STT never finalizes and the session hangs.
+    """
     loop = asyncio.get_running_loop()
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        try:
+    sent_end_signal = False
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=60.0)) as client:
             async with client.stream("GET", audio_url, follow_redirects=True) as resp:
                 resp.raise_for_status()
                 content_length = int(resp.headers.get("content-length", 0))
@@ -67,11 +72,23 @@ async def stream_url_to_stt(
                             await asyncio.sleep(delay)
                 if buffer:
                     await stt_ws.send(bytes(buffer))
-                await stt_ws.send(b"")
-        except httpx.HTTPError as e:
+    except httpx.HTTPError as e:
+        log.warning("audio_fetch_failed", url=audio_url, error=str(e))
+        try:
             await browser_ws.send_json(
                 {"error_code": "fetch_failed", "error_message": str(e)}
             )
+        except Exception:
+            pass
+    finally:
+        # ALWAYS send the end-of-stream signal so STT finalizes and sends
+        # `finished: true`. Without this, the session hangs forever.
+        if not sent_end_signal:
+            try:
+                await stt_ws.send(b"")
+                sent_end_signal = True
+            except Exception as e:
+                log.warning("stt_end_signal_failed", error=str(e))
 
 
 async def handle_stt(

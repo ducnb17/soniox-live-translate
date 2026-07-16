@@ -39,7 +39,7 @@ import json
 from typing import Any
 
 import websockets
-from fastapi import WebSocket
+from fastapi import WebSocket, WebSocketDisconnect
 
 from .config import (
     SONIOX_API_KEY,

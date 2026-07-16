@@ -253,6 +253,12 @@ async def translation_websocket(
 
     except* WebSocketDisconnect:
         pass
+    except* RuntimeError as eg:
+        # Browser closed mid-stream (e.g. "Cannot call send once a close
+        # message has been sent"). Expected during normal disconnect.
+        log.debug("ws_runtime_error", errors=[str(e) for e in eg.exceptions])
+    except* Exception as eg:
+        log.error("ws_session_error", errors=[str(e) for e in eg.exceptions])
     finally:
         if stt_ws is not None:
             try:
