@@ -29,3 +29,6 @@ frontend/node_modules/
 
 # Tool config
 .clinerules
+
+# CI-generated (backend/app copied to root for PyInstaller)
+/app/
