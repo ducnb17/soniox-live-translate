@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="80" fill="#2563eb"/>
+  <circle cx="256" cy="210" r="90" fill="white"/>
+  <rect x="226" y="270" width="60" height="50" rx="8" fill="white"/>
+  <path d="M196 160 L256 100 L316 160" stroke="white" stroke-width="18" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M150 360 L196 290 M362 360 L316 290" stroke="white" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="256" y="440" text-anchor="middle" fill="white" font-family="Arial,sans-serif" font-size="48" font-weight="bold">STT→TTS</text>
+</svg>

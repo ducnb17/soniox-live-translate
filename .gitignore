@@ -26,3 +26,6 @@ frontend/node_modules/
 .idea/
 .vscode/
 *.swp
+
+# Tool config
+.clinerules

@@ -3,7 +3,11 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Soniox Speech Translation</title>
+  <meta name="theme-color" content="#2563eb">
+  <meta name="description" content="Real-time speech-to-speech translation powered by Soniox">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="apple-touch-icon" href="/icon-192.svg">
+  <title>Soniox Live Translate</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -144,6 +148,20 @@
             </svg>
             CSV
           </button>
+        </div>
+      </div>
+
+      <!-- 8. Session history -->
+      <div class="history-section">
+        <button id="btn-history-toggle" class="btn-history-toggle"
+                onclick="toggleHistoryPanel()">Lịch sử ▼</button>
+        <div id="history-panel" class="history-panel">
+          <div class="history-toolbar">
+            <span class="history-title">Phiên đã lưu</span>
+            <button class="hbtn-clear"
+                    onclick="sessionHistory.clear();renderHistoryPanel()">Xóa tất cả</button>
+          </div>
+          <div id="history-list" class="history-list"></div>
         </div>
       </div>
     </aside>

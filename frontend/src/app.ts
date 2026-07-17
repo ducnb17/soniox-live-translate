@@ -106,6 +106,122 @@ const DEFAULT_AUDIO_URL = "https://soniox.com/media/examples/spanish_weather_rep
 $audioUrl.value = new URLSearchParams(location.search).get("audio") || DEFAULT_AUDIO_URL;
 
 // ---------------------------------------------------------------------------
+// Session History (localStorage)
+// ---------------------------------------------------------------------------
+const HISTORY_KEY = "soniox_history_v1";
+const HISTORY_MAX = 50;
+
+interface HistoryEntry {
+  id: string;
+  ts: number;
+  mode: string;
+  targetLang: string;
+  utteranceCount: number;
+  utterances: Utterance[];
+}
+
+const sessionHistory = {
+  load(): HistoryEntry[] {
+    try { return JSON.parse(localStorage.getItem(HISTORY_KEY) ?? "[]"); }
+    catch { return []; }
+  },
+  save(entries: HistoryEntry[]): void {
+    try { localStorage.setItem(HISTORY_KEY, JSON.stringify(entries.slice(0, HISTORY_MAX))); }
+    catch { /* storage full */ }
+  },
+  push(entry: HistoryEntry): void { const l = this.load(); l.unshift(entry); this.save(l); },
+  remove(id: string): void       { this.save(this.load().filter((e) => e.id !== id)); },
+  clear(): void                  { localStorage.removeItem(HISTORY_KEY); },
+};
+
+function saveToHistory(utts: Utterance[], translationMode: string, targetLang: string): void {
+  const final = utts.filter((u) => u.originalFinal || u.translationFinal);
+  if (!final.length) return;
+  sessionHistory.push({
+    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    ts: Date.now(),
+    mode: translationMode,
+    targetLang,
+    utteranceCount: final.length,
+    utterances: final,
+  });
+  const panel = document.getElementById("history-panel");
+  if (panel?.classList.contains("open")) renderHistoryPanel();
+}
+
+function renderHistoryPanel(): void {
+  const list = document.getElementById("history-list");
+  if (!list) return;
+  const entries = sessionHistory.load();
+  if (!entries.length) {
+    list.innerHTML = '<p class="history-empty">Chưa có phiên nào.</p>';
+    return;
+  }
+  list.innerHTML = entries
+    .map((e) => {
+      const date    = new Date(e.ts).toLocaleString("vi-VN", { dateStyle: "short", timeStyle: "short" });
+      const arrow   = e.mode === "two_way" ? "↔" : "→";
+      const preview = (e.utterances[0]?.originalFinal ?? "").slice(0, 72);
+      return `<div class="history-item">
+        <div class="history-meta">
+          <span class="history-date">${date}</span>
+          <span class="history-badge">${arrow}&nbsp;${e.targetLang.toUpperCase()}</span>
+          <span class="history-count">${e.utteranceCount} câu</span>
+        </div>
+        <div class="history-preview">${preview}…</div>
+        <div class="history-actions">
+          <button class="hbtn hbtn-view" data-id="${e.id}">Xem</button>
+          <button class="hbtn hbtn-json" data-id="${e.id}">JSON</button>
+          <button class="hbtn hbtn-csv"  data-id="${e.id}">CSV</button>
+          <button class="hbtn hbtn-del"  data-id="${e.id}">🗑</button>
+        </div>
+      </div>`;
+    })
+    .join("");
+
+  list.querySelectorAll<HTMLButtonElement>(".hbtn-view").forEach((b) => {
+    b.onclick = () => {
+      const e = sessionHistory.load().find((x) => x.id === b.dataset.id);
+      if (e) { utterances = e.utterances; render(); }
+    };
+  });
+  list.querySelectorAll<HTMLButtonElement>(".hbtn-json").forEach((b) => {
+    b.onclick = () => {
+      const e = sessionHistory.load().find((x) => x.id === b.dataset.id);
+      if (e) downloadBlob(new Blob([JSON.stringify(e, null, 2)], { type: "application/json" }), `transcript-${e.id}.json`);
+    };
+  });
+  list.querySelectorAll<HTMLButtonElement>(".hbtn-csv").forEach((b) => {
+    b.onclick = () => {
+      const e = sessionHistory.load().find((x) => x.id === b.dataset.id);
+      if (!e) return;
+      const rows = [
+        ["speaker", "language", "original", "translation"].join(","),
+        ...e.utterances.map((u) =>
+          [u.speaker ?? "", u.language ?? "",
+           `"${(u.originalFinal ?? "").replace(/"/g, '""')}"`,
+           `"${(u.translationFinal ?? "").replace(/"/g, '""')}"`,
+          ].join(",")
+        ),
+      ];
+      downloadBlob(new Blob(["\uFEFF" + rows.join("\r\n")], { type: "text/csv;charset=utf-8" }), `transcript-${e.id}.csv`);
+    };
+  });
+  list.querySelectorAll<HTMLButtonElement>(".hbtn-del").forEach((b) => {
+    b.onclick = () => { sessionHistory.remove(b.dataset.id!); renderHistoryPanel(); };
+  });
+}
+
+function toggleHistoryPanel(): void {
+  const panel = document.getElementById("history-panel");
+  const btn   = document.getElementById("btn-history-toggle");
+  if (!panel || !btn) return;
+  const open = panel.classList.toggle("open");
+  btn.textContent = open ? "Lịch sử ▲" : "Lịch sử ▼";
+  if (open) renderHistoryPanel();
+}
+
+// ---------------------------------------------------------------------------
 // Runtime state
 // ---------------------------------------------------------------------------
 let mode: AppMode = "file";
@@ -447,6 +563,9 @@ function stop(): void {
 }
 
 function cleanup(): void {
+  // Auto-save completed utterances to session history
+  saveToHistory([...utterances, currentUtt], $mode(), $targetLang.value);
+
   if (ws && ws.readyState === WebSocket.OPEN) {
     try {
       const snapshot = [...utterances, currentUtt].filter(
@@ -725,3 +844,22 @@ $themeToggle.addEventListener("click", () => {
   const cur = document.documentElement.getAttribute("data-theme") || "light";
   applyTheme(cur === "dark" ? "light" : "dark");
 });
+
+// ---------------------------------------------------------------------------
+// Expose globals for inline HTML onclick handlers
+// ---------------------------------------------------------------------------
+(window as unknown as Record<string, unknown>)["toggleHistoryPanel"] = toggleHistoryPanel;
+(window as unknown as Record<string, unknown>)["renderHistoryPanel"] = renderHistoryPanel;
+(window as unknown as Record<string, unknown>)["sessionHistory"] = sessionHistory;
+
+// ---------------------------------------------------------------------------
+// PWA Service Worker
+// ---------------------------------------------------------------------------
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker
+      .register("/sw.js")
+      .then((r) => console.log("[SW] registered:", r.scope))
+      .catch((err) => console.warn("[SW] registration failed:", err));
+  });
+}

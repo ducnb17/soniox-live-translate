@@ -1,0 +1,14 @@
+services:
+  soniox-live-translate:
+    build: .
+    ports:
+      - "8765:8765"
+    environment:
+      - SONIOX_API_KEY=${SONIOX_API_KEY:-}
+    volumes:
+      - ./backend/transcripts:/app/backend/transcripts
+      - app-config:/app/config
+    restart: unless-stopped
+
+volumes:
+  app-config:

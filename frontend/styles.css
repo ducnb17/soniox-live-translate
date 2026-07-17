@@ -673,3 +673,51 @@ textarea#context-json {
 }
 .setup-footer a { color: #2563eb; text-decoration: none; }
 .setup-footer a:hover { text-decoration: underline; }
+
+/* ── Session History ────────────────────────────────────────────────────── */
+.history-section {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #e5e7eb;
+}
+.btn-history-toggle {
+  width: 100%;
+  padding: 8px 12px;
+  background: #ffffff;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  color: #374151;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s;
+}
+.btn-history-toggle:hover { background: #f9fafb; }
+.history-panel { display: none; flex-direction: column; gap: 6px; max-height: 280px; overflow-y: auto; margin-top: 8px; }
+.history-panel.open { display: flex; }
+.history-toolbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+.history-title { font-size: 11px; font-weight: 700; color: #6b7280; text-transform: uppercase; letter-spacing: .05em; }
+.history-empty { font-size: 12px; color: #9ca3af; text-align: center; padding: 16px 0; margin: 0; }
+.history-item { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; }
+.history-meta { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.history-date { font-size: 11px; color: #6b7280; }
+.history-badge { font-size: 10px; background: #2563eb; color: #fff; border-radius: 999px; padding: 1px 6px; font-weight: 700; }
+.history-count { font-size: 10px; color: #9ca3af; margin-left: auto; }
+.history-preview { font-size: 12px; color: #6b7280; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.history-actions { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 2px; }
+.hbtn { font-size: 11px; padding: 3px 7px; border-radius: 6px; border: 1px solid #d1d5db; background: #fff; color: #374151; cursor: pointer; transition: background 0.12s, color 0.12s; }
+.hbtn-view:hover { background: #2563eb; color: #fff; border-color: #2563eb; }
+.hbtn-json:hover, .hbtn-csv:hover { background: #f3f4f6; }
+.hbtn-del { color: #ef4444; }
+.hbtn-del:hover { background: #ef4444; color: #fff; border-color: #ef4444; }
+.hbtn-clear { font-size: 11px; padding: 2px 6px; border-radius: 6px; border: 1px solid #ef4444; background: transparent; color: #ef4444; cursor: pointer; }
+.hbtn-clear:hover { background: #ef4444; color: #fff; }
+
+/* Dark mode history */
+[data-theme="dark"] .history-section { border-top-color: var(--border); }
+[data-theme="dark"] .btn-history-toggle { background: var(--surface); border-color: var(--border-soft); color: var(--text); }
+[data-theme="dark"] .btn-history-toggle:hover { background: var(--surface-2); }
+[data-theme="dark"] .history-item { background: var(--surface-2); border-color: var(--border); }
+[data-theme="dark"] .hbtn { background: var(--surface); border-color: var(--border-soft); color: var(--text-muted); }
+[data-theme="dark"] .hbtn-view:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
