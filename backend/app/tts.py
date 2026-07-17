@@ -192,10 +192,11 @@ async def tts_sender(
                     if d is None:
                         continue
                     if d["current_stream_id"] is not None and d["stream_used"]:
+                        sid = d["current_stream_id"]
                         await tts_ws.send(
                             json.dumps(
                                 {
-                                    "stream_id": d["current_stream_id"],
+                                    "stream_id": sid,
                                     "text": "",
                                     "text_end": True,
                                 }
@@ -203,17 +204,24 @@ async def tts_sender(
                         )
                         d["current_stream_id"] = None
                         d["stream_used"] = False
-                        # idle_event will fire when Soniox confirms terminated
-                        # in `pipe_tts_to_browser`.
+                        # Keep stream_id_to_direction entry — Soniox WILL send
+                        # a `terminated` event for text_end streams, which
+                        # pipe_tts_to_browser uses to fire session_done.
                     elif d["current_stream_id"] is not None and not d["stream_used"]:
                         # Pre-warmed stream that never received text: cancel it
                         # to release the slot.
+                        sid = d["current_stream_id"]
                         await tts_ws.send(
                             json.dumps(
-                                {"stream_id": d["current_stream_id"], "cancel": True}
+                                {"stream_id": sid, "cancel": True}
                             )
                         )
                         d["current_stream_id"] = None
+                        # Soniox may NOT send a `terminated` event for a
+                        # cancelled stream. Remove from the routing map so
+                        # the session_done check (which requires the map to
+                        # be empty) can fire.
+                        tts_state["stream_id_to_direction"].pop(sid, None)
     except websockets.ConnectionClosedOK:
         pass
     except websockets.ConnectionClosedError as e:
@@ -230,7 +238,22 @@ async def pipe_tts_to_browser(
     `session_done` once STT is finished and every direction is idle."""
     try:
         while True:
-            message = await tts_ws.recv()
+            # Use a timeout so we can check session_done even if Soniox
+            # doesn't send any more messages (e.g. after cancelling streams).
+            try:
+                message = await asyncio.wait_for(tts_ws.recv(), timeout=5.0)
+            except asyncio.TimeoutError:
+                # No TTS message in 5s — check if the session should be done.
+                _maybe_send_session_done_sync(tts_state)
+                if tts_state.get("_session_done_sent"):
+                    try:
+                        await browser_ws.send_json({"session_done": True})
+                    except Exception:
+                        pass
+                    await tts_ws.close()
+                    break
+                continue
+
             data = json.loads(message)
 
             if data.get("error_code") is not None:
@@ -256,17 +279,17 @@ async def pipe_tts_to_browser(
                             d["stream_used"] = False
                         d["idle_event"].set()
 
-                # Once STT is done and no direction has an open stream, this
-                # terminated event marked the very last TTS audio of the
-                # session — tell the browser it's safe to stop.
-                if (
-                    tts_state["stt_done"]
-                    and all(
-                        d["current_stream_id"] is None
-                        for d in tts_state["directions"].values()
-                    )
-                    and not tts_state["stream_id_to_direction"]
-                ):
+                _maybe_send_session_done_sync(tts_state)
+                if tts_state.get("_session_done_sent"):
+                    try:
+                        await browser_ws.send_json({"session_done": True})
+                    except Exception:
+                        pass
+                    await tts_ws.close()
+                    break
+            elif data.get("audio") is None and not data.get("keep_alive"):
+                _maybe_send_session_done_sync(tts_state)
+                if tts_state.get("_session_done_sent"):
                     try:
                         await browser_ws.send_json({"session_done": True})
                     except Exception:
@@ -288,6 +311,30 @@ async def tts_keepalive(tts_ws) -> None:
         pass
     except websockets.ConnectionClosedError as e:
         log.warning("tts_keepalive_stopped", error=str(e))
+
+
+# --------------------------------------------------------------------------- #
+# Session-done helper
+# --------------------------------------------------------------------------- #
+def _maybe_send_session_done_sync(tts_state: dict) -> None:
+    """Check if the session is done (STT finished + all directions idle) and
+    set a flag. The caller reads the flag and sends the actual session_done
+    message to the browser. Idempotent."""
+    if tts_state.get("_session_done_sent"):
+        return
+    if not tts_state.get("stt_done"):
+        return
+    if not all(
+        d["current_stream_id"] is None
+        for d in tts_state["directions"].values()
+    ):
+        return
+    # All directions idle. Don't require stream_id_to_direction to be empty —
+    # Soniox may not send `terminated` for cancelled prewarm streams, and
+    # tts_sender already removes those entries. For text_end streams, the
+    # terminated event should have arrived by now (we're here because we just
+    # processed one). Stale entries are harmless.
+    tts_state["_session_done_sent"] = True
 
 
 # --------------------------------------------------------------------------- #

@@ -241,14 +241,10 @@ async def main() -> int:
               "finished" if got_finished else "408 session-end" if got_session_end else "neither")
         check("received TTS audio (binary PCM)", got_tts_audio,
               f"{audio_bytes} bytes total")
-        # session_done depends on TTS cleanup after STT end — may not arrive
-        # if the WS closes before cleanup completes. This is a cleanup edge
-        # case, not core functionality. Report as warning, not failure.
-        if got_session_done:
-            check("received session_done", True)
-        else:
-            print("  [WARN] session_done not received — TTS cleanup timing edge case")
-            print("         (core STT+TTS functionality is verified above)")
+        # session_done: the browser uses this to auto-stop the UI. Should
+        # arrive after STT ends and TTS streams are finalized/cancelled.
+        check("received session_done", got_session_done,
+              "(browser auto-stop signal)" if got_session_done else "(missing — UI won't auto-stop)")
         if got_error:
             check("no unexpected error from server", False, got_error)
         else:
