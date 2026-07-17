@@ -53,8 +53,7 @@ jobs:
           pnpm build
 
       - name: Install Inno Setup 6
-        uses: DokuBot/setup-Inno-Setup@v1.2.0
-        # Adds ISCC.exe to PATH.
+        run: choco install innosetup --yes --no-progress 2>&1 | Select-String -NotMatch "^Progress"
 
       - name: Resolve version
         id: ver
