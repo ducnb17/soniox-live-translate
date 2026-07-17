@@ -91,9 +91,14 @@ jobs:
           }
 
       # ── 5. Inno Setup ────────────────────────────────────────────────────
-      - name: Install Inno Setup 6
+      - name: Install Inno Setup
         shell: pwsh
-        run: choco install innosetup --version 6.3.3 --no-progress -y
+        run: |
+          if (Get-Command ISCC.exe -ErrorAction SilentlyContinue) {
+            Write-Host "ISCC.exe already on PATH"
+          } else {
+            choco install innosetup --no-progress -y
+          }
 
       - name: Build installer
         shell: pwsh
