@@ -190,6 +190,15 @@ def main() -> None:
     api_key  = os.environ.get("SONIOX_API_KEY", "")
     start_url = BASE_URL if api_key else f"{BASE_URL}/setup"
 
+    # When spawned as a backend subprocess by the Electron shell, Electron
+    # already provides its own window and tray icon — running this
+    # launcher's own webbrowser.open()/pystray tray on top would pop up a
+    # duplicate browser tab and a second tray icon alongside the Electron
+    # app. The Electron main process sets this env var before spawning the
+    # exe specifically to suppress that; nothing else about the launcher
+    # changes (server startup, logging, config loading all stay identical).
+    electron_hosted = bool(os.environ.get("ELECTRON_HOST"))
+
     threading.Thread(target=_run_server, args=(stop,), daemon=True).start()
 
     if not _wait_ready():
@@ -200,10 +209,17 @@ def main() -> None:
         sys.exit(1)
 
     log.info("server ready  port=%d  url=%s", PORT, start_url)
-    threading.Thread(target=lambda: (time.sleep(0.5), webbrowser.open(start_url)),
-                     daemon=True).start()
-    _run_tray(stop)
+
+    if electron_hosted:
+        # Electron owns the window/tray; just keep the server thread alive
+        # until Electron kills this process (on quit) or sets `stop`.
+        stop.wait()
+    else:
+        threading.Thread(target=lambda: (time.sleep(0.5), webbrowser.open(start_url)),
+                         daemon=True).start()
+        _run_tray(stop)
     log.info("launcher exit")
+
 
 
 if __name__ == "__main__":

@@ -1,0 +1,161 @@
+name: Release Electron Desktop App
+
+on:
+  push:
+    tags:
+      - "electron-v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────
+      - uses: actions/checkout@v4
+
+      # ── 2. Node + frontend build ──────────────────────────────────────────
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install pnpm 9
+        shell: pwsh
+        run: npm install -g pnpm@9.12.0
+
+      - name: Install frontend deps
+        shell: pwsh
+        working-directory: frontend
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build frontend
+        shell: pwsh
+        working-directory: frontend
+        run: pnpm run build
+
+      - name: Verify frontend dist
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "frontend\dist\index.html")) {
+            throw "Frontend build failed — dist/index.html not found"
+          }
+          Write-Host "Frontend OK: $(Get-ChildItem frontend\dist -Recurse -File | Measure-Object).Count files"
+
+      # ── 3. Python + deps ─────────────────────────────────────────────────
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Python deps
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install packaging
+          pip install fastapi "uvicorn[standard]" websockets httpx python-dotenv structlog
+          pip install pyinstaller pystray pillow
+
+      # ── 4. PyInstaller backend exe ───────────────────────────────────────
+      # Reuses installer/spec.spec exactly as the existing Inno Setup
+      # pipeline (release.yml) does — no separate/duplicate spec file.
+      - name: Copy backend/app to root
+        shell: pwsh
+        run: |
+          Write-Host "Copying backend\app -> app\"
+          Copy-Item -Recurse -Force backend\app app
+          Write-Host "app\ contents: $(Get-ChildItem app | Select-Object -ExpandProperty Name)"
+
+      - name: Build with PyInstaller
+        shell: pwsh
+        run: |
+          $env:PYTHONPATH = "$pwd"
+          python -m PyInstaller `
+            installer\spec.spec `
+            --distpath dist_win `
+            --workpath build_win `
+            --noconfirm `
+            --log-level WARN
+
+      - name: Verify exe
+        shell: pwsh
+        run: |
+          $exe = "dist_win\SonioxLiveTranslate\SonioxLiveTranslate.exe"
+          if (Test-Path $exe) {
+            $mb = [math]::Round((Get-Item $exe).Length / 1MB, 1)
+            Write-Host "OK: SonioxLiveTranslate.exe ($mb MB)"
+          } else {
+            Write-Host "ERROR: exe not found. dist_win contents:"
+            Get-ChildItem dist_win -Recurse | Select-Object -First 20 | Select-Object FullName
+            exit 1
+          }
+
+      - name: Copy backend build into electron/resources/backend
+        shell: pwsh
+        run: |
+          $dest = "electron\resources\backend"
+          New-Item -ItemType Directory -Force -Path (Split-Path $dest) | Out-Null
+          Copy-Item -Recurse -Force "dist_win\SonioxLiveTranslate" $dest
+          Write-Host "Copied backend build to $dest"
+
+      # ── 5. Electron install + icons + package ────────────────────────────
+      - name: Install electron deps
+        shell: pwsh
+        working-directory: electron
+        run: npm install
+
+      - name: Build icons
+        shell: pwsh
+        working-directory: electron
+        run: npm run build:icons
+
+      - name: Build Electron installer (electron-builder, NSIS)
+        shell: pwsh
+        working-directory: electron
+        env:
+          # build-backend.mjs re-checks for an existing resources/backend and
+          # reuses it instead of re-running PyInstaller a second time, since
+          # we already built + copied it in the steps above.
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: electron-builder --win
+
+      - name: Verify electron-builder output
+        shell: pwsh
+        run: |
+          $f = Get-ChildItem electron\dist -Filter "*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($f) {
+            $mb = [math]::Round($f.Length / 1MB, 1)
+            Write-Host "Electron installer: $($f.Name) ($mb MB)"
+          } else {
+            Write-Host "electron\dist contents:"
+            Get-ChildItem electron\dist -ErrorAction SilentlyContinue
+            throw "No electron-builder .exe produced"
+          }
+
+      # ── 6. GitHub Release ─────────────────────────────────────────────────
+      - name: Upload installer to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          files: electron/dist/*.exe
+          generate_release_notes: true
+          body: |
+            ## Soniox Live Translate (Desktop / Electron) ${{ github.ref_name }}
+
+            Đây là bản cài đặt **desktop app độc lập** (Electron) — có cửa sổ,
+            icon riêng trên Desktop/Start Menu/Taskbar, không mở tab trình duyệt.
+
+            ### Cài đặt trên Windows
+            1. Tải file `.exe` bên dưới
+            2. Chạy installer → cài vào `Program Files`
+            3. Mở app từ Desktop / Start Menu
+            4. Lần đầu: nhập Soniox API key → **Save**
+
+            ### Yêu cầu
+            - Windows 10/11 (64-bit)
+            - Soniox API key: https://console.soniox.com
+            - Không cần cài Chrome/Edge — app chạy độc lập
+
+            > Bản cài đặt "cổ điển" (mở qua trình duyệt) vẫn được phát hành riêng
+            > qua tag `v*.*.*` (workflow `release.yml`) và không bị ảnh hưởng.
