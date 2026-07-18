@@ -2,8 +2,10 @@ import {
   TTS_SAMPLE_RATE,
   BARGE_RMS_THRESHOLD,
   BARGE_HOLD_MS,
+  BARGE_TTS_START_GRACE_MS,
   LANGUAGES,
   VOICES,
+
   type SonioxSttResponse,
   type Utterance,
   type AppMode,
@@ -255,6 +257,13 @@ let bargeRaf: number | null = null;
 let bargeHoldSince = 0;
 let bargeArmed = false;
 let micStream: MediaStream | null = null;
+// Timestamp of the most recent empty -> non-empty transition of
+// activeSources (i.e. a new TTS chunk started playing after silence).
+// Used to suppress barge-in during the initial grace window, since the
+// onset "pop" of TTS audio can be picked up by the mic as echo.
+let bargeTtsStartedAt = 0;
+let wasTtsAudible = false;
+
 
 function newUtt(): Utterance {
   return {
@@ -419,7 +428,14 @@ async function acquireInputStream(): Promise<MediaStream> {
     };
     return stream;
   }
-  return navigator.mediaDevices.getUserMedia({ audio: true });
+  // Explicit echo cancellation / noise suppression / auto gain control:
+  // without this, the mic can pick up the speaker's own TTS playback as
+  // echo, which the barge-in VAD then misreads as the user talking over
+  // the TTS.
+  return navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+  });
+
 }
 
 async function startRecorder(): Promise<void> {
@@ -495,6 +511,8 @@ function startBargeVad(stream: MediaStream): void {
   $bargeMeter.classList.remove("hidden");
   bargeHoldSince = 0;
   bargeArmed = false;
+  bargeTtsStartedAt = 0;
+  wasTtsAudible = false;
   tickBarge();
 }
 
@@ -514,14 +532,22 @@ function tickBarge(): void {
   const ttsAudible =
     activeSources.length > 0 || (state === "playing-file" && fileAudio != null && !fileAudio.paused);
 
-  if (rms > BARGE_RMS_THRESHOLD && ttsAudible) {
+  // A new TTS chunk just started playing after silence: remember when, so we
+  // can suppress barge-in for a short grace window (the onset "pop" of TTS
+  // audio can be picked up by the mic as echo and misread as the user
+  // talking over the TTS).
+  if (ttsAudible && !wasTtsAudible) bargeTtsStartedAt = now;
+  wasTtsAudible = ttsAudible;
+  const withinStartGrace = now - bargeTtsStartedAt < BARGE_TTS_START_GRACE_MS;
+
+  if (rms > BARGE_RMS_THRESHOLD && ttsAudible && !withinStartGrace) {
     if (bargeHoldSince === 0) bargeHoldSince = now;
     if (now - bargeHoldSince >= BARGE_HOLD_MS && !bargeArmed) {
       bargeArmed = true;
       $bargeBar.classList.add("armed");
       triggerBargeIn();
     }
-  } else if (rms <= BARGE_RMS_THRESHOLD * 0.6) {
+  } else if (rms <= BARGE_RMS_THRESHOLD * 0.6 || withinStartGrace) {
     bargeHoldSince = 0;
     if (bargeArmed) {
       bargeArmed = false;
