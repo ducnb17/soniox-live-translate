@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -25,7 +26,22 @@ TTS_KEEPALIVE_INTERVAL = 20
 # finalize the current TTS utterance stream quickly.
 MAX_ENDPOINT_DELAY_MS = 500
 
-TRANSCRIPT_DIR = Path(__file__).resolve().parent.parent / "transcripts"
+def _user_data_dir() -> Path:
+    """Per-user, always-writable data directory (mirrors config_store.py).
+
+    Never write next to the executable/installation — on Windows that is
+    typically Program Files, where a normal user has no write permission.
+    """
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    elif sys.platform == "darwin":
+        base = os.path.expanduser("~/Library/Application Support")
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return Path(base) / "SonioxLiveTranslate"
+
+
+TRANSCRIPT_DIR = _user_data_dir() / "transcripts"
 TRANSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
 
 VOICES = [

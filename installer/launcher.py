@@ -52,9 +52,18 @@ def _save_cfg(cfg: dict) -> None:
 
 
 # ── Apply saved config → env BEFORE importing app modules ─────────────────
+# NOTE: the canonical key name is the lowercase "soniox_api_key" — this is
+# what `backend/app/config_store.py` and the `/setup` HTTP route read and
+# write to this exact same config.json file. Historically this launcher
+# looked for "SONIOX_API_KEY" (uppercase) instead, so a key saved via the
+# in-browser /setup page was never picked up on the next launch, forcing
+# the user back to /setup every time. Accept both spellings so old config
+# files (if any) keep working too.
 _cfg = _load_cfg()
-if _cfg.get("SONIOX_API_KEY"):
-    os.environ.setdefault("SONIOX_API_KEY", _cfg["SONIOX_API_KEY"])
+_saved_api_key = _cfg.get("soniox_api_key") or _cfg.get("SONIOX_API_KEY")
+if _saved_api_key:
+    os.environ.setdefault("SONIOX_API_KEY", _saved_api_key)
+
 
 HOST = "127.0.0.1"
 PORT = int(_cfg.get("PORT", 8765))
@@ -114,15 +123,42 @@ def _run_tray(stop: threading.Event) -> None:
     icon.run()
 
 
+# ── Fatal-error reporting (never fail silently) ───────────────────────────
+def _report_fatal(context: str, exc: BaseException) -> None:
+    import traceback
+    tb = traceback.format_exc()
+    log.error("%s failed: %s\n%s", context, exc, tb)
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            msg = (
+                f"Soniox Live Translate failed to start.\n\n"
+                f"{context}: {exc}\n\n"
+                f"Details were written to:\n{_log_dir / 'app.log'}"
+            )
+            ctypes.windll.user32.MessageBoxW(None, msg, "Soniox Live Translate — Startup Error", 0x10)
+        except Exception:
+            pass
+
+
 # ── uvicorn server ────────────────────────────────────────────────────────
 def _run_server(stop: threading.Event) -> None:
-    import uvicorn
-    from app.main import app                    # noqa: PLC0415 — after sys.path
-    cfg = uvicorn.Config(app, host=HOST, port=PORT, log_level="warning", access_log=False)
-    srv = uvicorn.Server(cfg)
-    threading.Thread(target=lambda: (stop.wait(), setattr(srv, "should_exit", True)),
-                     daemon=True).start()
-    srv.run()
+    try:
+        import uvicorn
+        from app.main import app                # noqa: PLC0415 — after sys.path
+    except Exception as exc:
+        _report_fatal("Server import", exc)
+        stop.set()
+        return
+    try:
+        cfg = uvicorn.Config(app, host=HOST, port=PORT, log_level="warning", access_log=False)
+        srv = uvicorn.Server(cfg)
+        threading.Thread(target=lambda: (stop.wait(), setattr(srv, "should_exit", True)),
+                         daemon=True).start()
+        srv.run()
+    except Exception as exc:
+        _report_fatal("Server run", exc)
+        stop.set()
 
 
 # ── Entry point ───────────────────────────────────────────────────────────
@@ -134,7 +170,10 @@ def main() -> None:
     threading.Thread(target=_run_server, args=(stop,), daemon=True).start()
 
     if not _wait_ready():
-        log.error("server failed to start within 30s")
+        if not stop.is_set():
+            # _run_server didn't hit its own except branch (which already
+            # reported), so this is a plain startup timeout — report it too.
+            _report_fatal("Startup", RuntimeError("server did not become ready within 30s"))
         sys.exit(1)
 
     log.info("server ready  port=%d  url=%s", PORT, start_url)
@@ -145,4 +184,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:
+        # Last-resort catch-all: guarantees the user always sees *something*
+        # instead of the exe silently vanishing.
+        _report_fatal("Launcher", exc)
+        sys.exit(1)

@@ -7,7 +7,9 @@ import asyncio
 import base64
 import json
 import os
+import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import websockets
 from dotenv import load_dotenv
@@ -286,11 +288,19 @@ def _parse_context(context_b64: str | None) -> dict | None:
 
 
 # Serve the frontend as static files at /.
-# Prefer the Vite build output (frontend/dist/) if it exists; fall back to
-# the source frontend/ for dev and the no-build-step vanilla fallback.
-_frontend_dir = os.path.join(os.path.dirname(__file__), "..", "..", "frontend")
-_dist_dir = os.path.join(_frontend_dir, "dist")
-_static_dir = _dist_dir if os.path.isdir(_dist_dir) else _frontend_dir
+# When packaged by PyInstaller, `__file__` points into the app's PYZ and is
+# not a real filesystem path relative to the bundle root — the frontend
+# assets live at `<_MEIPASS>/frontend/dist` (see installer/spec.spec `datas`),
+# so that path must be resolved from `sys._MEIPASS` directly instead of via
+# `__file__` when frozen.
+if getattr(sys, "frozen", False):
+    _static_dir = str(Path(sys._MEIPASS) / "frontend" / "dist")  # type: ignore[attr-defined]
+else:
+    # Prefer the Vite build output (frontend/dist/) if it exists; fall back
+    # to the source frontend/ for dev and the no-build-step vanilla fallback.
+    _frontend_dir = os.path.join(os.path.dirname(__file__), "..", "..", "frontend")
+    _dist_dir = os.path.join(_frontend_dir, "dist")
+    _static_dir = _dist_dir if os.path.isdir(_dist_dir) else _frontend_dir
 app.mount(
     "/",
     StaticFiles(directory=_static_dir, html=True),
