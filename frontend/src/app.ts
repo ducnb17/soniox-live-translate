@@ -48,6 +48,7 @@ const $diarization = $<HTMLInputElement>("diarization");
 const $langId = $<HTMLInputElement>("lang-id");
 const $tts = $<HTMLInputElement>("tts");
 const $barge = $<HTMLInputElement>("barge");
+const $bargeHint = $<HTMLParagraphElement>("barge-hint");
 const $contextJson = $<HTMLTextAreaElement>("context-json");
 const $actionRow = document.querySelector<HTMLDivElement>(".action-row")!;
 const $actionBtn = $<HTMLButtonElement>("action");
@@ -434,7 +435,10 @@ async function startRecorder(): Promise<void> {
 
   mediaRecorder.start(100);
 
-  if ($barge.checked) startBargeVad(micStream);
+  // Barge-in only makes sense for microphone input: with tab/system audio,
+  // the "loud" signal we'd be listening to is the source audio itself, not
+  // the user's voice, so it would immediately (and repeatedly) self-trigger.
+  if ($barge.checked && $audioSource() === "microphone") startBargeVad(micStream);
 }
 
 // ---------------------------------------------------------------------------
@@ -673,10 +677,11 @@ function setState(s: AppState, message?: string): void {
   $diarization.disabled = busy;
   $langId.disabled = busy;
   $tts.disabled = busy;
-  $barge.disabled = busy;
   document.querySelectorAll<HTMLInputElement>("input[name=mode]").forEach((r) => (r.disabled = busy));
   document.querySelectorAll<HTMLInputElement>("input[name=audio-source]").forEach((r) => (r.disabled = busy));
+  syncBargeAvailability();
   if (message !== undefined) setStatus(message);
+
 
   else if (s === "recording") setStatus("Listening…");
   else if (s === "playing-file") setStatus("Playing audio…");
@@ -684,11 +689,33 @@ function setState(s: AppState, message?: string): void {
 }
 
 
+// Barge-in only applies to Microphone input (see startRecorder). Keep the
+// checkbox/meter in sync with the selected audio source: disable + uncheck
+// it for Tab/System audio, and simply re-enable (without forcing it back on)
+// for Microphone.
+function syncBargeAvailability(): void {
+  const isTab = $audioSource() === "tab";
+  if (isTab) {
+    $barge.checked = false;
+    $barge.disabled = true;
+    $bargeHint.classList.remove("hidden");
+    $bargeMeter.classList.add("hidden");
+  } else {
+    $barge.disabled = state !== "idle";
+    $bargeHint.classList.add("hidden");
+  }
+}
+
+document.querySelectorAll<HTMLInputElement>("input[name=audio-source]").forEach((r) =>
+  r.addEventListener("change", syncBargeAvailability),
+);
+
 function setMode(m: AppMode): void {
   mode = m;
   $actionRow.dataset.mode = m;
   $audioSourceBlock.classList.toggle("hidden", m !== "mic");
   if (state === "idle") setState("idle");
+  syncBargeAvailability();
 }
 
 
