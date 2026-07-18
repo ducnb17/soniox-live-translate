@@ -41,6 +41,7 @@ export interface SetupPayload {
 export type AppMode = "file" | "mic";
 export type AppState = "idle" | "recording" | "playing-file";
 export type TranslationMode = "one_way" | "two_way";
+export type AudioSource = "microphone" | "tab";
 
 export const TTS_SAMPLE_RATE = 24000;
 

@@ -219,6 +219,14 @@ and attaches it to a new GitHub Release automatically.
   `BARGE_RMS_THRESHOLD` / `BARGE_HOLD_MS` in `app.js` if needed.
 - Voice names are Soniox built-in voices ("Maya", "Adrian", …), multilingual
   across 60+ languages.
+- **Tab/System audio mode:** when translating a shared tab/screen (e.g. a
+  YouTube video), the browser has no API to attenuate the *source* tab's
+  volume from the capturing page — unlike file-playback mode, where
+  `fileAudio.volume` is lowered automatically once TTS starts. **Manually
+  turn down the original tab/video's volume** before or during the session
+  so the translated speech (TTS) stays intelligible instead of overlapping
+  with the original audio.
+
 
 ## Roadmap
 

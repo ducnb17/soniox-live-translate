@@ -9,7 +9,9 @@ import {
   type AppMode,
   type AppState,
   type TranslationMode,
+  type AudioSource,
 } from "./types";
+
 
 // UTF-8 safe base64 (handles non-ASCII context text).
 function b64Utf8(str: string): string {
@@ -28,7 +30,13 @@ const $ = <T extends HTMLElement>(id: string): T => {
 const $mode = (): TranslationMode =>
   (document.querySelector<HTMLInputElement>("input[name=mode]:checked")?.value as TranslationMode) || "one_way";
 
+const $audioSourceBlock = $<HTMLDivElement>("audio-source-block");
+const $audioSource = (): AudioSource =>
+  (document.querySelector<HTMLInputElement>("input[name=audio-source]:checked")?.value as AudioSource) ||
+  "microphone";
+
 const $targetLang = $<HTMLSelectElement>("target-language");
+
 const $langA = $<HTMLSelectElement>("lang-a");
 const $langB = $<HTMLSelectElement>("lang-b");
 const $oneWayBlock = $<HTMLDivElement>("one-way-block");
@@ -305,10 +313,27 @@ function openWebSocket(extraParams: Record<string, string> = {}): Promise<void> 
         showSessionInfo(sessionId);
         return;
       }
+      if (data.error_code || data.error_message) {
+        console.error("Server error:", data.error_code, data.error_message);
+        setState("idle", data.error_message || `Server error: ${data.error_code}`);
+        cleanup();
+        return;
+      }
       if (data.barge_ack) return;
       handleSttResult(data);
     } else {
       handleTtsAudio(new Uint8Array(event.data as ArrayBuffer));
+    }
+  };
+
+  ws.onclose = (event: CloseEvent) => {
+    if (state !== "idle") {
+      console.warn("WebSocket closed unexpectedly", event.code, event.reason);
+      setState(
+        "idle",
+        `Connection closed unexpectedly (code ${event.code}${event.reason ? ": " + event.reason : ""})`,
+      );
+      cleanup();
     }
   };
 
@@ -317,6 +342,7 @@ function openWebSocket(extraParams: Record<string, string> = {}): Promise<void> 
     ws!.onerror = () => reject(new Error("WebSocket error"));
   });
 }
+
 
 function showSessionInfo(id: string): void {
   $sessionId.textContent = id;
@@ -370,9 +396,35 @@ function handleSttResult(data: SonioxSttResponse): void {
 // ---------------------------------------------------------------------------
 // Recorder
 // ---------------------------------------------------------------------------
+async function acquireInputStream(): Promise<MediaStream> {
+  if ($audioSource() === "tab") {
+    if (!navigator.mediaDevices.getDisplayMedia) {
+      throw new Error("Tab/system audio capture is not supported in this browser.");
+    }
+    const displayStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+    // We only need audio — stop the video track(s) immediately.
+    displayStream.getVideoTracks().forEach((t) => t.stop());
+    const audioTracks = displayStream.getAudioTracks();
+    if (!audioTracks.length) {
+      displayStream.getTracks().forEach((t) => t.stop());
+      throw new Error(
+        "No audio track was shared. Please check the option to also share tab/system audio when selecting what to share.",
+      );
+    }
+    const stream = new MediaStream(audioTracks);
+    // Auto-stop the session if the user clicks the browser's native "Stop sharing" control.
+    audioTracks[0].onended = () => {
+      if (state !== "idle") stop();
+    };
+    return stream;
+  }
+  return navigator.mediaDevices.getUserMedia({ audio: true });
+}
+
 async function startRecorder(): Promise<void> {
-  micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  micStream = await acquireInputStream();
   mediaRecorder = new MediaRecorder(micStream);
+
 
   mediaRecorder.ondataavailable = (e: BlobEvent) => {
     if (e.data.size > 0 && ws && ws.readyState === WebSocket.OPEN) {
@@ -518,11 +570,11 @@ async function start(): Promise<void> {
     await startRecorder();
   } catch (err) {
     console.error(err);
-    setStatus(`Failed to start: ${(err as Error).message}`);
-    setState("idle");
+    setState("idle", `Failed to start: ${(err as Error).message}`);
     cleanup();
   }
 }
+
 
 async function playFile(): Promise<void> {
   const url = $audioUrl.value.trim();
@@ -551,11 +603,11 @@ async function playFile(): Promise<void> {
     await fileAudio.play();
   } catch (err) {
     console.error(err);
-    setStatus(`Failed to play file: ${(err as Error).message}`);
-    setState("idle");
+    setState("idle", `Failed to play file: ${(err as Error).message}`);
     cleanup();
   }
 }
+
 
 function stop(): void {
   setState("idle");
@@ -599,7 +651,7 @@ function cleanup(): void {
   }
 }
 
-function setState(s: AppState): void {
+function setState(s: AppState, message?: string): void {
   state = s;
   const busy = s !== "idle";
   if (busy) {
@@ -623,16 +675,22 @@ function setState(s: AppState): void {
   $tts.disabled = busy;
   $barge.disabled = busy;
   document.querySelectorAll<HTMLInputElement>("input[name=mode]").forEach((r) => (r.disabled = busy));
-  if (s === "recording") setStatus("Listening…");
+  document.querySelectorAll<HTMLInputElement>("input[name=audio-source]").forEach((r) => (r.disabled = busy));
+  if (message !== undefined) setStatus(message);
+
+  else if (s === "recording") setStatus("Listening…");
   else if (s === "playing-file") setStatus("Playing audio…");
   else setStatus("Ready");
 }
 
+
 function setMode(m: AppMode): void {
   mode = m;
   $actionRow.dataset.mode = m;
+  $audioSourceBlock.classList.toggle("hidden", m !== "mic");
   if (state === "idle") setState("idle");
 }
+
 
 function setStatus(msg: string): void {
   $status.textContent = msg;
