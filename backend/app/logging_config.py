@@ -54,11 +54,15 @@ def configure_logging(*, file_logging: bool = True, level: str = "INFO") -> None
         structlog.processors.StackInfoRenderer(),
     ]
 
-    # Console: pretty, colored — useful in dev.
+    # Console: pretty, colored — useful in dev. `sys.stdout` can be `None`
+    # in a windowed (console=False) PyInstaller build, so guard the
+    # `.isatty()` call instead of assuming a real stream is attached.
+    _stdout_isatty = bool(sys.stdout) and hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
     structlog.configure(
         processors=shared_processors + [
-            structlog.dev.ConsoleRenderer(colors=sys.stdout.isatty()),
+            structlog.dev.ConsoleRenderer(colors=_stdout_isatty),
         ],
+
         wrapper_class=structlog.make_filtering_bound_logger(
             _LEVELS.get(level.upper(), 20)
         ),

@@ -7,7 +7,30 @@ import os, sys, json, time, threading, webbrowser, logging
 from pathlib import Path
 
 
+# ── Fix stdout/stderr/stdin for windowed (console=False) PyInstaller apps ──
+# When built with console=False there is no console, so Python sets
+# sys.stdout/stderr/stdin to None. Many libraries (uvicorn's log color
+# autodetection among them) call e.g. `sys.stdout.isatty()` unconditionally,
+# which raises `AttributeError: 'NoneType' object has no attribute 'isatty'`.
+# Replace the None streams with a harmless no-op stream before anything else
+# (uvicorn, app.main, etc.) gets a chance to touch them.
+class _NullStream:
+    def write(self, *_a, **_k): return 0
+    def flush(self, *_a, **_k): pass
+    def isatty(self, *_a, **_k): return False
+    def fileno(self, *_a, **_k): raise OSError("no fileno for null stream")
+
+
+if sys.stdout is None:
+    sys.stdout = _NullStream()  # type: ignore[assignment]
+if sys.stderr is None:
+    sys.stderr = _NullStream()  # type: ignore[assignment]
+if sys.stdin is None:
+    sys.stdin = _NullStream()  # type: ignore[assignment]
+
+
 # ── Path resolution (frozen PyInstaller exe vs dev) ───────────────────────
+
 if getattr(sys, "frozen", False):
     # onedir: _MEIPASS == _internal/ dir next to the exe
     _MEIPASS = Path(sys._MEIPASS)  # type: ignore[attr-defined]
