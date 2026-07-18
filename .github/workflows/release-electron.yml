@@ -118,7 +118,7 @@ jobs:
           # reuses it instead of re-running PyInstaller a second time, since
           # we already built + copied it in the steps above.
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
-        run: electron-builder --win
+        run: npx electron-builder --win
 
       - name: Verify electron-builder output
         shell: pwsh
