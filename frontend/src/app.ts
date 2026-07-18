@@ -12,6 +12,7 @@ import {
   type AppState,
   type TranslationMode,
   type AudioSource,
+  type ConnectionStatus,
 } from "./types";
 
 
@@ -68,6 +69,21 @@ const $transcriptLink = $<HTMLAnchorElement>("transcript-link");
 const $dlJson = $<HTMLButtonElement>("dl-json");
 const $dlCsv = $<HTMLButtonElement>("dl-csv");
 const $themeToggle = $<HTMLButtonElement>("theme-toggle");
+const $inputDevice = $<HTMLSelectElement>("input-device");
+const $outputDevice = $<HTMLSelectElement>("output-device");
+const $btnTestInput = $<HTMLButtonElement>("btn-test-input");
+const $btnStopTestInput = $<HTMLButtonElement>("btn-stop-test-input");
+const $btnTestOutput = $<HTMLButtonElement>("btn-test-output");
+const $inputLevelMeter = $<HTMLDivElement>("input-level-meter");
+const $inputLevelBar = $<HTMLDivElement>("input-level-bar");
+const $connectionDot = $<HTMLDivElement>("connection-dot");
+const $btnRetry = $<HTMLButtonElement>("btn-retry");
+const $ttsProvider = $<HTMLSelectElement>("tts-provider-select");
+const $ttsVoice = $<HTMLSelectElement>("tts-voice-select");
+const $ttsApiKey = $<HTMLInputElement>("tts-api-key");
+const $ttsApiKeyRow = $<HTMLDivElement>("tts-api-key-row");
+const $btnSaveTtsKey = $<HTMLButtonElement>("btn-save-tts-key");
+const $ttsCostHint = $<HTMLParagraphElement>("tts-cost-hint");
 
 // ---------------------------------------------------------------------------
 // Populate selectors
@@ -97,6 +113,281 @@ populateLangs($langA, "en");
 populateLangs($langB, "es");
 populateVoices($voice, "Maya");
 populateVoices($voiceB, "Daniel");
+
+// ---------------------------------------------------------------------------
+// Device enumeration & selection
+// ---------------------------------------------------------------------------
+const INPUT_DEVICE_KEY = "soniox-input-device";
+const OUTPUT_DEVICE_KEY = "soniox-output-device";
+
+let isTestingMic = false;
+let testMicStream: MediaStream | null = null;
+let testMicRaf: number | null = null;
+
+function getSavedDeviceId(key: string): string {
+  try { return localStorage.getItem(key) || "default"; }
+  catch { return "default"; }
+}
+
+function saveDeviceId(key: string, id: string): void {
+  try { localStorage.setItem(key, id); } catch { /* storage disabled */ }
+}
+
+async function refreshDeviceList(): Promise<void> {
+  if (!navigator.mediaDevices?.enumerateDevices) return;
+
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const inputs = devices.filter(d => d.kind === "audioinput" && d.deviceId);
+  const outputs = devices.filter(d => d.kind === "audiooutput" && d.deviceId);
+
+  const savedInput = getSavedDeviceId(INPUT_DEVICE_KEY);
+  const savedOutput = getSavedDeviceId(OUTPUT_DEVICE_KEY);
+
+  populateDeviceSelect($inputDevice, inputs, savedInput);
+  populateDeviceSelect($outputDevice, outputs, savedOutput);
+
+  // Warn if saved device is gone
+  if (savedInput !== "default" && !inputs.some(d => d.deviceId === savedInput)) {
+    saveDeviceId(INPUT_DEVICE_KEY, "default");
+    setStatus("Selected microphone not found, switched to System Default");
+  }
+  if (savedOutput !== "default" && !outputs.some(d => d.deviceId === savedOutput)) {
+    saveDeviceId(OUTPUT_DEVICE_KEY, "default");
+    setStatus("Selected speaker not found, switched to System Default");
+  }
+}
+
+function populateDeviceSelect(select: HTMLSelectElement, devices: MediaDeviceInfo[], savedId: string): void {
+  select.innerHTML = "";
+  const defaultOpt = document.createElement("option");
+  defaultOpt.value = "default";
+  defaultOpt.textContent = "System Default";
+  select.appendChild(defaultOpt);
+
+  for (const d of devices) {
+    const opt = document.createElement("option");
+    opt.value = d.deviceId;
+    opt.textContent = d.label || `Device ${d.deviceId.slice(0, 8)}`;
+    select.appendChild(opt);
+  }
+  select.value = devices.some(d => d.deviceId === savedId) ? savedId : "default";
+}
+
+function onDeviceChange(): void {
+  $inputDevice.value = getSavedDeviceId(INPUT_DEVICE_KEY);
+  $outputDevice.value = getSavedDeviceId(OUTPUT_DEVICE_KEY);
+  refreshDeviceList();
+}
+
+$inputDevice.addEventListener("change", () => {
+  saveDeviceId(INPUT_DEVICE_KEY, $inputDevice.value);
+  refreshDeviceList();
+});
+
+$outputDevice.addEventListener("change", () => {
+  saveDeviceId(OUTPUT_DEVICE_KEY, $outputDevice.value);
+  refreshDeviceList();
+});
+
+// Test input mic with level meter
+async function startTestMic(): Promise<void> {
+  if (isTestingMic) return stopTestMic();
+  isTestingMic = true;
+  $btnTestInput.classList.add("hidden");
+  $btnStopTestInput.classList.remove("hidden");
+  $inputLevelMeter.classList.remove("hidden");
+
+  try {
+    const constraints: MediaStreamConstraints = { audio: true };
+    const devId = $inputDevice.value;
+    if (devId !== "default") {
+      constraints.audio = { deviceId: { exact: devId } };
+    }
+    testMicStream = await navigator.mediaDevices.getUserMedia(constraints);
+    const ctx = new AudioContext();
+    const source = ctx.createMediaStreamSource(testMicStream);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 256;
+    analyser.smoothingTimeConstant = 0.4;
+    source.connect(analyser);
+    const arr = new Uint8Array(analyser.frequencyBinCount);
+
+    function tick(): void {
+      if (!isTestingMic) { ctx.close(); return; }
+      analyser.getByteFrequencyData(arr);
+      let sum = 0;
+      for (let i = 0; i < arr.length; i++) sum += arr[i];
+      const avg = sum / arr.length;
+      const pct = Math.min(100, Math.round((avg / 255) * 200));
+      $inputLevelBar.style.width = `${pct}%`;
+      $inputLevelBar.classList.toggle("warn", pct > 50 && pct <= 80);
+      $inputLevelBar.classList.toggle("hot", pct > 80);
+      testMicRaf = requestAnimationFrame(tick);
+    }
+    tick();
+
+    // Auto-stop after 10s
+    setTimeout(() => { if (isTestingMic) stopTestMic(); }, 10000);
+  } catch (err) {
+    setStatus(`Mic test failed: ${(err as Error).message}`);
+    stopTestMic();
+  }
+}
+
+function stopTestMic(): void {
+  isTestingMic = false;
+  if (testMicRaf) cancelAnimationFrame(testMicRaf);
+  testMicRaf = null;
+  if (testMicStream) {
+    testMicStream.getTracks().forEach(t => t.stop());
+    testMicStream = null;
+  }
+  $btnTestInput.classList.remove("hidden");
+  $btnStopTestInput.classList.add("hidden");
+  $inputLevelMeter.classList.add("hidden");
+  $inputLevelBar.style.width = "0%";
+  $inputLevelBar.classList.remove("warn", "hot");
+}
+
+$btnTestInput.addEventListener("click", startTestMic);
+$btnStopTestInput.addEventListener("click", stopTestMic);
+
+// Test output speaker
+function testSpeaker(): void {
+  try {
+    const devId = $outputDevice.value;
+    const ctx = new AudioContext();
+    if (devId !== "default" && (ctx as any).setSinkId) {
+      (ctx as any).setSinkId(devId).then(() => playTestTone(ctx));
+    } else {
+      playTestTone(ctx);
+    }
+  } catch (err) {
+    setStatus(`Speaker test failed: ${(err as Error).message}`);
+  }
+}
+
+function playTestTone(ctx: AudioContext): void {
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = "sine";
+  osc.frequency.value = 440;
+  gain.gain.setValueAtTime(0.3, ctx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
+  osc.connect(gain);
+  gain.connect(ctx.destination);
+  osc.start(ctx.currentTime);
+  osc.stop(ctx.currentTime + 0.3);
+  setStatus("Playing test tone...");
+}
+
+$btnTestOutput.addEventListener("click", testSpeaker);
+
+// Initialize devices
+if (navigator.mediaDevices) {
+  refreshDeviceList();
+  navigator.mediaDevices.ondevicechange = onDeviceChange;
+}
+
+// ---------------------------------------------------------------------------
+// TTS Provider selection
+// ---------------------------------------------------------------------------
+let ttsProviders: any[] = [];
+let currentTtsProvider = "soniox";
+
+async function loadTtsProviders(): Promise<void> {
+  try {
+    const resp = await fetch("/api/tts/providers");
+    ttsProviders = await resp.json();
+    populateTtsProviderSelect();
+    // Also load config
+    const cfgResp = await fetch("/api/tts/config");
+    const cfg = await cfgResp.json();
+    currentTtsProvider = cfg.current_provider || "soniox";
+    $ttsProvider.value = currentTtsProvider;
+    await onTtsProviderChange();
+    // Set saved voice
+    if (cfg.current_voice) {
+      setTimeout(() => { $ttsVoice.value = cfg.current_voice; }, 200);
+    }
+  } catch {
+    setTimeout(loadTtsProviders, 3000);
+  }
+}
+
+function populateTtsProviderSelect(): void {
+  $ttsProvider.innerHTML = "";
+  for (const p of ttsProviders) {
+    const opt = document.createElement("option");
+    opt.value = p.id;
+    opt.textContent = `${p.name}${p.has_api_key ? " [key]" : ""}`;
+    $ttsProvider.appendChild(opt);
+  }
+}
+
+async function onTtsProviderChange(): Promise<void> {
+  const pid = $ttsProvider.value;
+  currentTtsProvider = pid;
+  const provider = ttsProviders.find(p => p.id === pid);
+
+  // Show/hide API key row
+  $ttsApiKeyRow.style.display = provider?.requires_api_key ? "block" : "none";
+
+  // Update cost hint
+  if (provider) {
+    $ttsCostHint.textContent = `Cost: ~$${provider.approximate_cost_per_1m_chars}/million chars`;
+  }
+
+  // Load voices
+  await loadTtsVoices(pid);
+}
+
+async function loadTtsVoices(providerId: string): Promise<void> {
+  $ttsVoice.innerHTML = '<option value="">Loading...</option>';
+  try {
+    const lang = $mode() === "two_way" ? $langB.value : $targetLang.value;
+    const resp = await fetch(`/api/tts/providers/${providerId}/voices?lang=${lang}`);
+    const voices = await resp.json();
+    $ttsVoice.innerHTML = "";
+    for (const v of voices) {
+      const opt = document.createElement("option");
+      opt.value = v.id;
+      opt.textContent = v.name;
+      $ttsVoice.appendChild(opt);
+    }
+  } catch {
+    $ttsVoice.innerHTML = '<option value="">Error loading</option>';
+  }
+}
+
+$ttsProvider.addEventListener("change", onTtsProviderChange);
+
+$btnSaveTtsKey.addEventListener("click", async () => {
+  const pid = $ttsProvider.value;
+  const key = $ttsApiKey.value.trim();
+  if (!key) return;
+  try {
+    await fetch("/api/tts/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider_id: pid, api_key: key }),
+    });
+    setStatus("API key saved");
+    $ttsApiKey.value = "";
+    await loadTtsProviders();
+  } catch (err) {
+    setStatus("Failed to save API key");
+  }
+});
+
+// Load providers on startup
+loadTtsProviders();
+
+$btnRetry.addEventListener("click", () => {
+  setConnectionStatus("idle");
+  stop();
+  setState("idle", "Ready — press Start to try again");
+});
 
 // ---------------------------------------------------------------------------
 // Mode toggle
@@ -246,6 +537,9 @@ let fileAudio: HTMLAudioElement | null = null;
 let fileTtsHeard = false;
 let ws: WebSocket | null = null;
 let sessionId: string | null = null;
+let connectionStatus: ConnectionStatus = "idle";
+let pendingAudioBlobs: Blob[] = [];
+let manualStopRequested = false;
 
 // Scheduled TTS audio sources for barge-in interrupt.
 let activeSources: AudioBufferSourceNode[] = [];
@@ -279,6 +573,15 @@ function newUtt(): Utterance {
 // ---------------------------------------------------------------------------
 // WebSocket
 // ---------------------------------------------------------------------------
+function flushPendingAudio(): void {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    for (const blob of pendingAudioBlobs) {
+      try { ws.send(blob); } catch { break; }
+    }
+  }
+  pendingAudioBlobs = [];
+}
+
 function openWebSocket(extraParams: Record<string, string> = {}): Promise<void> {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const m = $mode();
@@ -311,6 +614,16 @@ function openWebSocket(extraParams: Record<string, string> = {}): Promise<void> 
     }
   }
 
+  // Pass device selection to backend
+  params.set("input_device", $inputDevice.value);
+  params.set("output_device", $outputDevice.value);
+  params.set("tts_provider", $ttsProvider.value);
+
+  // Use TTS provider voice for one-way, or fallback to Soniox voices
+  const ttsVoice = currentTtsProvider === "soniox" ? $voice.value : $ttsVoice.value;
+  params.set("voice", ttsVoice);
+  params.set("voice_b", currentTtsProvider === "soniox" ? $voiceB.value : ttsVoice);
+
   const url = `${proto}//${location.host}/ws/translate?${params}`;
   ws = new WebSocket(url);
   ws.binaryType = "arraybuffer";
@@ -318,18 +631,52 @@ function openWebSocket(extraParams: Record<string, string> = {}): Promise<void> 
   ws.onmessage = (event: MessageEvent) => {
     if (typeof event.data === "string") {
       const data: SonioxSttResponse = JSON.parse(event.data);
+
       if (data.session_id) {
         sessionId = data.session_id;
         showSessionInfo(sessionId);
         return;
       }
+
+      if (data.reconnecting) {
+        setConnectionStatus("reconnecting");
+        setStatus(`Đang kết nối lại… (lần ${data.attempt}/${data.max_attempts})`);
+        return;
+      }
+
+      if (data.reconnected) {
+        setConnectionStatus("connected");
+        setStatus(`Đã kết nối lại sau ${((data.downtime_ms || 0) / 1000).toFixed(1)}s`);
+        // Insert downtime marker in transcript if provided
+        if (data.downtime_text) {
+          currentUtt.originalFinal += data.downtime_text;
+          render();
+        }
+        // Flush any buffered audio
+        flushPendingAudio();
+        return;
+      }
+
+      if (data.reconnect_failed) {
+        setConnectionStatus("failed");
+        setStatus(data.error_message || "Không thể kết nối lại.");
+        return;
+      }
+
       if (data.error_code || data.error_message) {
         console.error("Server error:", data.error_code, data.error_message);
-        setState("idle", data.error_message || `Server error: ${data.error_code}`);
+        const friendlyMsg = data.error_message
+          ? data.error_message.replace(/code \d+/g, "").replace(/\(.*\)/g, "").trim()
+          : "Lỗi kết nối. Vui lòng thử lại.";
+        setState("idle", friendlyMsg);
         cleanup();
         return;
       }
       if (data.barge_ack) return;
+      if (data.session_done) {
+        stop();
+        return;
+      }
       handleSttResult(data);
     } else {
       handleTtsAudio(new Uint8Array(event.data as ArrayBuffer));
@@ -337,14 +684,15 @@ function openWebSocket(extraParams: Record<string, string> = {}): Promise<void> 
   };
 
   ws.onclose = (event: CloseEvent) => {
-    if (state !== "idle") {
-      console.warn("WebSocket closed unexpectedly", event.code, event.reason);
-      setState(
-        "idle",
-        `Connection closed unexpectedly (code ${event.code}${event.reason ? ": " + event.reason : ""})`,
-      );
-      cleanup();
+    if (manualStopRequested) {
+      setConnectionStatus("idle");
+      return;
     }
+    // Don't set idle immediately — backend may be reconnecting.
+    // The backend will send reconnecting/reconnected/reconnect_failed messages.
+    // If backend reconnects, the WS will be replaced so onclose on this ws is fine.
+    // If backend fails, we'll get reconnect_failed which calls cleanup.
+    console.log("WebSocket closed", event.code, event.reason);
   };
 
   return new Promise<void>((resolve, reject) => {
@@ -432,9 +780,14 @@ async function acquireInputStream(): Promise<MediaStream> {
   // without this, the mic can pick up the speaker's own TTS playback as
   // echo, which the barge-in VAD then misreads as the user talking over
   // the TTS.
-  return navigator.mediaDevices.getUserMedia({
+  const constraints: MediaStreamConstraints = {
     audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-  });
+  };
+  const devId = $inputDevice.value;
+  if (devId !== "default") {
+    (constraints.audio as MediaTrackConstraints).deviceId = { exact: devId };
+  }
+  return navigator.mediaDevices.getUserMedia(constraints);
 
 }
 
@@ -444,8 +797,14 @@ async function startRecorder(): Promise<void> {
 
 
   mediaRecorder.ondataavailable = (e: BlobEvent) => {
-    if (e.data.size > 0 && ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(e.data);
+    if (e.data.size > 0) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(e.data);
+      } else if (connectionStatus === "reconnecting") {
+        if (pendingAudioBlobs.length < 100) {
+          pendingAudioBlobs.push(e.data);
+        }
+      }
     }
   };
 
@@ -584,6 +943,10 @@ function stopBargeVad(): void {
 // ---------------------------------------------------------------------------
 function resetSession(): void {
   audioCtx = new AudioContext({ sampleRate: TTS_SAMPLE_RATE });
+  const devId = $outputDevice.value;
+  if (devId !== "default" && audioCtx && typeof (audioCtx as any).setSinkId === "function") {
+    (audioCtx as any).setSinkId(devId).catch(() => {});
+  }
   nextPlayTime = 0;
   utterances = [];
   currentUtt = newUtt();
@@ -593,7 +956,9 @@ function resetSession(): void {
 
 async function start(): Promise<void> {
   setState("recording");
+  manualStopRequested = false;
   resetSession();
+  setConnectionStatus("connected");
 
   try {
     await openWebSocket();
@@ -640,13 +1005,17 @@ async function playFile(): Promise<void> {
 
 
 function stop(): void {
+  manualStopRequested = true;
   setState("idle");
+  setConnectionStatus("idle");
   cleanup();
 }
 
 function cleanup(): void {
   // Auto-save completed utterances to session history
   saveToHistory([...utterances, currentUtt], $mode(), $targetLang.value);
+
+  pendingAudioBlobs = [];
 
   if (ws && ws.readyState === WebSocket.OPEN) {
     try {
@@ -747,6 +1116,15 @@ function setMode(m: AppMode): void {
 
 function setStatus(msg: string): void {
   $status.textContent = msg;
+}
+
+function setConnectionStatus(s: ConnectionStatus): void {
+  connectionStatus = s;
+  $connectionDot.classList.toggle("hidden", s === "idle");
+  $connectionDot.classList.toggle("green", s === "connected");
+  $connectionDot.classList.toggle("yellow", s === "reconnecting");
+  $connectionDot.classList.toggle("red", s === "failed");
+  $btnRetry.classList.toggle("hidden", s !== "failed");
 }
 
 // ---------------------------------------------------------------------------

@@ -32,3 +32,7 @@ frontend/node_modules/
 
 # CI-generated (backend/app copied to root for PyInstaller)
 /app/
+
+# PyInstaller outputs
+dist_win/
+build_win/

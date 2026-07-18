@@ -11,6 +11,7 @@ import httpx
 import websockets
 from fastapi import WebSocket, WebSocketDisconnect
 
+from .config import STT_KEEPALIVE_INTERVAL
 from .logging_config import get_logger
 
 log = get_logger("stt")
@@ -101,11 +102,17 @@ async def handle_stt(
     lang_b: str | None,
     target_lang: str | None,
     on_endpoint: Callable[[], Awaitable[None]] | None = None,
+    on_final_segment: Callable[[dict], Awaitable[None]] | None = None,
 ) -> None:
     """Read STT responses: forward to browser, route tokens to TTS queue,
-    and call `on_endpoint` whenever an <end> token closes an utterance
-    (used by transcript persistence)."""
+    call `on_endpoint` whenever an <end> token closes an utterance,
+    and call `on_final_segment` with accumulated text when utterance ends."""
     text_pushed = False
+    current_original = ""
+    current_translation = ""
+    current_speaker = None
+    current_lang = None
+    utterance_start_ms: int | None = None
     try:
         while True:
             message = await stt_ws.recv()
@@ -116,22 +123,58 @@ async def handle_stt(
                 log.error("stt_error", error_code=data["error_code"], error_message=data["error_message"])
                 break
 
-            if tts_queue is not None:
+            got_end = False
+            for token in data.get("tokens", []):
+                text = token.get("text")
+                if not text:
+                    continue
+
+                if token.get("speaker") is not None and current_speaker is None:
+                    current_speaker = token["speaker"]
+                if token.get("language") and not current_lang:
+                    current_lang = token["language"]
+                if utterance_start_ms is None:
+                    utterance_start_ms = data.get("start_time_ms") or 0
+
+                if text == "<end>":
+                    got_end = True
+                    direction = _direction(token, mode, lang_a, lang_b)
+                    await tts_queue.put((TTS_END, direction))
+                    if on_endpoint is not None:
+                        await on_endpoint()
+                    if on_final_segment is not None and (current_original or current_translation):
+                        await on_final_segment({
+                            "original_text": current_original,
+                            "translated_text": current_translation,
+                            "speaker_label": str(current_speaker) if current_speaker is not None else None,
+                            "source_lang": current_lang,
+                            "started_at_ms": utterance_start_ms,
+                            "ended_at_ms": data.get("end_time_ms") or (utterance_start_ms or 0) + 2000,
+                        })
+                        current_original = ""
+                        current_translation = ""
+                        current_speaker = None
+                        current_lang = None
+                        utterance_start_ms = None
+                elif token.get("translation_status") == "translation":
+                    if token.get("is_final"):
+                        current_translation += text
+                    target = _resolve_tts_target(
+                        token, mode, lang_a, lang_b, target_lang
+                    )
+                    await tts_queue.put((TTS_TEXT, text, target))
+                    text_pushed = True
+                else:
+                    if token.get("is_final"):
+                        current_original += text
+
+            if tts_queue is not None and not got_end:
                 for token in data.get("tokens", []):
                     text = token.get("text")
-                    if not text:
+                    if not text or text == "<end>" or token.get("translation_status") == "translation":
                         continue
-                    if text == "<end>":
-                        direction = _direction(token, mode, lang_a, lang_b)
-                        await tts_queue.put((TTS_END, direction))
-                        if on_endpoint is not None:
-                            await on_endpoint()
-                    elif token.get("translation_status") == "translation":
-                        target = _resolve_tts_target(
-                            token, mode, lang_a, lang_b, target_lang
-                        )
-                        await tts_queue.put((TTS_TEXT, text, target))
-                        text_pushed = True
+                    text_pushed = True
+
             if data.get("finished"):
                 break
     except (WebSocketDisconnect, RuntimeError, websockets.ConnectionClosedOK):
@@ -175,7 +218,20 @@ def _direction(token: dict, mode: str, lang_a: str | None, lang_b: str | None) -
     Returns the target language for two_way (the speaker's *other* language),
     or None for one_way (single direction)."""
     if mode != "two_way":
-        return None
+    return None
+
+
+async def stt_keepalive(stt_ws) -> None:
+    """Send periodic keepalive pings to the STT WebSocket to prevent
+    server-side timeout (code 1011: keepalive ping timeout)."""
+    try:
+        while True:
+            await asyncio.sleep(STT_KEEPALIVE_INTERVAL)
+            await stt_ws.send(json.dumps({"keep_alive": True}))
+    except websockets.ConnectionClosedOK:
+        pass
+    except websockets.ConnectionClosedError as e:
+        log.warning("stt_keepalive_stopped", error=str(e))
     src = token.get("source_language")
     if src == lang_a:
         return lang_b

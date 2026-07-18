@@ -62,3 +62,47 @@ def get_api_key() -> str:
 def is_configured() -> bool:
     key = get_api_key()
     return bool(key) and key != "your_key_here"
+
+
+def get_tts_api_key(provider_id: str) -> str | None:
+    cfg = load_config()
+    keys = cfg.get("tts_api_keys", {})
+    return keys.get(provider_id)
+
+
+def set_tts_api_key(provider_id: str, key: str) -> None:
+    cfg = load_config()
+    if "tts_api_keys" not in cfg:
+        cfg["tts_api_keys"] = {}
+    cfg["tts_api_keys"][provider_id] = key
+    save_config(cfg)
+
+
+def remove_tts_api_key(provider_id: str) -> None:
+    cfg = load_config()
+    cfg.get("tts_api_keys", {}).pop(provider_id, None)
+    save_config(cfg)
+
+
+def get_tts_provider() -> str:
+    return load_config().get("tts_provider", "soniox")
+
+
+def set_tts_provider(provider_id: str) -> None:
+    cfg = load_config()
+    cfg["tts_provider"] = provider_id
+    save_config(cfg)
+
+
+def get_tts_voice(provider_id: str) -> str:
+    cfg = load_config()
+    voices = cfg.get("tts_voices", {})
+    return voices.get(provider_id, "Maya" if provider_id == "soniox" else "")
+
+
+def set_tts_voice(provider_id: str, voice: str) -> None:
+    cfg = load_config()
+    if "tts_voices" not in cfg:
+        cfg["tts_voices"] = {}
+    cfg["tts_voices"][provider_id] = voice
+    save_config(cfg)

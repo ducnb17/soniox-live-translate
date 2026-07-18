@@ -22,6 +22,10 @@ TTS_AUDIO_FORMAT = "pcm_s16le"
 # Keepalive cadence for the idle TTS WebSocket connection (seconds).
 TTS_KEEPALIVE_INTERVAL = 20
 
+# Keepalive cadence for the STT WebSocket connection (seconds).
+# Soniox requires keepalive pings to prevent timeout disconnects (code 1011).
+STT_KEEPALIVE_INTERVAL = 15
+
 # Endpointing: fires the <end> token when the speaker pauses, letting us
 # finalize the current TTS utterance stream quickly.
 MAX_ENDPOINT_DELAY_MS = 500

@@ -721,3 +721,28 @@ textarea#context-json {
 [data-theme="dark"] .history-item { background: var(--surface-2); border-color: var(--border); }
 [data-theme="dark"] .hbtn { background: var(--surface); border-color: var(--border-soft); color: var(--text-muted); }
 [data-theme="dark"] .hbtn-view:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+/* ── Device selection ── */
+.device-row { margin-bottom: 8px; }
+.device-row label { display: block; font-size: 11px; font-weight: 600; margin-bottom: 3px; color: #6b7280; text-transform: uppercase; letter-spacing: .05em; }
+.device-row select { width: 100%; padding: 6px 8px; font-size: 12px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); color: var(--text); }
+.device-test-row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.test-btn { font-size: 11px; padding: 3px 10px; border-radius: 6px; border: 1px solid #d1d5db; background: #fff; color: #374151; cursor: pointer; white-space: nowrap; }
+.test-btn:hover { background: #f3f4f6; }
+.level-meter { width: 80px; height: 6px; background: #e5e7eb; border-radius: 3px; overflow: hidden; flex-shrink: 0; }
+.level-bar { width: 0%; height: 100%; background: #22c55e; border-radius: 3px; transition: width 0.05s linear; }
+.level-bar.warn { background: #eab308; }
+.level-bar.hot { background: #ef4444; }
+
+/* ── Connection status ── */
+.connection-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-left: 6px; flex-shrink: 0; }
+.connection-dot.green { background: #22c55e; }
+.connection-dot.yellow { background: #eab308; animation: pulse-dot 1s infinite; }
+.connection-dot.red { background: #ef4444; }
+@keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+/* Dark mode overrides */
+[data-theme="dark"] .test-btn { background: var(--surface); border-color: var(--border-soft); color: var(--text-muted); }
+[data-theme="dark"] .test-btn:hover { background: var(--surface-2); color: var(--text); }
+[data-theme="dark"] .level-meter { background: var(--surface-2); }
+[data-theme="dark"] .device-row select { background: var(--surface); border-color: var(--border-soft); color: var(--text); }

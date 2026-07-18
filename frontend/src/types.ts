@@ -15,6 +15,16 @@ export interface SonioxSttResponse {
   session_done?: boolean;
   session_id?: string;
   barge_ack?: boolean;
+  reconnecting?: boolean;
+  attempt?: number;
+  max_attempts?: number;
+  downtime_start?: number;
+  reconnected?: boolean;
+  downtime_ms?: number;
+  downtime_text?: string;
+  reconnect_failed?: boolean;
+  max_retries?: number;
+  error_message_plain?: string;
 }
 
 export interface Utterance {
@@ -42,6 +52,20 @@ export type AppMode = "file" | "mic";
 export type AppState = "idle" | "recording" | "playing-file";
 export type TranslationMode = "one_way" | "two_way";
 export type AudioSource = "microphone" | "tab";
+
+export interface DeviceOption {
+  deviceId: string;
+  label: string;
+  kind: "audioinput" | "audiooutput";
+}
+
+export type ConnectionStatus = "connected" | "reconnecting" | "failed" | "idle";
+
+export interface DeviceOption {
+  deviceId: string;
+  label: string;
+  kind: "audioinput" | "audiooutput";
+}
 
 export const TTS_SAMPLE_RATE = 24000;
 

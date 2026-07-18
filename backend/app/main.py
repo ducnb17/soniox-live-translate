@@ -7,7 +7,9 @@ import asyncio
 import base64
 import json
 import os
+import random
 import sys
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -19,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import LANGUAGES, SONIOX_API_KEY, STT_URL, TTS_URL, VOICES, is_configured, set_api_key
 from .context_builder import build_stt_config
-from .stt import handle_stt, pipe_browser_to_stt, stream_url_to_stt
+from .stt import handle_stt, pipe_browser_to_stt, stt_keepalive, stream_url_to_stt
 from .tts import (
     new_tts_state,
     pipe_tts_to_browser,
@@ -30,7 +32,34 @@ from .tts import (
 )
 from .transcript import TranscriptStore
 from .config_store import save_config, load_config, is_configured as store_is_configured
+from .config_store import (
+    get_tts_api_key,
+    set_tts_api_key,
+    remove_tts_api_key,
+    get_tts_provider,
+    set_tts_provider,
+    get_tts_voice,
+    set_tts_voice,
+)
 from .logging_config import configure_logging, get_logger
+from .tts_provider import get_provider, get_available_providers
+from .db import (
+    init_db,
+    close_db,
+    create_conversation,
+    update_conversation,
+    add_connection_event,
+    add_segment,
+    get_conversation,
+    list_conversations,
+    delete_conversation,
+    search_conversations,
+    export_conversation_txt,
+    export_conversation_srt,
+    export_conversation_json,
+    cleanup_old_conversations,
+    get_db_stats,
+)
 
 load_dotenv(override=True)
 configure_logging()
@@ -41,7 +70,9 @@ transcript_store = TranscriptStore()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    await init_db()
     yield
+    await close_db()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -105,6 +136,123 @@ async def get_transcript(session_id: str) -> JSONResponse:
     return JSONResponse(session.payload())
 
 
+@app.get("/api/conversations")
+async def api_list_conversations(limit: int = 50, offset: int = 0) -> JSONResponse:
+    convs = await list_conversations(limit=limit, offset=offset)
+    return JSONResponse(convs)
+
+
+@app.get("/api/conversations/search")
+async def api_search_conversations(q: str = "", limit: int = 50) -> JSONResponse:
+    if not q.strip():
+        return JSONResponse([])
+    convs = await search_conversations(q.strip(), limit=limit)
+    return JSONResponse(convs)
+
+
+@app.get("/api/conversations/{conversation_id}")
+async def api_get_conversation(conversation_id: str) -> JSONResponse:
+    conv = await get_conversation(conversation_id)
+    if conv is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse(conv)
+
+
+@app.delete("/api/conversations/{conversation_id}")
+async def api_delete_conversation(conversation_id: str) -> JSONResponse:
+    await delete_conversation(conversation_id)
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/conversations/{conversation_id}/export")
+async def api_export_conversation(
+    conversation_id: str, format: str = "json"
+) -> JSONResponse | FileResponse:
+    if format == "json":
+        content = await export_conversation_json(conversation_id)
+        return JSONResponse(json.loads(content))
+    elif format == "txt":
+        content = await export_conversation_txt(conversation_id)
+        return JSONResponse({"format": "txt", "content": content})
+    elif format == "srt":
+        content = await export_conversation_srt(conversation_id)
+        return JSONResponse({"format": "srt", "content": content})
+    else:
+        return JSONResponse({"error": f"Unsupported format: {format}"}, status_code=400)
+
+
+@app.post("/api/retention/cleanup")
+async def api_cleanup(max_age_days: int = 30) -> JSONResponse:
+    deleted = await cleanup_old_conversations(max_age_days=max_age_days)
+    return JSONResponse({"deleted": deleted})
+
+
+@app.get("/api/retention/stats")
+async def api_retention_stats() -> JSONResponse:
+    stats = await get_db_stats()
+    return JSONResponse(stats)
+
+
+@app.get("/api/tts/providers")
+async def api_tts_providers() -> JSONResponse:
+    providers = get_available_providers()
+    result = [
+        {
+            "id": p.id,
+            "name": p.name,
+            "description": p.description,
+            "requires_api_key": p.requires_api_key,
+            "supports_streaming": p.supports_streaming,
+            "pricing_url": p.pricing_url,
+            "approximate_cost_per_1m_chars": p.approximate_cost_per_1m_chars,
+            "has_api_key": bool(get_tts_api_key(p.id)),
+        }
+        for p in providers
+    ]
+    return JSONResponse(result)
+
+
+@app.get("/api/tts/providers/{provider_id}/voices")
+async def api_tts_provider_voices(provider_id: str, lang: str = "en") -> JSONResponse:
+    api_key = get_tts_api_key(provider_id)
+    provider = get_provider(provider_id, api_key=api_key)
+    if provider is None:
+        return JSONResponse({"error": f"Unknown provider: {provider_id}"}, status_code=404)
+    voices = await provider.list_voices(lang=lang)
+    return JSONResponse([
+        {"id": v.id, "name": v.name, "language": v.language, "gender": v.gender}
+        for v in voices
+    ])
+
+
+@app.post("/api/tts/config")
+async def api_tts_config(payload: dict = Body(...)) -> JSONResponse:
+    provider_id = payload.get("provider_id")
+    api_key = payload.get("api_key", "").strip()
+    if provider_id and api_key:
+        set_tts_api_key(provider_id, api_key)
+    if provider_id:
+        set_tts_provider(provider_id)
+    if "voice" in payload and provider_id:
+        set_tts_voice(provider_id, payload["voice"])
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/tts/config")
+async def api_get_tts_config() -> JSONResponse:
+    providers = get_available_providers()
+    provider_keys = {}
+    for p in providers:
+        key = get_tts_api_key(p.id)
+        if key:
+            provider_keys[p.id] = key[:4] + "****" + key[-4:] if len(key) > 8 else "****"
+    return JSONResponse({
+        "current_provider": get_tts_provider(),
+        "current_voice": get_tts_voice(get_tts_provider()),
+        "configured_providers": provider_keys,
+    })
+
+
 @app.websocket("/ws/translate")
 async def translation_websocket(
     browser_ws: WebSocket,
@@ -120,19 +268,10 @@ async def translation_websocket(
     context_b64: str | None = None,
     audio_url: str | None = None,
     audio_duration: float | None = None,
+    input_device: str | None = None,
+    output_device: str | None = None,
+    tts_provider: str = "soniox",
 ) -> None:
-    """Open a translation session: browser <-> Soniox STT+TTS over WebSocket.
-
-    The browser streams raw audio bytes (binary frames) to STT, and the
-    backend proxies tokens + synthesized PCM back. Text frames from the
-    browser ({"type":"utterances",...} / {"type":"barge"}) are intercepted
-    by the single ingress coroutine to avoid two receivers racing.
-
-    Two-way mode: `lang_a` and `lang_b` describe the conversation pair. TTS
-    runs in both directions — Speaker A's utterances are spoken in `lang_b`
-    (with `voice_b` if provided else `voice`), Speaker B's in `lang_a` (with
-    `voice`). One-way: a single TTS direction `target_lang` with `voice`.
-    """
     await browser_ws.accept()
 
     if not is_configured():
@@ -156,7 +295,6 @@ async def translation_websocket(
         context=context,
     )
 
-    # Resolve the active TTS directions and per-direction voices.
     if mode == "two_way":
         if not lang_a or not lang_b:
             await browser_ws.send_json(
@@ -176,104 +314,306 @@ async def translation_websocket(
     session = transcript_store.new()
     await browser_ws.send_json({"session_id": session.id})
 
+    # Create DB conversation record on first connection
+    conv_id = session.id
+    conv_started = int(time.time() * 1000)
+    await create_conversation(
+        id=conv_id,
+        started_at=conv_started,
+        mode=mode,
+        target_lang=target_lang,
+        source_lang=lang_a if mode == "two_way" else None,
+        input_device=input_device,
+        output_device=output_device,
+        tts_provider=tts_provider,
+        tts_voice=voice,
+    )
+    # Track total segments for offset
+    segment_count = 0
+
+    async def on_final_segment(seg: dict) -> None:
+        nonlocal segment_count
+        await add_segment(
+            conversation_id=conv_id,
+            original_text=seg["original_text"],
+            translated_text=seg.get("translated_text"),
+            speaker_label=seg.get("speaker_label"),
+            source_lang=seg.get("source_lang"),
+            started_at_ms=seg.get("started_at_ms"),
+            ended_at_ms=seg.get("ended_at_ms"),
+            is_final=True,
+        )
+        segment_count += 1
+
     tts_queue: asyncio.Queue | None = asyncio.Queue() if tts else None
     tts_state: dict = new_tts_state(directions)
 
-    stt_ws = None
-    tts_ws = None
+    # Audio buffer for pending data during reconnection (mic mode only).
+    audio_buffer: bytearray = bytearray()
+    MAX_AUDIO_BUFFER_BYTES = 500 * 1024  # 500 KB max buffer
 
-    try:
-        stt_ws = await websockets.connect(STT_URL)
-        await stt_ws.send(json.dumps(stt_config))
+    # Pre-compute input coroutine factory for mic mode.
+    _on_text: dict = {}
 
+    async def on_text(data: dict) -> None:
+        if data.get("type") == "utterances":
+            session.add_many(data.get("utterances", []))
+        elif data.get("type") == "barge":
+            if tts_queue is not None:
+                await trigger_barge(tts_queue, tts_state)
+                try:
+                    await browser_ws.send_json({"barge_ack": True})
+                except Exception:
+                    pass
+
+    _on_text["fn"] = on_text
+
+    async def do_browser_to_stt(stt_ws):
         if audio_url and audio_duration:
-            input_coro = stream_url_to_stt(
+            await stream_url_to_stt(
                 audio_url=audio_url,
                 duration=audio_duration,
                 browser_ws=browser_ws,
                 stt_ws=stt_ws,
             )
-        else:
-            async def on_text(data: dict) -> None:
-                if data.get("type") == "utterances":
-                    session.add_many(data.get("utterances", []))
-                elif data.get("type") == "barge":
-                    if tts_queue is not None:
-                        await trigger_barge(tts_queue, tts_state)
-                        try:
-                            await browser_ws.send_json({"barge_ack": True})
-                        except Exception:
-                            pass
+            return
+        await pipe_browser_to_stt(
+            browser_ws=browser_ws, stt_ws=stt_ws, on_text=_on_text["fn"]
+        )
 
-            input_coro = pipe_browser_to_stt(
-                browser_ws=browser_ws, stt_ws=stt_ws, on_text=on_text
+    # Reconnection parameters
+    MAX_RETRIES = 5
+    BASE_DELAY = 0.5
+    MAX_DELAY = 10.0
+
+    retry_count = 0
+    downtime_start = 0.0
+    first_connection = True
+    browser_disconnected = False
+
+    while True:
+        stt_ws = None
+        tts_ws = None
+        is_reconnect = not first_connection
+
+        try:
+            # Connect to Soniox STT
+            stt_ws = await websockets.connect(
+                STT_URL, ping_interval=10, ping_timeout=10, close_timeout=5
             )
+            await stt_ws.send(json.dumps(stt_config))
 
-        if tts:
-            tts_ws = await websockets.connect(TTS_URL)
-            # Pre-warm every direction's TTS stream so the first utterance in
-            # each direction doesn't pay the round-trip for stream setup.
-            for direction in directions:
-                await prewarm_stream(
-                    tts_ws=tts_ws,
-                    tts_state=tts_state,
-                    direction=direction,
-                    voice=direction_voices[direction],
+            if is_reconnect:
+                # Report reconnection success
+                downtime_ms = int((time.monotonic() - downtime_start) * 1000)
+                await _safe_send_json(browser_ws, {
+                    "reconnected": True,
+                    "downtime_ms": downtime_ms,
+                    "downtime_text": f"[mất kết nối ~{downtime_ms/1000:.1f}s]",
+                })
+                log.info("stt_reconnected", retry_count=retry_count, downtime_ms=downtime_ms)
+                await add_connection_event(
+                    conversation_id=conv_id,
+                    soniox_session_id=session.id,
+                    event_type="reconnect",
+                    occurred_at=int(time.time() * 1000),
+                )
+                # Flush buffered audio
+                if audio_buffer:
+                    await stt_ws.send(bytes(audio_buffer))
+                    log.info("audio_buffer_flushed", bytes=len(audio_buffer))
+                    audio_buffer.clear()
+                retry_count = 0
+            else:
+                await add_connection_event(
+                    conversation_id=conv_id,
+                    soniox_session_id=session.id,
+                    event_type="connect",
+                    occurred_at=int(time.time() * 1000),
                 )
 
-        async with asyncio.TaskGroup() as tg:
-            tg.create_task(input_coro)
-            tg.create_task(
-                handle_stt(
-                    stt_ws=stt_ws,
-                    browser_ws=browser_ws,
-                    tts_queue=tts_queue,
-                    tts_state=tts_state,
-                    mode=mode,
-                    lang_a=lang_a,
-                    lang_b=lang_b,
-                    target_lang=target_lang,
+            if tts and tts_ws is None:
+                tts_ws = await websockets.connect(
+                    TTS_URL, ping_interval=10, ping_timeout=10, close_timeout=5
                 )
-            )
-            if tts:
+                for direction in directions:
+                    await prewarm_stream(
+                        tts_ws=tts_ws,
+                        tts_state=tts_state,
+                        direction=direction,
+                        voice=direction_voices[direction],
+                    )
+
+            first_connection = False
+
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(do_browser_to_stt(stt_ws))
                 tg.create_task(
-                    tts_sender(
+                    handle_stt(
+                        stt_ws=stt_ws,
+                        browser_ws=browser_ws,
                         tts_queue=tts_queue,
                         tts_state=tts_state,
-                        tts_ws=tts_ws,
-                        direction_voices=direction_voices,
+                        mode=mode,
+                        lang_a=lang_a,
+                        lang_b=lang_b,
+                        target_lang=target_lang,
+                        on_final_segment=on_final_segment,
                     )
                 )
-                tg.create_task(
-                    pipe_tts_to_browser(
-                        tts_ws=tts_ws,
-                        browser_ws=browser_ws,
-                        tts_state=tts_state,
+                tg.create_task(stt_keepalive(stt_ws))
+                if tts:
+                    tg.create_task(
+                        tts_sender(
+                            tts_queue=tts_queue,
+                            tts_state=tts_state,
+                            tts_ws=tts_ws,
+                            direction_voices=direction_voices,
+                        )
                     )
-                )
-                tg.create_task(tts_keepalive(tts_ws=tts_ws))
+                    tg.create_task(
+                        pipe_tts_to_browser(
+                            tts_ws=tts_ws,
+                            browser_ws=browser_ws,
+                            tts_state=tts_state,
+                        )
+                    )
+                    tg.create_task(tts_keepalive(tts_ws=tts_ws))
 
-    except* WebSocketDisconnect:
+        except* WebSocketDisconnect:
+            log.debug("browser_ws_disconnect")
+            browser_disconnected = True
+        except* RuntimeError as eg:
+            log.debug("ws_runtime_error", errors=[str(e) for e in eg.exceptions])
+            if _has_browser_disconnect(eg):
+                browser_disconnected = True
+        except* Exception as eg:
+            log.error("ws_session_error", errors=[str(e) for e in eg.exceptions])
+            if _has_browser_disconnect(eg):
+                browser_disconnected = True
+            await add_connection_event(
+                conversation_id=conv_id,
+                soniox_session_id=session.id,
+                event_type="disconnect",
+                close_code=1006,
+                close_reason=str(eg.exceptions[0])[:200],
+                occurred_at=int(time.time() * 1000),
+            )
+        finally:
+            if stt_ws is not None:
+                try:
+                    await stt_ws.close()
+                except Exception:
+                    pass
+            if tts_ws is not None:
+                try:
+                    await tts_ws.close()
+                except Exception:
+                    pass
+
+        if browser_disconnected:
+            break
+
+        # If we reach here without a browser disconnect, try reconnecting
+        if retry_count < MAX_RETRIES:
+            retry_count += 1
+            delay = min(BASE_DELAY * (2 ** (retry_count - 1)), MAX_DELAY)
+            jitter = delay * 0.2 * random.random()
+            delay += jitter
+
+            if downtime_start == 0:
+                downtime_start = time.monotonic()
+
+            await _safe_send_json(browser_ws, {
+                "reconnecting": True,
+                "attempt": retry_count,
+                "max_attempts": MAX_RETRIES,
+                "downtime_start": int(downtime_start * 1000),
+            })
+            log.info("stt_reconnecting", attempt=retry_count, max_attempts=MAX_RETRIES, delay=round(delay, 2))
+
+            # Buffer any incoming audio during the wait period
+            try:
+                await asyncio.wait_for(
+                    _buffer_audio_during_reconnect(browser_ws, audio_buffer, MAX_AUDIO_BUFFER_BYTES, delay),
+                    timeout=delay,
+                )
+            except asyncio.TimeoutError:
+                pass
+        else:
+            downtime_ms = int((time.monotonic() - downtime_start) * 1000)
+            await _safe_send_json(browser_ws, {
+                "reconnect_failed": True,
+                "downtime_ms": downtime_ms,
+                "max_retries": MAX_RETRIES,
+                "error_message": "Không thể kết nối lại sau nhiều lần thử. Vui lòng kiểm tra kết nối mạng.",
+            })
+            log.error("stt_reconnect_failed", retries=MAX_RETRIES, downtime_ms=downtime_ms)
+            break
+
+    # Session cleanup
+    if stt_ws is not None:
+        try:
+            await stt_ws.close()
+        except Exception:
+            pass
+    if tts_ws is not None:
+        try:
+            await tts_ws.close()
+        except Exception:
+            pass
+    session.close()
+    transcript_store.finish(session)
+    await update_conversation(conv_id, ended_at=int(time.time() * 1000))
+
+
+async def _safe_send_json(ws: WebSocket, data: dict) -> None:
+    try:
+        await ws.send_json(data)
+    except Exception:
         pass
-    except* RuntimeError as eg:
-        # Browser closed mid-stream (e.g. "Cannot call send once a close
-        # message has been sent"). Expected during normal disconnect.
-        log.debug("ws_runtime_error", errors=[str(e) for e in eg.exceptions])
-    except* Exception as eg:
-        log.error("ws_session_error", errors=[str(e) for e in eg.exceptions])
-    finally:
-        if stt_ws is not None:
-            try:
-                await stt_ws.close()
-            except Exception:
-                pass
-        if tts_ws is not None:
-            try:
-                await tts_ws.close()
-            except Exception:
-                pass
-        session.close()
-        transcript_store.finish(session)
+
+
+async def _buffer_audio_during_reconnect(
+    browser_ws: WebSocket,
+    audio_buffer: bytearray,
+    max_bytes: int,
+    max_wait: float,
+) -> None:
+    """Drain incoming audio into a buffer during reconnection."""
+    deadline = time.monotonic() + max_wait
+    while time.monotonic() < deadline:
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            msg = await asyncio.wait_for(browser_ws.receive(), timeout=min(remaining, 0.5))
+            if "bytes" in msg and msg["bytes"] is not None:
+                data = msg["bytes"]
+                if len(audio_buffer) + len(data) <= max_bytes:
+                    audio_buffer.extend(data)
+                else:
+                    # Buffer overflow: discard oldest chunks
+                    overflow = len(audio_buffer) + len(data) - max_bytes
+                    if overflow < len(audio_buffer):
+                        del audio_buffer[:overflow]
+                    audio_buffer.extend(data)
+        except asyncio.TimeoutError:
+            continue
+        except WebSocketDisconnect:
+            raise
+        except Exception:
+            break
+
+
+def _has_browser_disconnect(eg: ExceptionGroup) -> bool:
+    """Check if any exception in the group is a browser WebSocket disconnect."""
+    for e in eg.exceptions:
+        if isinstance(e, WebSocketDisconnect):
+            return True
+        if isinstance(e, RuntimeError) and "close message has been sent" in str(e):
+            return True
+    return False
 
 
 def _parse_context(context_b64: str | None) -> dict | None:

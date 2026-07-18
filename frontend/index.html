@@ -87,6 +87,47 @@
         <p class="hint">Tip: using headphones with Microphone mode avoids the speaker's TTS output being picked up as echo, which can otherwise cause false barge-in interruptions.</p>
       </div>
 
+      <!-- Device Settings -->
+      <div class="section" id="device-block">
+        <h3>4b. Audio Devices</h3>
+        <div class="device-row">
+          <label for="input-device">Microphone / Audio Input</label>
+          <select id="input-device"></select>
+        </div>
+        <div class="device-test-row">
+          <button id="btn-test-input" class="test-btn" type="button">Test Mic</button>
+          <div id="input-level-meter" class="level-meter hidden">
+            <div id="input-level-bar" class="level-bar"></div>
+          </div>
+          <button id="btn-stop-test-input" class="test-btn hidden" type="button">Stop Test</button>
+        </div>
+        <div class="device-row">
+          <label for="output-device">Speaker / Audio Output</label>
+          <select id="output-device"></select>
+        </div>
+        <div class="device-test-row">
+          <button id="btn-test-output" class="test-btn" type="button">Test Speaker</button>
+        </div>
+        <p class="hint">Tip: Select "CABLE Output (VB-Audio Virtual Cable)" as Input and "CABLE Input" as Output for call routing.</p>
+      </div>
+
+      <!-- TTS Provider Selection -->
+      <div class="section" id="tts-provider-block">
+        <h3>4c. TTS Provider</h3>
+        <label for="tts-provider-select">Provider</label>
+        <select id="tts-provider-select"></select>
+        <div class="device-row" id="tts-api-key-row" style="display:none">
+          <label for="tts-api-key">API Key</label>
+          <input type="password" id="tts-api-key" class="audio-url-input" placeholder="Enter API key...">
+          <button id="btn-save-tts-key" class="test-btn" type="button" style="margin-top:4px">Save Key</button>
+        </div>
+        <div class="device-row">
+          <label for="tts-voice-select">Voice</label>
+          <select id="tts-voice-select"></select>
+        </div>
+        <p class="hint" id="tts-cost-hint"></p>
+      </div>
+
       <details class="section collapsible">
         <summary>5. Custom context (optional)</summary>
         <p class="hint">Domain context + glossary to improve specialized accuracy. JSON shape shown below.</p>
@@ -105,6 +146,8 @@
 
       <div class="sidebar-footer">
         <span id="status" class="status">Ready</span>
+        <span id="connection-dot" class="connection-dot hidden" title="Connection status"></span>
+        <button id="btn-retry" class="test-btn hidden" type="button" style="margin-top:6px">Thử lại</button>
       <div id="barge-meter" class="barge-meter hidden" title="Mic input volume">
         <div id="barge-bar" class="barge-bar"></div>
       </div>
