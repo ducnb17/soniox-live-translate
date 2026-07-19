@@ -8,11 +8,13 @@ import os
 
 import pytest
 from fastapi.testclient import TestClient
+from unittest.mock import AsyncMock
 
 # Set a dummy key so app imports cleanly.
 os.environ.setdefault("SONIOX_API_KEY", "test-key-for-api-tests")
 
 from app.main import app
+from app import main
 
 
 @pytest.fixture
@@ -83,3 +85,50 @@ class TestSetupPost:
         import json
         cfg = json.loads((tmp_path / "config.json").read_text())
         assert cfg["soniox_api_key"] == "new-test-key-xyz"
+
+
+class TestConversationApi:
+    def test_list_and_search_forward_pagination(self, client, monkeypatch):
+        list_mock = AsyncMock(return_value=[{"id": "listed"}])
+        search_mock = AsyncMock(return_value=[{"id": "matched"}])
+        monkeypatch.setattr(main, "list_conversations", list_mock)
+        monkeypatch.setattr(main, "search_conversations", search_mock)
+
+        listed = client.get("/api/conversations?limit=11&offset=20")
+        searched = client.get("/api/conversations/search?q=hello%20world&limit=11&offset=10")
+
+        assert listed.status_code == 200 and listed.json() == [{"id": "listed"}]
+        assert searched.status_code == 200 and searched.json() == [{"id": "matched"}]
+        list_mock.assert_awaited_once_with(limit=11, offset=20)
+        search_mock.assert_awaited_once_with("hello world", limit=11, offset=10)
+
+    @pytest.mark.parametrize(
+        ("format_name", "content", "content_type"),
+        [
+            ("txt", "Original: Hello\nTranslated: Xin chào", "text/plain"),
+            ("srt", "1\n00:00:00,000 --> 00:00:01,000\nHello\n", "application/x-subrip"),
+            ("json", '{"id":"conv-export","segments":[]}', "application/json"),
+        ],
+    )
+    def test_export_downloads_real_file(self, client, monkeypatch, format_name, content, content_type):
+        monkeypatch.setattr(main, "get_conversation", AsyncMock(return_value={"id": "conv-export"}))
+        monkeypatch.setattr(main, f"export_conversation_{format_name}", AsyncMock(return_value=content))
+
+        response = client.get(f"/api/conversations/conv-export/export?format={format_name}")
+
+        assert response.status_code == 200
+        assert content_type in response.headers["content-type"]
+        assert response.headers["content-disposition"] == (
+            f'attachment; filename="conversation-conv-export.{format_name}"'
+        )
+        assert response.content.decode() == content
+
+    def test_manual_cleanup_uses_selected_retention_days(self, client, monkeypatch):
+        cleanup_mock = AsyncMock(return_value=4)
+        monkeypatch.setattr(main, "cleanup_old_conversations", cleanup_mock)
+
+        response = client.post("/api/retention/cleanup?max_age_days=45")
+
+        assert response.status_code == 200
+        assert response.json() == {"deleted": 4}
+        cleanup_mock.assert_awaited_once_with(max_age_days=45)

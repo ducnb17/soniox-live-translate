@@ -288,7 +288,7 @@ async def test_unexpected_stt_close_recovers_without_losing_transcript(monkeypat
     monkeypatch.setattr(main, "create_conversation", AsyncMock())
     monkeypatch.setattr(main, "add_connection_event", AsyncMock())
     monkeypatch.setattr(main, "update_conversation", AsyncMock())
-    monkeypatch.setattr(main, "add_segment", AsyncMock())
+    monkeypatch.setattr(main, "add_segments_batch", AsyncMock(return_value=1))
 
     await main.translation_websocket(browser, target_lang="vi", tts=False)
 

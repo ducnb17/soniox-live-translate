@@ -15,6 +15,16 @@ import {
   type ConnectionStatus,
 } from "./types";
 import { resolveAudioDevices, type AudioDeviceLike } from "./device-selection";
+import {
+  cleanupConversations,
+  deleteConversation,
+  fetchConversation,
+  fetchConversationExport,
+  fetchConversationPage,
+  fetchRetentionStats,
+  type ConversationExportFormat,
+  type ConversationSummary,
+} from "./conversation-api";
 
 
 // UTF-8 safe base64 (handles non-ASCII context text).
@@ -85,6 +95,14 @@ const $ttsApiKey = $<HTMLInputElement>("tts-api-key");
 const $ttsApiKeyRow = $<HTMLDivElement>("tts-api-key-row");
 const $btnSaveTtsKey = $<HTMLButtonElement>("btn-save-tts-key");
 const $ttsCostHint = $<HTMLParagraphElement>("tts-cost-hint");
+const $historyPanel = $<HTMLDivElement>("history-panel");
+const $historyList = $<HTMLDivElement>("history-list");
+const $historySearch = $<HTMLInputElement>("history-search");
+const $historySearchButton = $<HTMLButtonElement>("history-search-button");
+const $historyLoadMore = $<HTMLButtonElement>("history-load-more");
+const $retentionDays = $<HTMLInputElement>("retention-days");
+const $retentionCleanup = $<HTMLButtonElement>("retention-cleanup");
+const $retentionStats = $<HTMLSpanElement>("retention-stats");
 
 // ---------------------------------------------------------------------------
 // Populate selectors
@@ -471,120 +489,201 @@ const DEFAULT_AUDIO_URL = "https://soniox.com/media/examples/spanish_weather_rep
 $audioUrl.value = new URLSearchParams(location.search).get("audio") || DEFAULT_AUDIO_URL;
 
 // ---------------------------------------------------------------------------
-// Session History (localStorage)
+// Conversation history (SQLite REST API)
 // ---------------------------------------------------------------------------
-const HISTORY_KEY = "soniox_history_v1";
-const HISTORY_MAX = 50;
+const HISTORY_PAGE_SIZE = 10;
+const RETENTION_DAYS_KEY = "soniox-retention-days";
+let historyItems: ConversationSummary[] = [];
+let historyOffset = 0;
+let historyHasMore = false;
+let historyLoading = false;
+let historyQuery = "";
+let historyRequestId = 0;
 
-interface HistoryEntry {
-  id: string;
-  ts: number;
-  mode: string;
-  targetLang: string;
-  utteranceCount: number;
-  utterances: Utterance[];
+function escapeHtml(value: unknown): string {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }
 
-const sessionHistory = {
-  load(): HistoryEntry[] {
-    try { return JSON.parse(localStorage.getItem(HISTORY_KEY) ?? "[]"); }
-    catch { return []; }
-  },
-  save(entries: HistoryEntry[]): void {
-    try { localStorage.setItem(HISTORY_KEY, JSON.stringify(entries.slice(0, HISTORY_MAX))); }
-    catch { /* storage full */ }
-  },
-  push(entry: HistoryEntry): void { const l = this.load(); l.unshift(entry); this.save(l); },
-  remove(id: string): void       { this.save(this.load().filter((e) => e.id !== id)); },
-  clear(): void                  { localStorage.removeItem(HISTORY_KEY); },
-};
-
-function saveToHistory(utts: Utterance[], translationMode: string, targetLang: string): void {
-  const final = utts.filter((u) => u.originalFinal || u.translationFinal);
-  if (!final.length) return;
-  sessionHistory.push({
-    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-    ts: Date.now(),
-    mode: translationMode,
-    targetLang,
-    utteranceCount: final.length,
-    utterances: final,
-  });
-  const panel = document.getElementById("history-panel");
-  if (panel?.classList.contains("open")) renderHistoryPanel();
+function readRetentionDays(): number {
+  let saved = "30";
+  try { saved = localStorage.getItem(RETENTION_DAYS_KEY) || "30"; } catch { /* storage disabled */ }
+  const parsed = Number(saved);
+  return Number.isInteger(parsed) && parsed >= 1 && parsed <= 3650 ? parsed : 30;
 }
 
 function renderHistoryPanel(): void {
-  const list = document.getElementById("history-list");
-  if (!list) return;
-  const entries = sessionHistory.load();
-  if (!entries.length) {
-    list.innerHTML = '<p class="history-empty">Chưa có phiên nào.</p>';
-    return;
-  }
-  list.innerHTML = entries
-    .map((e) => {
-      const date    = new Date(e.ts).toLocaleString("vi-VN", { dateStyle: "short", timeStyle: "short" });
-      const arrow   = e.mode === "two_way" ? "↔" : "→";
-      const preview = (e.utterances[0]?.originalFinal ?? "").slice(0, 72);
+  if (!historyItems.length) {
+    $historyList.innerHTML = historyLoading
+      ? '<p class="history-empty">Đang tải…</p>'
+      : '<p class="history-empty">Không có hội thoại phù hợp.</p>';
+  } else {
+    $historyList.innerHTML = historyItems.map((entry) => {
+      const date = new Date(entry.started_at).toLocaleString("vi-VN", {
+        dateStyle: "short",
+        timeStyle: "short",
+      });
+      const arrow = entry.mode === "two_way" ? "↔" : "→";
+      const preview = entry.preview ? escapeHtml(entry.preview.slice(0, 100)) : "(chưa có nội dung)";
       return `<div class="history-item">
         <div class="history-meta">
-          <span class="history-date">${date}</span>
-          <span class="history-badge">${arrow}&nbsp;${e.targetLang.toUpperCase()}</span>
-          <span class="history-count">${e.utteranceCount} câu</span>
+          <span class="history-date">${escapeHtml(date)}</span>
+          <span class="history-badge">${arrow}&nbsp;${escapeHtml(entry.target_lang.toUpperCase())}</span>
+          <span class="history-count">${entry.segment_count} câu</span>
         </div>
-        <div class="history-preview">${preview}…</div>
+        <div class="history-preview">${preview}</div>
         <div class="history-actions">
-          <button class="hbtn hbtn-view" data-id="${e.id}">Xem</button>
-          <button class="hbtn hbtn-json" data-id="${e.id}">JSON</button>
-          <button class="hbtn hbtn-csv"  data-id="${e.id}">CSV</button>
-          <button class="hbtn hbtn-del"  data-id="${e.id}">🗑</button>
+          <button class="hbtn hbtn-view" data-id="${escapeHtml(entry.id)}">Xem</button>
+          <button class="hbtn hbtn-export" data-format="txt" data-id="${escapeHtml(entry.id)}">TXT</button>
+          <button class="hbtn hbtn-export" data-format="srt" data-id="${escapeHtml(entry.id)}">SRT</button>
+          <button class="hbtn hbtn-export" data-format="json" data-id="${escapeHtml(entry.id)}">JSON</button>
+          <button class="hbtn hbtn-del" data-id="${escapeHtml(entry.id)}">🗑</button>
         </div>
       </div>`;
-    })
-    .join("");
+    }).join("");
+  }
 
-  list.querySelectorAll<HTMLButtonElement>(".hbtn-view").forEach((b) => {
-    b.onclick = () => {
-      const e = sessionHistory.load().find((x) => x.id === b.dataset.id);
-      if (e) { utterances = e.utterances; render(); }
-    };
+  $historyLoadMore.classList.toggle("hidden", !historyHasMore);
+  $historyLoadMore.disabled = historyLoading;
+  $historySearchButton.disabled = historyLoading;
+
+  $historyList.querySelectorAll<HTMLButtonElement>(".hbtn-view").forEach((button) => {
+    button.addEventListener("click", () => { void viewConversation(button.dataset.id || ""); });
   });
-  list.querySelectorAll<HTMLButtonElement>(".hbtn-json").forEach((b) => {
-    b.onclick = () => {
-      const e = sessionHistory.load().find((x) => x.id === b.dataset.id);
-      if (e) downloadBlob(new Blob([JSON.stringify(e, null, 2)], { type: "application/json" }), `transcript-${e.id}.json`);
-    };
+  $historyList.querySelectorAll<HTMLButtonElement>(".hbtn-export").forEach((button) => {
+    button.addEventListener("click", () => {
+      void exportSavedConversation(
+        button.dataset.id || "",
+        button.dataset.format as ConversationExportFormat,
+      );
+    });
   });
-  list.querySelectorAll<HTMLButtonElement>(".hbtn-csv").forEach((b) => {
-    b.onclick = () => {
-      const e = sessionHistory.load().find((x) => x.id === b.dataset.id);
-      if (!e) return;
-      const rows = [
-        ["speaker", "language", "original", "translation"].join(","),
-        ...e.utterances.map((u) =>
-          [u.speaker ?? "", u.language ?? "",
-           `"${(u.originalFinal ?? "").replace(/"/g, '""')}"`,
-           `"${(u.translationFinal ?? "").replace(/"/g, '""')}"`,
-          ].join(",")
-        ),
-      ];
-      downloadBlob(new Blob(["\uFEFF" + rows.join("\r\n")], { type: "text/csv;charset=utf-8" }), `transcript-${e.id}.csv`);
-    };
+  $historyList.querySelectorAll<HTMLButtonElement>(".hbtn-del").forEach((button) => {
+    button.addEventListener("click", () => { void removeSavedConversation(button.dataset.id || ""); });
   });
-  list.querySelectorAll<HTMLButtonElement>(".hbtn-del").forEach((b) => {
-    b.onclick = () => { sessionHistory.remove(b.dataset.id!); renderHistoryPanel(); };
-  });
+}
+
+async function loadHistory(reset: boolean): Promise<void> {
+  if (historyLoading && !reset) return;
+  const requestId = ++historyRequestId;
+  historyLoading = true;
+  if (reset) {
+    historyItems = [];
+    historyOffset = 0;
+    historyHasMore = false;
+  }
+  renderHistoryPanel();
+  try {
+    const page = await fetchConversationPage(historyQuery, historyOffset, HISTORY_PAGE_SIZE);
+    if (requestId !== historyRequestId) return;
+    historyItems.push(...page.items);
+    historyOffset += page.items.length;
+    historyHasMore = page.hasMore;
+  } catch (error) {
+    if (requestId !== historyRequestId) return;
+    setStatus(`Không thể tải lịch sử: ${(error as Error).message}`);
+  } finally {
+    if (requestId !== historyRequestId) return;
+    historyLoading = false;
+    renderHistoryPanel();
+  }
+}
+
+async function viewConversation(id: string): Promise<void> {
+  try {
+    const conversation = await fetchConversation(id);
+    utterances = conversation.segments
+      .filter((segment) => segment.is_final === 1)
+      .map((segment) => {
+        const speaker = segment.speaker_label === null ? Number.NaN : Number(segment.speaker_label);
+        return {
+          speaker: Number.isFinite(speaker) ? speaker : null,
+          language: segment.source_lang,
+          originalFinal: segment.original_text,
+          originalPartial: "",
+          translationFinal: segment.translated_text || "",
+          translationPartial: "",
+        };
+      });
+    currentUtt = newUtt();
+    render();
+    setStatus(`Đã mở hội thoại ${id} (${utterances.length} câu)`);
+  } catch (error) {
+    setStatus(`Không thể mở hội thoại: ${(error as Error).message}`);
+  }
+}
+
+async function exportSavedConversation(id: string, format: ConversationExportFormat): Promise<void> {
+  try {
+    const exported = await fetchConversationExport(id, format);
+    downloadBlob(exported.blob, exported.filename);
+    setStatus(`Đã tải ${exported.filename}`);
+  } catch (error) {
+    setStatus(`Export ${format.toUpperCase()} thất bại: ${(error as Error).message}`);
+  }
+}
+
+async function removeSavedConversation(id: string): Promise<void> {
+  if (!window.confirm("Xóa vĩnh viễn hội thoại này?")) return;
+  try {
+    await deleteConversation(id);
+    await loadHistory(true);
+    await refreshRetentionStats();
+    setStatus("Đã xóa hội thoại");
+  } catch (error) {
+    setStatus(`Không thể xóa hội thoại: ${(error as Error).message}`);
+  }
+}
+
+async function refreshRetentionStats(): Promise<void> {
+  try {
+    const stats = await fetchRetentionStats();
+    $retentionStats.textContent = `${stats.conversations} hội thoại · ${stats.segments} câu · ${stats.db_size_mb} MB`;
+  } catch {
+    $retentionStats.textContent = "Không đọc được thống kê lưu trữ";
+  }
+}
+
+async function runRetentionCleanup(): Promise<void> {
+  const days = Math.max(1, Math.min(3650, Number($retentionDays.value) || 30));
+  $retentionDays.value = String(days);
+  try { localStorage.setItem(RETENTION_DAYS_KEY, String(days)); } catch { /* storage disabled */ }
+  if (!window.confirm(`Xóa các hội thoại đã kết thúc quá ${days} ngày?`)) return;
+  $retentionCleanup.disabled = true;
+  try {
+    const deleted = await cleanupConversations(days);
+    await loadHistory(true);
+    await refreshRetentionStats();
+    setStatus(`Đã dọn ${deleted} hội thoại cũ`);
+  } catch (error) {
+    setStatus(`Dọn lịch sử thất bại: ${(error as Error).message}`);
+  } finally {
+    $retentionCleanup.disabled = false;
+  }
 }
 
 function toggleHistoryPanel(): void {
-  const panel = document.getElementById("history-panel");
-  const btn   = document.getElementById("btn-history-toggle");
-  if (!panel || !btn) return;
-  const open = panel.classList.toggle("open");
-  btn.textContent = open ? "Lịch sử ▲" : "Lịch sử ▼";
-  if (open) renderHistoryPanel();
+  const button = document.getElementById("btn-history-toggle");
+  const open = $historyPanel.classList.toggle("open");
+  if (button) button.textContent = open ? "Lịch sử ▲" : "Lịch sử ▼";
+  if (open) {
+    void loadHistory(true);
+    void refreshRetentionStats();
+  }
 }
+
+$retentionDays.value = String(readRetentionDays());
+$historyLoadMore.addEventListener("click", () => { void loadHistory(false); });
+$retentionCleanup.addEventListener("click", () => { void runRetentionCleanup(); });
+document.getElementById("history-search-form")?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  historyQuery = $historySearch.value.trim();
+  void loadHistory(true);
+});
 
 // ---------------------------------------------------------------------------
 // Runtime state
@@ -1153,9 +1252,6 @@ function stop(): void {
 }
 
 function cleanup(): void {
-  // Auto-save completed utterances to session history
-  saveToHistory([...utterances, currentUtt], $mode(), $targetLang.value);
-
   pendingAudioBlobs = [];
   pendingAudioOverflowed = false;
 
@@ -1178,6 +1274,11 @@ function cleanup(): void {
   if (ws) {
     try { ws.close(); } catch { /* already closed */ }
     ws = null;
+  }
+  if ($historyPanel.classList.contains("open")) {
+    // The backend flushes its final segment batch as the WebSocket session
+    // closes. A short delay avoids racing that transaction.
+    window.setTimeout(() => { void loadHistory(true); }, 300);
   }
 }
 
@@ -1473,8 +1574,6 @@ $themeToggle.addEventListener("click", () => {
 // Expose globals for inline HTML onclick handlers
 // ---------------------------------------------------------------------------
 (window as unknown as Record<string, unknown>)["toggleHistoryPanel"] = toggleHistoryPanel;
-(window as unknown as Record<string, unknown>)["renderHistoryPanel"] = renderHistoryPanel;
-(window as unknown as Record<string, unknown>)["sessionHistory"] = sessionHistory;
 
 // ---------------------------------------------------------------------------
 // PWA Service Worker

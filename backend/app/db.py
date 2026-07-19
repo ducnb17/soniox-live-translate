@@ -7,6 +7,7 @@ Uses aiosqlite for async access. Database stored at
 import os
 import sys
 import time
+import asyncio
 from pathlib import Path
 
 import aiosqlite
@@ -16,7 +17,7 @@ from .logging_config import get_logger
 log = get_logger("db")
 
 DB_FILENAME = "soniox_translate.db"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _data_dir() -> Path:
@@ -34,6 +35,7 @@ def db_path() -> Path:
 
 
 _db: aiosqlite.Connection | None = None
+_write_lock = asyncio.Lock()
 
 
 async def get_db() -> aiosqlite.Connection:
@@ -62,12 +64,16 @@ async def init_db() -> None:
 
     if current_version < 1:
         await _create_v1(db)
-        await db.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (1)")
-        await db.commit()
+        current_version = 1
         log.info("db_migrated", version=1)
 
-    if current_version < SCHEMA_VERSION:
-        log.warning("db_schema_outdated", current=current_version, latest=SCHEMA_VERSION)
+    if current_version < 2:
+        await _migrate_v2(db)
+        current_version = 2
+        log.info("db_migrated", version=2)
+
+    await db.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (current_version,))
+    await db.commit()
 
 
 async def _create_v1(db: aiosqlite.Connection) -> None:
@@ -118,6 +124,34 @@ async def _create_v1(db: aiosqlite.Connection) -> None:
     """)
 
 
+async def _migrate_v2(db: aiosqlite.Connection) -> None:
+    """Keep the external-content FTS5 table synchronized with segments.
+
+    Existing v1 databases are rebuilt once so conversations recorded before
+    this migration immediately become searchable.
+    """
+    await db.executescript("""
+        CREATE TRIGGER IF NOT EXISTS segments_fts_insert AFTER INSERT ON segments BEGIN
+            INSERT INTO segments_fts(rowid, original_text, translated_text)
+            VALUES (new.id, new.original_text, new.translated_text);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS segments_fts_delete AFTER DELETE ON segments BEGIN
+            INSERT INTO segments_fts(segments_fts, rowid, original_text, translated_text)
+            VALUES ('delete', old.id, old.original_text, old.translated_text);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS segments_fts_update AFTER UPDATE ON segments BEGIN
+            INSERT INTO segments_fts(segments_fts, rowid, original_text, translated_text)
+            VALUES ('delete', old.id, old.original_text, old.translated_text);
+            INSERT INTO segments_fts(rowid, original_text, translated_text)
+            VALUES (new.id, new.original_text, new.translated_text);
+        END;
+
+        INSERT INTO segments_fts(segments_fts) VALUES ('rebuild');
+    """)
+
+
 async def close_db() -> None:
     global _db
     if _db is not None:
@@ -140,15 +174,20 @@ async def create_conversation(
     title: str | None = None,
 ) -> None:
     db = await get_db()
-    await db.execute(
-        """INSERT INTO conversations
-           (id, started_at, mode, source_lang, target_lang,
-            input_device, output_device, tts_provider, tts_voice, title)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (id, started_at, mode, source_lang, target_lang,
-         input_device, output_device, tts_provider, tts_voice, title),
-    )
-    await db.commit()
+    async with _write_lock:
+        try:
+            await db.execute(
+                """INSERT INTO conversations
+                   (id, started_at, mode, source_lang, target_lang,
+                    input_device, output_device, tts_provider, tts_voice, title)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (id, started_at, mode, source_lang, target_lang,
+                 input_device, output_device, tts_provider, tts_voice, title),
+            )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
 
 async def update_conversation(
@@ -168,8 +207,13 @@ async def update_conversation(
     if not sets:
         return
     params.append(id)
-    await db.execute(f"UPDATE conversations SET {', '.join(sets)} WHERE id = ?", params)
-    await db.commit()
+    async with _write_lock:
+        try:
+            await db.execute(f"UPDATE conversations SET {', '.join(sets)} WHERE id = ?", params)
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
 
 async def get_conversation(id: str) -> dict | None:
@@ -186,7 +230,17 @@ async def get_conversation(id: str) -> dict | None:
 async def list_conversations(limit: int = 50, offset: int = 0) -> list[dict]:
     db = await get_db()
     cursor = await db.execute(
-        "SELECT * FROM conversations ORDER BY started_at DESC LIMIT ? OFFSET ?",
+        """SELECT c.*,
+                  COUNT(s.id) AS segment_count,
+                  COALESCE((
+                      SELECT first.original_text FROM segments first
+                      WHERE first.conversation_id = c.id
+                      ORDER BY first.started_at_ms, first.id LIMIT 1
+                  ), '') AS preview
+           FROM conversations c
+           LEFT JOIN segments s ON s.conversation_id = c.id
+           GROUP BY c.id
+           ORDER BY c.started_at DESC LIMIT ? OFFSET ?""",
         (limit, offset),
     )
     rows = await cursor.fetchall()
@@ -195,24 +249,44 @@ async def list_conversations(limit: int = 50, offset: int = 0) -> list[dict]:
 
 async def delete_conversation(id: str) -> None:
     db = await get_db()
-    await db.execute("DELETE FROM segments WHERE conversation_id = ?", (id,))
-    await db.execute("DELETE FROM connection_events WHERE conversation_id = ?", (id,))
-    await db.execute("DELETE FROM conversations WHERE id = ?", (id,))
-    await db.commit()
+    async with _write_lock:
+        try:
+            await db.execute("BEGIN")
+            await db.execute("DELETE FROM segments WHERE conversation_id = ?", (id,))
+            await db.execute("DELETE FROM connection_events WHERE conversation_id = ?", (id,))
+            await db.execute("DELETE FROM conversations WHERE id = ?", (id,))
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
 
-async def search_conversations(query: str, limit: int = 50) -> list[dict]:
+async def search_conversations(query: str, limit: int = 50, offset: int = 0) -> list[dict]:
     db = await get_db()
     cursor = await db.execute(
-        """SELECT DISTINCT c.* FROM conversations c
+        """SELECT c.*,
+                  (SELECT COUNT(*) FROM segments counted
+                   WHERE counted.conversation_id = c.id) AS segment_count,
+                  COALESCE((
+                      SELECT first.original_text FROM segments first
+                      WHERE first.conversation_id = c.id
+                      ORDER BY first.started_at_ms, first.id LIMIT 1
+                  ), '') AS preview
+           FROM conversations c
            JOIN segments s ON s.conversation_id = c.id
            JOIN segments_fts fts ON fts.rowid = s.id
            WHERE segments_fts MATCH ?
-           ORDER BY c.started_at DESC LIMIT ?""",
-        (query, limit),
+           GROUP BY c.id
+           ORDER BY c.started_at DESC LIMIT ? OFFSET ?""",
+        (_fts_phrase(query), limit, offset),
     )
     rows = await cursor.fetchall()
     return [dict(r) for r in rows]
+
+
+def _fts_phrase(query: str) -> str:
+    """Treat user input as a literal phrase instead of raw FTS5 syntax."""
+    return f'"{query.replace(chr(34), chr(34) * 2)}"'
 
 
 # ── Connection Events ──
@@ -226,14 +300,19 @@ async def add_connection_event(
     occurred_at: int | None = None,
 ) -> None:
     db = await get_db()
-    await db.execute(
-        """INSERT INTO connection_events
-           (conversation_id, soniox_session_id, event_type, close_code, close_reason, occurred_at)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (conversation_id, soniox_session_id, event_type, close_code, close_reason,
-         occurred_at or int(time.time() * 1000)),
-    )
-    await db.commit()
+    async with _write_lock:
+        try:
+            await db.execute(
+                """INSERT INTO connection_events
+                   (conversation_id, soniox_session_id, event_type, close_code, close_reason, occurred_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (conversation_id, soniox_session_id, event_type, close_code, close_reason,
+                 occurred_at or int(time.time() * 1000)),
+            )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
 
 async def get_connection_events(conversation_id: str) -> list[dict]:
@@ -258,41 +337,59 @@ async def add_segment(
     is_final: bool = False,
     audio_clip_path: str | None = None,
 ) -> int:
+    if not is_final:
+        raise ValueError("only final segments may be persisted")
     db = await get_db()
-    cursor = await db.execute(
-        """INSERT INTO segments
-           (conversation_id, speaker_label, source_lang, original_text,
-            translated_text, started_at_ms, ended_at_ms, is_final, audio_clip_path)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (conversation_id, speaker_label, source_lang, original_text,
-         translated_text, started_at_ms, ended_at_ms, 1 if is_final else 0, audio_clip_path),
-    )
-    await db.commit()
-    return cursor.lastrowid
+    async with _write_lock:
+        try:
+            cursor = await db.execute(
+                """INSERT INTO segments
+                   (conversation_id, speaker_label, source_lang, original_text,
+                    translated_text, started_at_ms, ended_at_ms, is_final, audio_clip_path)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)""",
+                (conversation_id, speaker_label, source_lang, original_text,
+                 translated_text, started_at_ms, ended_at_ms, audio_clip_path),
+            )
+            await db.commit()
+            return cursor.lastrowid
+        except Exception:
+            await db.rollback()
+            raise
 
 
-async def add_segments_batch(segments: list[dict]) -> None:
+async def add_segments_batch(segments: list[dict]) -> int:
+    final_segments = [seg for seg in segments if seg.get("is_final") is True]
+    if not final_segments:
+        return 0
     db = await get_db()
-    await db.execute("BEGIN")
-    for seg in segments:
-        await db.execute(
-            """INSERT INTO segments
-               (conversation_id, speaker_label, source_lang, original_text,
-                translated_text, started_at_ms, ended_at_ms, is_final, audio_clip_path)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                seg["conversation_id"],
-                seg.get("speaker_label"),
-                seg.get("source_lang"),
-                seg["original_text"],
-                seg.get("translated_text"),
-                seg.get("started_at_ms"),
-                seg.get("ended_at_ms"),
-                1 if seg.get("is_final") else 0,
-                seg.get("audio_clip_path"),
-            ),
+    rows = [
+        (
+            seg["conversation_id"],
+            seg.get("speaker_label"),
+            seg.get("source_lang"),
+            seg["original_text"],
+            seg.get("translated_text"),
+            seg.get("started_at_ms"),
+            seg.get("ended_at_ms"),
+            seg.get("audio_clip_path"),
         )
-    await db.commit()
+        for seg in final_segments
+    ]
+    async with _write_lock:
+        try:
+            await db.execute("BEGIN")
+            await db.executemany(
+                """INSERT INTO segments
+                   (conversation_id, speaker_label, source_lang, original_text,
+                    translated_text, started_at_ms, ended_at_ms, is_final, audio_clip_path)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)""",
+                rows,
+            )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
+    return len(rows)
 
 
 async def get_segments(conversation_id: str, limit: int = 1000, offset: int = 0) -> list[dict]:
@@ -373,15 +470,21 @@ def _ms_to_srt(ms: int) -> str:
 async def cleanup_old_conversations(max_age_days: int = 30) -> int:
     db = await get_db()
     cutoff = int((time.time() - max_age_days * 86400) * 1000)
-    cursor = await db.execute(
-        "SELECT id FROM conversations WHERE ended_at IS NOT NULL AND ended_at < ?", (cutoff,),
-    )
-    ids = [row[0] for row in await cursor.fetchall()]
-    for cid in ids:
-        await db.execute("DELETE FROM segments WHERE conversation_id = ?", (cid,))
-        await db.execute("DELETE FROM connection_events WHERE conversation_id = ?", (cid,))
-        await db.execute("DELETE FROM conversations WHERE id = ?", (cid,))
-    await db.commit()
+    async with _write_lock:
+        try:
+            await db.execute("BEGIN")
+            cursor = await db.execute(
+                "SELECT id FROM conversations WHERE ended_at IS NOT NULL AND ended_at < ?", (cutoff,),
+            )
+            ids = [row[0] for row in await cursor.fetchall()]
+            for cid in ids:
+                await db.execute("DELETE FROM segments WHERE conversation_id = ?", (cid,))
+                await db.execute("DELETE FROM connection_events WHERE conversation_id = ?", (cid,))
+                await db.execute("DELETE FROM conversations WHERE id = ?", (cid,))
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
     log.info("retention_cleanup", deleted=len(ids), max_age_days=max_age_days)
     return len(ids)
 

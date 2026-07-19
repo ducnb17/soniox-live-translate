@@ -17,7 +17,7 @@ from pathlib import Path
 import websockets
 from dotenv import load_dotenv
 from fastapi import Body, FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .config import LANGUAGES, SONIOX_API_KEY, STT_URL, TTS_URL, VOICES, is_configured, set_api_key
@@ -57,7 +57,7 @@ from .db import (
     create_conversation,
     update_conversation,
     add_connection_event,
-    add_segment,
+    add_segments_batch,
     get_conversation,
     list_conversations,
     delete_conversation,
@@ -153,15 +153,17 @@ async def get_transcript(session_id: str) -> JSONResponse:
 
 @app.get("/api/conversations")
 async def api_list_conversations(limit: int = 50, offset: int = 0) -> JSONResponse:
-    convs = await list_conversations(limit=limit, offset=offset)
+    convs = await list_conversations(limit=max(1, min(limit, 100)), offset=max(0, offset))
     return JSONResponse(convs)
 
 
 @app.get("/api/conversations/search")
-async def api_search_conversations(q: str = "", limit: int = 50) -> JSONResponse:
+async def api_search_conversations(q: str = "", limit: int = 50, offset: int = 0) -> JSONResponse:
     if not q.strip():
         return JSONResponse([])
-    convs = await search_conversations(q.strip(), limit=limit)
+    convs = await search_conversations(
+        q.strip(), limit=max(1, min(limit, 100)), offset=max(0, offset)
+    )
     return JSONResponse(convs)
 
 
@@ -182,23 +184,26 @@ async def api_delete_conversation(conversation_id: str) -> JSONResponse:
 @app.get("/api/conversations/{conversation_id}/export", response_model=None)
 async def api_export_conversation(
     conversation_id: str, format: str = "json"
-) -> JSONResponse | FileResponse:
+) -> Response:
+    if await get_conversation(conversation_id) is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    headers = {"Content-Disposition": f'attachment; filename="conversation-{conversation_id}.{format}"'}
     if format == "json":
         content = await export_conversation_json(conversation_id)
-        return JSONResponse(json.loads(content))
+        return Response(content, media_type="application/json", headers=headers)
     elif format == "txt":
         content = await export_conversation_txt(conversation_id)
-        return JSONResponse({"format": "txt", "content": content})
+        return Response(content, media_type="text/plain; charset=utf-8", headers=headers)
     elif format == "srt":
         content = await export_conversation_srt(conversation_id)
-        return JSONResponse({"format": "srt", "content": content})
+        return Response(content, media_type="application/x-subrip; charset=utf-8", headers=headers)
     else:
         return JSONResponse({"error": f"Unsupported format: {format}"}, status_code=400)
 
 
 @app.post("/api/retention/cleanup")
 async def api_cleanup(max_age_days: int = 30) -> JSONResponse:
-    deleted = await cleanup_old_conversations(max_age_days=max_age_days)
+    deleted = await cleanup_old_conversations(max_age_days=max(1, min(max_age_days, 3650)))
     return JSONResponse({"deleted": deleted})
 
 
@@ -343,22 +348,15 @@ async def translation_websocket(
         tts_provider=tts_provider,
         tts_voice=voice,
     )
-    # Track total segments for offset
-    segment_count = 0
+    pending_segments: list[dict] = []
+    segment_batch_size = 10
 
     async def on_final_segment(seg: dict) -> None:
-        nonlocal segment_count
-        await add_segment(
-            conversation_id=conv_id,
-            original_text=seg["original_text"],
-            translated_text=seg.get("translated_text"),
-            speaker_label=seg.get("speaker_label"),
-            source_lang=seg.get("source_lang"),
-            started_at_ms=seg.get("started_at_ms"),
-            ended_at_ms=seg.get("ended_at_ms"),
-            is_final=True,
-        )
-        segment_count += 1
+        pending_segments.append({"conversation_id": conv_id, "is_final": True, **seg})
+        if len(pending_segments) >= segment_batch_size:
+            batch = pending_segments[:]
+            pending_segments.clear()
+            await add_segments_batch(batch)
 
     tts_queue: asyncio.Queue | None = asyncio.Queue() if tts else None
     tts_state: dict = new_tts_state(directions)
@@ -668,6 +666,9 @@ async def translation_websocket(
     tts_state["stt_done"] = True
     session.close()
     transcript_store.finish(session)
+    if pending_segments:
+        await add_segments_batch(pending_segments)
+        pending_segments.clear()
     await update_conversation(conv_id, ended_at=int(time.time() * 1000))
 
 

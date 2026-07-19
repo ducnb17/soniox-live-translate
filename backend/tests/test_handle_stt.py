@@ -173,3 +173,42 @@ class TestHandleSttErrorForwarded:
         assert browser_ws.sent[0]["error_code"] == "bad_audio"
         # stt_done was set
         assert tts_state["stt_done"] is True
+
+
+class TestHandleSttFinalPersistenceCallback:
+    async def test_callback_contains_only_accumulated_final_tokens(self):
+        messages = [
+            {
+                "start_time_ms": 100,
+                "tokens": [
+                    {"text": "draft ", "translation_status": "original", "is_final": False},
+                    {"text": "hello ", "translation_status": "original", "is_final": True},
+                    {"text": "world", "translation_status": "original", "is_final": True},
+                    {"text": "bản nháp", "translation_status": "translation", "is_final": False},
+                    {"text": "xin chào", "translation_status": "translation", "is_final": True},
+                    {"text": "<end>", "is_final": True},
+                ],
+                "end_time_ms": 900,
+            },
+            {"finished": True},
+        ]
+        callback = AsyncMock()
+
+        await handle_stt(
+            stt_ws=FakeSttWs(messages),
+            browser_ws=FakeBrowserWs(),
+            tts_queue=None,
+            tts_state=new_tts_state(["vi"]),
+            mode="one_way",
+            lang_a=None,
+            lang_b=None,
+            target_lang="vi",
+            on_final_segment=callback,
+        )
+
+        callback.assert_awaited_once()
+        persisted = callback.await_args.args[0]
+        assert persisted["original_text"] == "hello world"
+        assert persisted["translated_text"] == "xin chào"
+        assert "draft" not in persisted["original_text"]
+        assert "bản nháp" not in persisted["translated_text"]

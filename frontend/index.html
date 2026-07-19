@@ -218,10 +218,20 @@
         <div id="history-panel" class="history-panel">
           <div class="history-toolbar">
             <span class="history-title">Phiên đã lưu</span>
-            <button class="hbtn-clear"
-                    onclick="sessionHistory.clear();renderHistoryPanel()">Xóa tất cả</button>
           </div>
+          <form id="history-search-form" class="history-search-row">
+            <input id="history-search" type="search" placeholder="Tìm trong nội dung hội thoại…" aria-label="Tìm lịch sử">
+            <button id="history-search-button" class="hbtn" type="submit">Tìm</button>
+          </form>
           <div id="history-list" class="history-list"></div>
+          <button id="history-load-more" class="hbtn history-load-more hidden" type="button">Tải thêm</button>
+          <div class="retention-controls">
+            <label for="retention-days">Giữ lịch sử</label>
+            <input id="retention-days" type="number" min="1" max="3650" value="30">
+            <span>ngày</span>
+            <button id="retention-cleanup" class="hbtn" type="button">Dọn ngay</button>
+          </div>
+          <span id="retention-stats" class="retention-stats"></span>
         </div>
       </div>
     </aside>
