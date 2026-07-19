@@ -164,7 +164,7 @@ async def api_delete_conversation(conversation_id: str) -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
-@app.get("/api/conversations/{conversation_id}/export")
+@app.get("/api/conversations/{conversation_id}/export", response_model=None)
 async def api_export_conversation(
     conversation_id: str, format: str = "json"
 ) -> JSONResponse | FileResponse:

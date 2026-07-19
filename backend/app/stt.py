@@ -218,6 +218,12 @@ def _direction(token: dict, mode: str, lang_a: str | None, lang_b: str | None) -
     Returns the target language for two_way (the speaker's *other* language),
     or None for one_way (single direction)."""
     if mode != "two_way":
+        return None
+    src = token.get("source_language")
+    if src == lang_a:
+        return lang_b
+    if src == lang_b:
+        return lang_a
     return None
 
 
@@ -232,9 +238,3 @@ async def stt_keepalive(stt_ws) -> None:
         pass
     except websockets.ConnectionClosedError as e:
         log.warning("stt_keepalive_stopped", error=str(e))
-    src = token.get("source_language")
-    if src == lang_a:
-        return lang_b
-    if src == lang_b:
-        return lang_a
-    return None
