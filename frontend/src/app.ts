@@ -22,7 +22,6 @@ import {
   type AppState,
   type TranslationMode,
   type AudioSource,
-  type ConfigResponse,
 } from "./types";
 
 import {
@@ -32,7 +31,6 @@ import {
   deleteSession,
   clearSessions,
   migrateFromLocalStorage,
-  type HistoryEntry,
 } from "./db";
 
 void migrateFromLocalStorage();
