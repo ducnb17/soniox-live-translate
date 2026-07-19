@@ -40,9 +40,10 @@ FastAPI /ws/translate ──► Soniox STT+translation (wss://stt-rt.soniox.com)
 - **First-run setup page** (`/setup`) — persists the API key to
   `%APPDATA%\SonioxLiveTranslate\config.json` (Windows), never bundled into
   the installer.
-- **Windows installer** — system-tray desktop app, built on GitHub Actions
+- **Windows installer** — system-tray desktop app built through the single
+  supported desktop release pipeline, `.github/workflows/release.yml`
   (push a `v*.*.*` tag → installer appears on the Releases page).
-- Pure vanilla JS + Web Audio frontend (no build step).
+- TypeScript + Web Audio frontend built with Vite.
 
 ## Requirements
 
@@ -146,7 +147,7 @@ backend/
 │  ├─ transcript.py       # TranscriptStore (in-memory + JSON file)
 │  ├─ logging_config.py   # structlog + rotating file log
 │  └─ main.py             # FastAPI app + /setup routes
-├─ tests/                  # pytest: 46 tests (context, routing, barge, API)
+├─ tests/                  # pytest: context, routing, reconnect, DB, TTS, API
 ├─ .env / .env.example
 ├─ transcripts/            # JSON files per session
 └─ pytest.ini
@@ -160,15 +161,12 @@ frontend/
 ├─ vite.config.ts         # Vite + dev proxy + setup.html copy plugin
 ├─ tsconfig.json
 └─ dist/                   # build output (gitignored)
-packaging/
+installer/
 ├─ launcher.py            # entry: load config → uvicorn → webbrowser → tray
-├─ config_loader.py       # user config (API key) read/persist, env apply
-├─ tray.py                # pystray system tray icon (Open / Settings / Quit)
 ├─ spec.spec              # PyInstaller onedir spec (bundled frontend/dist)
-├─ installer.iss          # Inno Setup wizard (Program Files + shortcuts)
-└─ build.ps1              # 1-command Windows build (pnpm + pyinstaller + iscc)
+└─ installer.iss          # Inno Setup wizard (Program Files + shortcuts)
 .github/workflows/
-└─ release.yml            # windows-latest runner, tag-triggered release
+└─ release.yml            # only desktop release pipeline; v*.*.* tags
 ```
 
 ## Desktop build (Windows installer)
@@ -185,8 +183,14 @@ Requirements: Python 3.13+, [Inno Setup 6](https://jrsoftware.org/isdl.php).
 
 ```powershell
 git clone <repo> && cd soniox-live-translate
-pwsh packaging/build.ps1
-# → dist/SonioxLiveTranslate-Setup-0.1.0.exe
+pnpm --dir frontend install
+pnpm --dir frontend build
+python -m pip install -r backend\requirements.txt
+python -m pip install pyinstaller pystray pillow
+$env:PYTHONPATH = (Get-Location).Path
+python -m PyInstaller installer\spec.spec --distpath dist_win --workpath build_win --noconfirm
+& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\installer.iss
+# → installer_output/SonioxLiveTranslate-Setup-0.2.1.exe
 ```
 
 ### Build via GitHub Actions
@@ -194,11 +198,12 @@ pwsh packaging/build.ps1
 Push a tag:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.1
+git push origin v0.2.1
 ```
 
-The `release.yml` workflow runs on `windows-latest`, builds the installer,
+The `release.yml` workflow is the repository's only desktop release pipeline.
+It runs on `windows-latest`, builds the PyInstaller + Inno Setup installer,
 and attaches it to a new GitHub Release automatically.
 
 ### Run the desktop app
@@ -232,7 +237,7 @@ and attaches it to a new GitHub Release automatically.
 
 - M0–M4 — done (one-way / two-way / barge-in / context / transcript
   download / dark mode / first-run setup).
-- M5 — done (structlog backend logging, pytest 46 tests, Vite + TS
+- M5 — done (structlog backend logging, pytest suite, Vite + TS
   frontend with strict typing).
 - M6 — done (Windows installer: PyInstaller + Inno Setup + GitHub Actions
   + system tray + first-run prompt).
