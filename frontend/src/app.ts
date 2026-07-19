@@ -73,6 +73,7 @@ const $audioUrl = $<HTMLInputElement>("audio-url");
 const $originalCol = $<HTMLDivElement>("original");
 const $translationCol = $<HTMLDivElement>("translation");
 const $status = $<HTMLSpanElement>("status");
+const $delayStatus = $<HTMLSpanElement>("delay-status");
 const $bargeMeter = $<HTMLDivElement>("barge-meter");
 const $bargeBar = $<HTMLDivElement>("barge-bar");
 const $sessionInfo = $<HTMLDivElement>("session-info");
@@ -92,6 +93,8 @@ const $connectionDot = $<HTMLDivElement>("connection-dot");
 const $btnRetry = $<HTMLButtonElement>("btn-retry");
 const $ttsProvider = $<HTMLSelectElement>("tts-provider-select");
 const $ttsVoice = $<HTMLSelectElement>("tts-voice-select");
+const $sttDelay = $<HTMLInputElement>("stt-delay-seconds");
+const $sttDelayValue = $<HTMLSpanElement>("stt-delay-seconds-value");
 const $ttsDelay = $<HTMLInputElement>("tts-delay-seconds");
 const $ttsDelayValue = $<HTMLSpanElement>("tts-delay-seconds-value");
 const $ttsPlaybackRate = $<HTMLInputElement>("tts-playback-rate");
@@ -391,24 +394,44 @@ interface TtsProviderInfo {
 let ttsProviders: TtsProviderInfo[] = [];
 let currentTtsProvider = "soniox";
 let ttsSessionUsage = emptyTtsUsage();
+const STT_DELAY_SECONDS_KEY = "sttDelaySeconds";
 const TTS_DELAY_SECONDS_KEY = "ttsDelaySeconds";
 const TTS_PLAYBACK_RATE_KEY = "ttsPlaybackRate";
+
+function readSttDelaySeconds(): number {
+  let saved: string | null = null;
+  try { saved = localStorage.getItem(STT_DELAY_SECONDS_KEY); } catch { /* storage disabled */ }
+  const value = Number(saved ?? "1.5");
+  return Number.isFinite(value) && value >= 0 && value <= 10 ? value : 1.5;
+}
+
+function updateSttDelaySelection(): void {
+  $sttDelayValue.textContent = $sttDelay.value;
+  try { localStorage.setItem(STT_DELAY_SECONDS_KEY, $sttDelay.value); } catch { /* storage disabled */ }
+  updateDelayStatusIndicator();
+}
+
+function currentSttDelaySeconds(): number {
+  const value = $sttDelay.valueAsNumber;
+  return Number.isFinite(value) && value >= 0 && value <= 10 ? value : 1.5;
+}
 
 function readTtsDelaySeconds(): number {
   let saved: string | null = null;
   try { saved = localStorage.getItem(TTS_DELAY_SECONDS_KEY); } catch { /* storage disabled */ }
   const value = Number(saved ?? "1");
-  return Number.isFinite(value) && value >= 1 && value <= 5 ? value : 1;
+  return Number.isFinite(value) && value >= 0 && value <= 10 ? value : 1;
 }
 
 function updateTtsDelaySelection(): void {
   $ttsDelayValue.textContent = $ttsDelay.value;
   try { localStorage.setItem(TTS_DELAY_SECONDS_KEY, $ttsDelay.value); } catch { /* storage disabled */ }
+  updateDelayStatusIndicator();
 }
 
 function currentTtsDelaySeconds(): number {
   const value = $ttsDelay.valueAsNumber;
-  return Number.isFinite(value) && value >= 1 && value <= 5 ? value : 1;
+  return Number.isFinite(value) && value >= 0 && value <= 10 ? value : 1;
 }
 
 function readTtsPlaybackRate(): number {
@@ -432,6 +455,9 @@ function updateTtsPlaybackRateSelection(): void {
   try { localStorage.setItem(TTS_PLAYBACK_RATE_KEY, $ttsPlaybackRate.value); } catch { /* storage disabled */ }
 }
 
+$sttDelay.value = String(readSttDelaySeconds());
+$sttDelayValue.textContent = $sttDelay.value;
+$sttDelay.addEventListener("input", updateSttDelaySelection);
 $ttsDelay.value = String(readTtsDelaySeconds());
 $ttsDelayValue.textContent = $ttsDelay.value;
 $ttsDelay.addEventListener("input", updateTtsDelaySelection);
@@ -792,6 +818,7 @@ let mode: AppMode = "file";
 let state: AppState = "idle";
 let mediaRecorder: MediaRecorder | null = null;
 let audioCtx: AudioContext | null = null;
+const FADE_MS = 8;
 let nextPlayTime = 0;
 let utterances: Utterance[] = [];
 let currentUtt = newUtt();
@@ -870,6 +897,8 @@ function openWebSocket(extraParams: Record<string, string> = {}): Promise<void> 
     tts: String($tts.checked),
     ...extraParams,
   });
+  const sttDelaySeconds = currentSttDelaySeconds();
+  params.set("stt_delay_ms", String(Math.round(sttDelaySeconds * 1000)));
 
   if (m === "one_way") {
     params.set("target_lang", $targetLang.value);
@@ -1182,13 +1211,24 @@ function playPcmChunk(chunk: Uint8Array): void {
   const playbackRate = currentTtsPlaybackRate();
   // playbackRate thay đổi cả cao độ giọng nói (pitch); muốn giữ nguyên cao độ cần AudioWorklet/time-stretch riêng — chưa làm ở đây.
   source.playbackRate.value = playbackRate;
-  source.connect(audioCtx.destination);
+  const gainNode = audioCtx.createGain();
+  source.connect(gainNode);
+  gainNode.connect(audioCtx.destination);
   const startsNewUtterance = nextPlayTime === 0 || audioCtx.currentTime >= nextPlayTime;
   const startAt = startsNewUtterance
     ? audioCtx.currentTime + currentTtsDelaySeconds()
     : nextPlayTime;
+  const playbackDuration = buffer.duration / playbackRate;
+  const endAt = startAt + playbackDuration;
+  const fadeDuration = Math.min(FADE_MS / 1000, playbackDuration / 2);
+  if (fadeDuration > 0) {
+    gainNode.gain.setValueAtTime(0, startAt);
+    gainNode.gain.linearRampToValueAtTime(1, startAt + fadeDuration);
+    gainNode.gain.setValueAtTime(1, endAt - fadeDuration);
+    gainNode.gain.linearRampToValueAtTime(0, endAt);
+  }
   source.start(startAt);
-  nextPlayTime = startAt + buffer.duration / playbackRate;
+  nextPlayTime = endAt;
   activeSources.push(source);
   source.onended = () => {
     const i = activeSources.indexOf(source);
@@ -1481,6 +1521,17 @@ function setMode(m: AppMode): void {
 
 function setStatus(msg: string): void {
   $status.textContent = msg;
+  updateDelayStatusIndicator();
+}
+
+function updateDelayStatusIndicator(): void {
+  const totalDelaySeconds = currentSttDelaySeconds() + currentTtsDelaySeconds();
+  const visible = state !== "idle" && totalDelaySeconds > 0;
+  const formattedDelay = Number.isInteger(totalDelaySeconds)
+    ? String(totalDelaySeconds)
+    : totalDelaySeconds.toFixed(1);
+  $delayStatus.textContent = visible ? `Đang xử lý (~${formattedDelay}s)…` : "";
+  $delayStatus.classList.toggle("hidden", !visible);
 }
 
 function setConnectionStatus(s: ConnectionStatus): void {

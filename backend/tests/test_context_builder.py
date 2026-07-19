@@ -18,7 +18,7 @@ class TestBuildSttConfig:
         assert cfg["model"] == "stt-rt-v5"
         assert cfg["audio_format"] == "auto"
         assert cfg["enable_endpoint_detection"] is True
-        assert cfg["max_endpoint_delay_ms"] == 500
+        assert cfg["max_endpoint_delay_ms"] == 1500
         assert cfg["enable_speaker_diarization"] is True
         assert cfg["enable_language_identification"] is True
         assert cfg["translation"] == {"type": "one_way", "target_language": "vi"}
@@ -41,6 +41,20 @@ class TestBuildSttConfig:
             "language_a": "en",
             "language_b": "es",
         }
+
+    def test_custom_endpoint_delay(self):
+        cfg = build_stt_config(
+            mode="one_way",
+            target_lang="vi",
+            lang_a=None,
+            lang_b=None,
+            lang_id=True,
+            diarize=True,
+            context=None,
+            max_endpoint_delay_ms=2500,
+        )
+
+        assert cfg["max_endpoint_delay_ms"] == 2500
 
     def test_one_way_missing_target_raises(self):
         with pytest.raises(ValueError, match="target_lang"):

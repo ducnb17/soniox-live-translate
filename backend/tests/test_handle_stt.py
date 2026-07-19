@@ -261,3 +261,73 @@ class TestHandleSttFinalPersistenceCallback:
         assert persisted["translated_text"] == "xin chào"
         assert "draft" not in persisted["original_text"]
         assert "bản nháp" not in persisted["translated_text"]
+
+
+class TestHandleSttExtraHold:
+    async def test_held_utterances_commit_after_delay_in_fifo_order(self, monkeypatch):
+        messages = [
+            {
+                "tokens": [
+                    {"text": "A", "translation_status": "translation", "is_final": True},
+                    {"text": "<end>"},
+                ]
+            },
+            {
+                "tokens": [
+                    {"text": "next interim", "translation_status": "original", "is_final": False},
+                ]
+            },
+            {
+                "tokens": [
+                    {"text": "B", "translation_status": "translation", "is_final": True},
+                    {"text": "<end>"},
+                ]
+            },
+            {"finished": True},
+        ]
+        browser_ws = FakeBrowserWs()
+        tts_queue: asyncio.Queue = asyncio.Queue()
+        committed_translations: list[str] = []
+        sleep_delays: list[float] = []
+        real_sleep = asyncio.sleep
+
+        async def record_sleep(delay: float) -> None:
+            sleep_delays.append(delay)
+            await real_sleep(0)
+
+        async def on_final_segment(segment: dict) -> None:
+            committed_translations.append(segment["translated_text"])
+
+        monkeypatch.setattr(asyncio, "sleep", record_sleep)
+
+        await handle_stt(
+            stt_ws=FakeSttWs(messages),
+            browser_ws=browser_ws,
+            tts_queue=tts_queue,
+            tts_state=new_tts_state(["vi"]),
+            mode="one_way",
+            lang_a=None,
+            lang_b=None,
+            target_lang="vi",
+            on_final_segment=on_final_segment,
+            extra_hold_ms=4000,
+        )
+
+        items = []
+        while not tts_queue.empty():
+            items.append(tts_queue.get_nowait())
+
+        assert len(browser_ws.sent) == 4
+        assert committed_translations == ["A", "B"]
+        assert sleep_delays == [
+            pytest.approx(4.0, abs=0.05),
+            pytest.approx(4.0, abs=0.05),
+        ]
+        assert items == [
+            (TTS_TEXT, "A", "vi"),
+            (TTS_END, "vi"),
+            (TTS_TEXT, "B", "vi"),
+            (TTS_END, "vi"),
+            (TTS_END, None),
+            TTS_NONE,
+        ]

@@ -261,7 +261,7 @@ python -m pip install pyinstaller pystray pillow
 $env:PYTHONPATH = (Get-Location).Path
 python -m PyInstaller installer\spec.spec --distpath dist_win --workpath build_win --noconfirm
 & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\installer.iss
-# → installer_output/SonioxLiveTranslate-Setup-0.2.3.exe
+# → installer_output/SonioxLiveTranslate-Setup-0.2.4.exe
 ```
 
 ### Build via GitHub Actions
@@ -269,8 +269,8 @@ python -m PyInstaller installer\spec.spec --distpath dist_win --workpath build_w
 Push a tag:
 
 ```bash
-git tag v0.2.3
-git push origin v0.2.3
+git tag v0.2.4
+git push origin v0.2.4
 ```
 
 The `release.yml` workflow is the repository's only desktop release pipeline.

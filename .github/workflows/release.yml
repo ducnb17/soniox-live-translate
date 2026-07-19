@@ -138,9 +138,11 @@ jobs:
             ## Soniox Live Translate ${{ github.ref_name }}
 
             ### Có gì mới
-            - Mở ứng dụng trong cửa sổ desktop native thay vì tab trình duyệt
-            - Đóng cửa sổ sẽ ẩn ứng dụng xuống system tray
-            - Icon ứng dụng thống nhất cho cửa sổ, file `.exe` và installer
+            - Thêm độ trễ nhận diện STT 0–10 giây, kết hợp endpoint delay Soniox và FIFO hold buffer
+            - Mở rộng độ trễ đọc TTS lên 0–10 giây và giữ tùy chọn qua lần mở app tiếp theo
+            - Làm mượt ranh giới PCM bằng fade-in/fade-out 8 ms để giảm click/pop
+            - Hiển thị rõ tổng độ trễ đang cấu hình trong lúc dịch
+            - Nâng mặc định endpoint delay lên 1.5 giây để ưu tiên câu đầy đủ hơn
 
             ### Cài đặt trên Windows
             1. Tải file `.exe` bên dưới

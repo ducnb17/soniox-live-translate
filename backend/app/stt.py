@@ -4,6 +4,7 @@ into the TTS queue, and pass STT JSON straight to the browser for rendering.
 
 import asyncio
 import json
+from contextlib import suppress
 from typing import Any
 from collections.abc import Awaitable, Callable
 
@@ -106,6 +107,7 @@ async def handle_stt(
     on_final_segment: Callable[[dict], Awaitable[None]] | None = None,
     finalize_session_on_exit: bool = True,
     finished_event: asyncio.Event | None = None,
+    extra_hold_ms: int = 0,
 ) -> None:
     """Read STT responses: forward to browser, route tokens to TTS queue,
     call `on_endpoint` whenever an <end> token closes an utterance,
@@ -118,6 +120,48 @@ async def handle_stt(
     current_lang = None
     utterance_start_ms: int | None = None
     stream_finished = False
+    pending_tts_chunks: list[tuple[str, str | None]] = []
+    hold_queue: asyncio.Queue[
+        tuple[float, list[tuple[str, str | None]], str | None, dict | None]
+    ] | None = None
+    hold_worker: asyncio.Task[None] | None = None
+
+    async def commit_utterance(
+        tts_chunks: list[tuple[str, str | None]],
+        direction: str | None,
+        final_segment: dict | None,
+    ) -> None:
+        if tts_queue is not None:
+            for chunk, chunk_direction in tts_chunks:
+                await tts_queue.put((TTS_TEXT, chunk, chunk_direction))
+            await tts_queue.put((TTS_END, direction))
+        if on_endpoint is not None:
+            await on_endpoint()
+        if on_final_segment is not None and final_segment is not None:
+            await on_final_segment(final_segment)
+
+    if extra_hold_ms > 0:
+        hold_queue = asyncio.Queue()
+
+        async def release_held_utterances() -> None:
+            assert hold_queue is not None
+            loop = asyncio.get_running_loop()
+            while True:
+                release_at, tts_chunks, direction, final_segment = await hold_queue.get()
+                try:
+                    delay = release_at - loop.time()
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    await commit_utterance(tts_chunks, direction, final_segment)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    log.error("stt_hold_commit_failed", error=str(exc))
+                finally:
+                    hold_queue.task_done()
+
+        hold_worker = asyncio.create_task(release_held_utterances())
+
     try:
         while True:
             message = await stt_ws.recv()
@@ -148,21 +192,29 @@ async def handle_stt(
                         if mode == "one_way"
                         else _direction(token, mode, lang_a, lang_b)
                     )
-                    if tts_queue is not None:
-                        if current_translation:
-                            await tts_queue.put((TTS_TEXT, current_translation, direction))
-                        await tts_queue.put((TTS_END, direction))
-                    if on_endpoint is not None:
-                        await on_endpoint()
-                    if on_final_segment is not None and (current_original or full_translation):
-                        await on_final_segment({
+                    tts_chunks = pending_tts_chunks
+                    pending_tts_chunks = []
+                    if tts_queue is not None and current_translation:
+                        tts_chunks.append((current_translation, direction))
+                    final_segment = None
+                    if current_original or full_translation:
+                        final_segment = {
                             "original_text": current_original,
                             "translated_text": full_translation,
                             "speaker_label": str(current_speaker) if current_speaker is not None else None,
                             "source_lang": current_lang,
                             "started_at_ms": utterance_start_ms,
                             "ended_at_ms": data.get("end_time_ms") or (utterance_start_ms or 0) + 2000,
-                        })
+                        }
+                    if hold_queue is not None:
+                        release_at = (
+                            asyncio.get_running_loop().time() + extra_hold_ms / 1000
+                        )
+                        hold_queue.put_nowait(
+                            (release_at, tts_chunks, direction, final_segment)
+                        )
+                    else:
+                        await commit_utterance(tts_chunks, direction, final_segment)
                     current_original = ""
                     current_translation = ""
                     full_translation = ""
@@ -183,7 +235,10 @@ async def handle_stt(
                                     break
                                 chunk = current_translation[:split_at]
                                 current_translation = current_translation[split_at:]
-                                await tts_queue.put((TTS_TEXT, chunk, target))
+                                if hold_queue is not None:
+                                    pending_tts_chunks.append((chunk, target))
+                                else:
+                                    await tts_queue.put((TTS_TEXT, chunk, target))
                     text_pushed = True
                 else:
                     if token.get("is_final"):
@@ -206,19 +261,33 @@ async def handle_stt(
     except websockets.ConnectionClosedError as e:
         log.warning("stt_ws_closed", error=str(e))
     finally:
-        # A transient Soniox disconnect must not terminate the shared TTS
-        # queue. The reconnect loop owns final session cleanup and passes
-        # finalize_session_on_exit=False for each individual STT connection.
-        if finalize_session_on_exit or stream_finished:
-            if tts_queue is not None:
-                await tts_queue.put((TTS_END, None))
-                await tts_queue.put(TTS_NONE)
-            tts_state["stt_done"] = True
-            if tts_queue is None or not text_pushed:
+        try:
+            if hold_queue is not None and hold_worker is not None:
+                current_task = asyncio.current_task()
+                is_being_cancelled = (
+                    current_task is not None and current_task.cancelling() > 0
+                )
                 try:
-                    await browser_ws.send_json({"session_done": True})
-                except Exception:
-                    pass
+                    if stream_finished and not is_being_cancelled:
+                        await hold_queue.join()
+                finally:
+                    hold_worker.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await hold_worker
+        finally:
+            # A transient Soniox disconnect must not terminate the shared TTS
+            # queue. The reconnect loop owns final session cleanup and passes
+            # finalize_session_on_exit=False for each individual STT connection.
+            if finalize_session_on_exit or stream_finished:
+                if tts_queue is not None:
+                    await tts_queue.put((TTS_END, None))
+                    await tts_queue.put(TTS_NONE)
+                tts_state["stt_done"] = True
+                if tts_queue is None or not text_pushed:
+                    try:
+                        await browser_ws.send_json({"session_done": True})
+                    except Exception:
+                        pass
 
 
 def _resolve_tts_target(

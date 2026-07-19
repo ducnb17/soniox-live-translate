@@ -18,13 +18,14 @@ def build_stt_config(
     lang_id: bool,
     diarize: bool,
     context: dict[str, Any] | None,
+    max_endpoint_delay_ms: int = MAX_ENDPOINT_DELAY_MS,
 ) -> dict[str, Any]:
     config: dict[str, Any] = {
         "api_key": SONIOX_API_KEY,
         "model": STT_MODEL,
         "audio_format": "auto",
         "enable_endpoint_detection": True,
-        "max_endpoint_delay_ms": MAX_ENDPOINT_DELAY_MS,
+        "max_endpoint_delay_ms": max_endpoint_delay_ms,
         "enable_speaker_diarization": diarize,
         "enable_language_identification": lang_id,
     }

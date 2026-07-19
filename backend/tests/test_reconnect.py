@@ -275,6 +275,70 @@ class RecoveredSttSocket:
         pass
 
 
+class DisconnectingBrowser:
+    def __init__(self):
+        self.sent_json: list[dict] = []
+
+    async def accept(self) -> None:
+        pass
+
+    async def receive(self) -> dict:
+        raise WebSocketDisconnect(code=1000, reason="config captured")
+
+    async def send_json(self, data: dict) -> None:
+        self.sent_json.append(data)
+
+    async def close(self, code: int = 1000, reason: str | None = None) -> None:
+        pass
+
+
+class ConfigCapturingSttSocket:
+    close_code = None
+    close_reason = None
+
+    def __init__(self):
+        self.configs: list[dict] = []
+
+    async def send(self, data) -> None:
+        if isinstance(data, str):
+            self.configs.append(json.loads(data))
+
+    async def recv(self) -> str:
+        await asyncio.Future()
+
+    async def close(self) -> None:
+        pass
+
+
+@pytest.mark.parametrize(
+    ("requested_delay_ms", "expected_delay_ms"),
+    [(100, 500), (2500, 2500), (5000, 3000)],
+)
+async def test_translation_websocket_clamps_endpoint_delay(
+    monkeypatch, requested_delay_ms, expected_delay_ms
+):
+    browser = DisconnectingBrowser()
+    socket = ConfigCapturingSttSocket()
+    session = FakeSession()
+
+    monkeypatch.setattr(main, "is_configured", lambda: True)
+    monkeypatch.setattr(main, "transcript_store", FakeTranscriptStore(session))
+    monkeypatch.setattr(main.websockets, "connect", AsyncMock(return_value=socket))
+    monkeypatch.setattr(main, "create_conversation", AsyncMock())
+    monkeypatch.setattr(main, "add_connection_event", AsyncMock())
+    monkeypatch.setattr(main, "update_conversation", AsyncMock())
+    monkeypatch.setattr(main, "add_segments_batch", AsyncMock(return_value=1))
+
+    await main.translation_websocket(
+        browser,
+        target_lang="vi",
+        tts=False,
+        stt_delay_ms=requested_delay_ms,
+    )
+
+    assert socket.configs[0]["max_endpoint_delay_ms"] == expected_delay_ms
+
+
 async def test_unexpected_stt_close_recovers_without_losing_transcript(monkeypatch):
     browser = RecoveringBrowser()
     session = FakeSession()

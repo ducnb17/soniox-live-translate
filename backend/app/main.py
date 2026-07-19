@@ -20,7 +20,16 @@ from fastapi import Body, FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from .config import LANGUAGES, SONIOX_API_KEY, STT_URL, TTS_URL, VOICES, is_configured, set_api_key
+from .config import (
+    LANGUAGES,
+    MAX_ENDPOINT_DELAY_MS,
+    SONIOX_API_KEY,
+    STT_URL,
+    TTS_URL,
+    VOICES,
+    is_configured,
+    set_api_key,
+)
 from .context_builder import build_stt_config
 from .stt import (
     TTS_END,
@@ -292,6 +301,7 @@ async def translation_websocket(
     input_device: str | None = None,
     output_device: str | None = None,
     tts_provider: str = "soniox",
+    stt_delay_ms: int = MAX_ENDPOINT_DELAY_MS,
 ) -> None:
     await browser_ws.accept()
 
@@ -306,6 +316,8 @@ async def translation_websocket(
         return
 
     context = _parse_context(context_b64)
+    endpoint_delay_ms = max(500, min(3000, stt_delay_ms))
+    extra_hold_ms = max(0, stt_delay_ms - 3000)
     stt_config = build_stt_config(
         mode=mode,
         target_lang=target_lang,
@@ -314,6 +326,7 @@ async def translation_websocket(
         lang_id=lang_id,
         diarize=diarize,
         context=context,
+        max_endpoint_delay_ms=endpoint_delay_ms,
     )
 
     if mode == "two_way":
@@ -517,6 +530,7 @@ async def translation_websocket(
                         on_final_segment=on_final_segment,
                         finalize_session_on_exit=False,
                         finished_event=stt_finished_event,
+                        extra_hold_ms=extra_hold_ms,
                     )
                 )
                 tg.create_task(stt_keepalive(stt_ws))
