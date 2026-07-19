@@ -10,6 +10,7 @@ import os
 import random
 import sys
 import time
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -21,7 +22,14 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import LANGUAGES, SONIOX_API_KEY, STT_URL, TTS_URL, VOICES, is_configured, set_api_key
 from .context_builder import build_stt_config
-from .stt import handle_stt, pipe_browser_to_stt, stt_keepalive, stream_url_to_stt
+from .stt import (
+    TTS_END,
+    TTS_NONE,
+    handle_stt,
+    pipe_browser_to_stt,
+    stt_keepalive,
+    stream_url_to_stt,
+)
 from .tts import (
     new_tts_state,
     pipe_tts_to_browser,
@@ -66,6 +74,13 @@ configure_logging()
 log = get_logger("main")
 
 transcript_store = TranscriptStore()
+
+RECONNECT_MAX_RETRIES = 5
+RECONNECT_BASE_DELAY_SECONDS = 0.5
+RECONNECT_MAX_DELAY_SECONDS = 10.0
+RECONNECT_JITTER_RATIO = 0.2
+RECONNECT_EXHAUSTED_CLOSE_CODE = 4000
+MAX_RECONNECT_AUDIO_BUFFER_BYTES = 500 * 1024
 
 
 @asynccontextmanager
@@ -350,7 +365,7 @@ async def translation_websocket(
 
     # Audio buffer for pending data during reconnection (mic mode only).
     audio_buffer: bytearray = bytearray()
-    MAX_AUDIO_BUFFER_BYTES = 500 * 1024  # 500 KB max buffer
+    audio_dropped_bytes = 0
 
     # Pre-compute input coroutine factory for mic mode.
     _on_text: dict = {}
@@ -381,11 +396,6 @@ async def translation_websocket(
             browser_ws=browser_ws, stt_ws=stt_ws, on_text=_on_text["fn"]
         )
 
-    # Reconnection parameters
-    MAX_RETRIES = 5
-    BASE_DELAY = 0.5
-    MAX_DELAY = 10.0
-
     retry_count = 0
     downtime_start = 0.0
     first_connection = True
@@ -394,7 +404,13 @@ async def translation_websocket(
     while True:
         stt_ws = None
         tts_ws = None
-        is_reconnect = not first_connection
+        # retry_count also covers failures before the first STT connection
+        # succeeds. Without it, the UI remains stuck in "reconnecting" after
+        # an initial connect failure eventually recovers.
+        is_reconnect = retry_count > 0 or not first_connection
+        disconnect_code: int | None = None
+        disconnect_reason: str | None = None
+        stt_finished_event = asyncio.Event()
 
         try:
             # Connect to Soniox STT
@@ -406,12 +422,24 @@ async def translation_websocket(
             if is_reconnect:
                 # Report reconnection success
                 downtime_ms = int((time.monotonic() - downtime_start) * 1000)
-                await _safe_send_json(browser_ws, {
+                reconnect_payload = {
                     "reconnected": True,
                     "downtime_ms": downtime_ms,
-                    "downtime_text": f"[mất kết nối ~{downtime_ms/1000:.1f}s]",
-                })
-                log.info("stt_reconnected", retry_count=retry_count, downtime_ms=downtime_ms)
+                    "buffered_audio_bytes": len(audio_buffer),
+                    "dropped_audio_bytes": audio_dropped_bytes,
+                }
+                if audio_dropped_bytes:
+                    reconnect_payload["downtime_text"] = (
+                        f"[mất âm thanh do gián đoạn ~{downtime_ms / 1000:.1f}s; buffer đầy]"
+                    )
+                await _safe_send_json(browser_ws, reconnect_payload)
+                log.info(
+                    "stt_reconnected",
+                    retry_count=retry_count,
+                    downtime_ms=downtime_ms,
+                    buffered_audio_bytes=len(audio_buffer),
+                    dropped_audio_bytes=audio_dropped_bytes,
+                )
                 await add_connection_event(
                     conversation_id=conv_id,
                     soniox_session_id=session.id,
@@ -421,9 +449,16 @@ async def translation_websocket(
                 # Flush buffered audio
                 if audio_buffer:
                     await stt_ws.send(bytes(audio_buffer))
-                    log.info("audio_buffer_flushed", bytes=len(audio_buffer))
+                    log.info(
+                        "audio_buffer_flushed",
+                        bytes=len(audio_buffer),
+                        dropped_audio_bytes=audio_dropped_bytes,
+                        downtime_ms=downtime_ms,
+                    )
                     audio_buffer.clear()
                 retry_count = 0
+                downtime_start = 0.0
+                audio_dropped_bytes = 0
             else:
                 await add_connection_event(
                     conversation_id=conv_id,
@@ -431,6 +466,11 @@ async def translation_websocket(
                     event_type="connect",
                     occurred_at=int(time.time() * 1000),
                 )
+
+            if is_reconnect and tts:
+                # Streams belong to the previous TTS WebSocket and cannot be
+                # reused after reconnecting.
+                tts_state = new_tts_state(directions)
 
             if tts and tts_ws is None:
                 tts_ws = await websockets.connect(
@@ -459,6 +499,8 @@ async def translation_websocket(
                         lang_b=lang_b,
                         target_lang=target_lang,
                         on_final_segment=on_final_segment,
+                        finalize_session_on_exit=False,
+                        finished_event=stt_finished_event,
                     )
                 )
                 tg.create_task(stt_keepalive(stt_ws))
@@ -487,19 +529,22 @@ async def translation_websocket(
             log.debug("ws_runtime_error", errors=[str(e) for e in eg.exceptions])
             if _has_browser_disconnect(eg):
                 browser_disconnected = True
+            else:
+                disconnect_code, disconnect_reason = _connection_close_details(eg)
         except* Exception as eg:
-            log.error("ws_session_error", errors=[str(e) for e in eg.exceptions])
             if _has_browser_disconnect(eg):
                 browser_disconnected = True
-            await add_connection_event(
-                conversation_id=conv_id,
-                soniox_session_id=session.id,
-                event_type="disconnect",
-                close_code=1006,
-                close_reason=str(eg.exceptions[0])[:200],
-                occurred_at=int(time.time() * 1000),
-            )
+            else:
+                disconnect_code, disconnect_reason = _connection_close_details(eg)
+                log.error(
+                    "ws_session_error",
+                    errors=[str(e) for e in eg.exceptions],
+                    close_code=disconnect_code,
+                    close_reason=disconnect_reason,
+                )
         finally:
+            if not browser_disconnected and disconnect_code is None:
+                disconnect_code, disconnect_reason = _websocket_close_details(stt_ws)
             if stt_ws is not None:
                 try:
                     await stt_ws.close()
@@ -513,42 +558,97 @@ async def translation_websocket(
 
         if browser_disconnected:
             break
+        if stt_finished_event.is_set():
+            break
+
+        if downtime_start == 0:
+            downtime_start = time.monotonic()
+        disconnected_at_ms = int(time.time() * 1000)
+        downtime_ms = int((time.monotonic() - downtime_start) * 1000)
+        log.warning(
+            "stt_disconnected",
+            disconnected_at_ms=disconnected_at_ms,
+            close_code=disconnect_code,
+            close_reason=disconnect_reason,
+            retry_count=retry_count,
+            downtime_ms=downtime_ms,
+        )
+        await add_connection_event(
+            conversation_id=conv_id,
+            soniox_session_id=session.id,
+            event_type="disconnect",
+            close_code=disconnect_code,
+            close_reason=(disconnect_reason or "")[:200],
+            occurred_at=disconnected_at_ms,
+        )
 
         # If we reach here without a browser disconnect, try reconnecting
-        if retry_count < MAX_RETRIES:
+        if retry_count < RECONNECT_MAX_RETRIES:
             retry_count += 1
-            delay = min(BASE_DELAY * (2 ** (retry_count - 1)), MAX_DELAY)
-            jitter = delay * 0.2 * random.random()
-            delay += jitter
-
-            if downtime_start == 0:
-                downtime_start = time.monotonic()
+            delay = _reconnect_delay(retry_count)
 
             await _safe_send_json(browser_ws, {
                 "reconnecting": True,
                 "attempt": retry_count,
-                "max_attempts": MAX_RETRIES,
+                "max_attempts": RECONNECT_MAX_RETRIES,
                 "downtime_start": int(downtime_start * 1000),
             })
-            log.info("stt_reconnecting", attempt=retry_count, max_attempts=MAX_RETRIES, delay=round(delay, 2))
+            log.info(
+                "stt_reconnecting",
+                attempt=retry_count,
+                max_attempts=RECONNECT_MAX_RETRIES,
+                delay_seconds=round(delay, 3),
+                downtime_ms=downtime_ms,
+                close_code=disconnect_code,
+                close_reason=disconnect_reason,
+            )
 
             # Buffer any incoming audio during the wait period
             try:
-                await asyncio.wait_for(
-                    _buffer_audio_during_reconnect(browser_ws, audio_buffer, MAX_AUDIO_BUFFER_BYTES, delay),
-                    timeout=delay,
+                dropped_bytes = await _buffer_audio_during_reconnect(
+                    browser_ws,
+                    audio_buffer,
+                    MAX_RECONNECT_AUDIO_BUFFER_BYTES,
+                    delay,
+                    on_text=_on_text["fn"],
                 )
-            except asyncio.TimeoutError:
-                pass
+                audio_dropped_bytes += dropped_bytes
+                if dropped_bytes:
+                    log.warning(
+                        "reconnect_audio_buffer_overflow",
+                        dropped_bytes=dropped_bytes,
+                        total_dropped_bytes=audio_dropped_bytes,
+                        buffered_bytes=len(audio_buffer),
+                        max_buffer_bytes=MAX_RECONNECT_AUDIO_BUFFER_BYTES,
+                        retry_count=retry_count,
+                        downtime_ms=int((time.monotonic() - downtime_start) * 1000),
+                    )
+            except WebSocketDisconnect:
+                browser_disconnected = True
+                break
         else:
             downtime_ms = int((time.monotonic() - downtime_start) * 1000)
             await _safe_send_json(browser_ws, {
                 "reconnect_failed": True,
                 "downtime_ms": downtime_ms,
-                "max_retries": MAX_RETRIES,
+                "max_retries": RECONNECT_MAX_RETRIES,
                 "error_message": "Không thể kết nối lại sau nhiều lần thử. Vui lòng kiểm tra kết nối mạng.",
             })
-            log.error("stt_reconnect_failed", retries=MAX_RETRIES, downtime_ms=downtime_ms)
+            log.error(
+                "stt_reconnect_failed",
+                retries=RECONNECT_MAX_RETRIES,
+                downtime_ms=downtime_ms,
+                close_code=disconnect_code,
+                close_reason=disconnect_reason,
+                dropped_audio_bytes=audio_dropped_bytes,
+            )
+            try:
+                await browser_ws.close(
+                    code=RECONNECT_EXHAUSTED_CLOSE_CODE,
+                    reason="stt_reconnect_exhausted",
+                )
+            except Exception:
+                pass
             break
 
     # Session cleanup
@@ -562,6 +662,10 @@ async def translation_websocket(
             await tts_ws.close()
         except Exception:
             pass
+    if tts_queue is not None:
+        await tts_queue.put((TTS_END, None))
+        await tts_queue.put(TTS_NONE)
+    tts_state["stt_done"] = True
     session.close()
     transcript_store.finish(session)
     await update_conversation(conv_id, ended_at=int(time.time() * 1000))
@@ -579,8 +683,15 @@ async def _buffer_audio_during_reconnect(
     audio_buffer: bytearray,
     max_bytes: int,
     max_wait: float,
-) -> None:
-    """Drain incoming audio into a buffer during reconnection."""
+    on_text: Callable[[dict], Awaitable[None]] | None = None,
+) -> int:
+    """Drain browser messages while reconnecting and return dropped bytes.
+
+    The buffer always retains the newest ``max_bytes`` of audio. Text control
+    messages (transcript snapshots and barge-in) are still dispatched instead
+    of being silently discarded during the outage.
+    """
+    dropped_bytes = 0
     deadline = time.monotonic() + max_wait
     while time.monotonic() < deadline:
         try:
@@ -588,27 +699,112 @@ async def _buffer_audio_during_reconnect(
             if remaining <= 0:
                 break
             msg = await asyncio.wait_for(browser_ws.receive(), timeout=min(remaining, 0.5))
+            if msg.get("type") == "websocket.disconnect":
+                raise WebSocketDisconnect(
+                    code=msg.get("code", 1000),
+                    reason=msg.get("reason", ""),
+                )
             if "bytes" in msg and msg["bytes"] is not None:
                 data = msg["bytes"]
-                if len(audio_buffer) + len(data) <= max_bytes:
+                if max_bytes <= 0:
+                    dropped_bytes += len(data)
+                elif len(data) >= max_bytes:
+                    dropped_bytes += len(audio_buffer) + len(data) - max_bytes
+                    audio_buffer[:] = data[-max_bytes:]
+                elif len(audio_buffer) + len(data) <= max_bytes:
                     audio_buffer.extend(data)
                 else:
-                    # Buffer overflow: discard oldest chunks
                     overflow = len(audio_buffer) + len(data) - max_bytes
-                    if overflow < len(audio_buffer):
-                        del audio_buffer[:overflow]
+                    del audio_buffer[:overflow]
                     audio_buffer.extend(data)
+                    dropped_bytes += overflow
+            elif msg.get("text") is not None and on_text is not None:
+                try:
+                    data = json.loads(msg["text"])
+                except json.JSONDecodeError:
+                    continue
+                await on_text(data)
         except asyncio.TimeoutError:
             continue
         except WebSocketDisconnect:
             raise
-        except Exception:
+        except Exception as e:
+            log.warning("reconnect_audio_buffer_stopped", error=str(e))
             break
+    return dropped_bytes
 
 
-def _has_browser_disconnect(eg: ExceptionGroup) -> bool:
+def _reconnect_delay(attempt: int, random_value: float | None = None) -> float:
+    """Return capped exponential backoff with up to 20% positive jitter."""
+    normalized_attempt = max(1, attempt)
+    exponential = min(
+        RECONNECT_BASE_DELAY_SECONDS * (2 ** (normalized_attempt - 1)),
+        RECONNECT_MAX_DELAY_SECONDS,
+    )
+    sample = random.random() if random_value is None else min(max(random_value, 0.0), 1.0)
+    return min(
+        exponential * (1 + RECONNECT_JITTER_RATIO * sample),
+        RECONNECT_MAX_DELAY_SECONDS,
+    )
+
+
+def _iter_leaf_exceptions(error: BaseException) -> Iterator[BaseException]:
+    if isinstance(error, BaseExceptionGroup):
+        for nested in error.exceptions:
+            yield from _iter_leaf_exceptions(nested)
+        return
+    yield error
+
+
+def _close_frame_details(source) -> tuple[int | None, str | None]:
+    code = getattr(source, "code", None)
+    reason = getattr(source, "reason", None)
+    if code is None:
+        for frame_name in ("rcvd", "sent"):
+            frame = getattr(source, frame_name, None)
+            if frame is not None:
+                code = getattr(frame, "code", None)
+                reason = getattr(frame, "reason", None)
+                if code is not None:
+                    break
+    try:
+        normalized_code = int(code) if code is not None else None
+    except (TypeError, ValueError):
+        normalized_code = None
+    return normalized_code, str(reason) if reason else None
+
+
+def _connection_close_details(error: BaseException) -> tuple[int, str]:
+    """Extract the actual WebSocket close code/reason from an exception tree."""
+    fallback_reason = ""
+    for leaf in _iter_leaf_exceptions(error):
+        code, reason = _close_frame_details(leaf)
+        if not fallback_reason and str(leaf):
+            fallback_reason = str(leaf)
+        if code is not None:
+            return code, reason or fallback_reason or type(leaf).__name__
+    return 1006, fallback_reason or type(error).__name__
+
+
+def _websocket_close_details(stt_ws) -> tuple[int, str]:
+    if stt_ws is not None:
+        code = getattr(stt_ws, "close_code", None)
+        reason = getattr(stt_ws, "close_reason", None)
+        if code is None:
+            code, reason = _close_frame_details(stt_ws)
+        else:
+            try:
+                code = int(code)
+            except (TypeError, ValueError):
+                code = None
+        if code is not None:
+            return code, str(reason) if reason else "STT WebSocket closed"
+    return 1006, "STT WebSocket closed without a close frame"
+
+
+def _has_browser_disconnect(eg: BaseExceptionGroup) -> bool:
     """Check if any exception in the group is a browser WebSocket disconnect."""
-    for e in eg.exceptions:
+    for e in _iter_leaf_exceptions(eg):
         if isinstance(e, WebSocketDisconnect):
             return True
         if isinstance(e, RuntimeError) and "close message has been sent" in str(e):

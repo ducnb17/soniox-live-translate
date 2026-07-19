@@ -384,9 +384,7 @@ $btnSaveTtsKey.addEventListener("click", async () => {
 loadTtsProviders();
 
 $btnRetry.addEventListener("click", () => {
-  setConnectionStatus("idle");
-  stop();
-  setState("idle", "Ready — press Start to try again");
+  void retryConnection();
 });
 
 // ---------------------------------------------------------------------------
@@ -539,7 +537,11 @@ let ws: WebSocket | null = null;
 let sessionId: string | null = null;
 let connectionStatus: ConnectionStatus = "idle";
 let pendingAudioBlobs: Blob[] = [];
+let pendingAudioOverflowed = false;
 let manualStopRequested = false;
+let lastWebSocketParams: Record<string, string> = {};
+let manualRetryInProgress = false;
+let resumeTranscriptOnNextSession = false;
 
 // Scheduled TTS audio sources for barge-in interrupt.
 let activeSources: AudioBufferSourceNode[] = [];
@@ -582,7 +584,18 @@ function flushPendingAudio(): void {
   pendingAudioBlobs = [];
 }
 
+
+function isRetryableSttError(data: SonioxSttResponse): boolean {
+  if (data.error_type === "service_unavailable" || data.error_type === "max_duration_reached") {
+    return true;
+  }
+  const numericCode = Number(data.error_code);
+  return Number.isFinite(numericCode) && numericCode >= 500;
+}
+
+
 function openWebSocket(extraParams: Record<string, string> = {}): Promise<void> {
+  lastWebSocketParams = { ...extraParams };
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const m = $mode();
   const params = new URLSearchParams({
@@ -635,6 +648,10 @@ function openWebSocket(extraParams: Record<string, string> = {}): Promise<void> 
       if (data.session_id) {
         sessionId = data.session_id;
         showSessionInfo(sessionId);
+        if (resumeTranscriptOnNextSession) {
+          resumeTranscriptOnNextSession = false;
+          sendTranscriptSnapshot();
+        }
         return;
       }
 
@@ -664,6 +681,12 @@ function openWebSocket(extraParams: Record<string, string> = {}): Promise<void> 
       }
 
       if (data.error_code || data.error_message) {
+        if (isRetryableSttError(data)) {
+          console.warn("Retryable STT error:", data.error_type, data.error_code);
+          setConnectionStatus("reconnecting");
+          setStatus("Kết nối STT bị gián đoạn, đang chuẩn bị thử lại…");
+          return;
+        }
         console.error("Server error:", data.error_code, data.error_message);
         const friendlyMsg = data.error_message
           ? data.error_message.replace(/code \d+/g, "").replace(/\(.*\)/g, "").trim()
@@ -688,17 +711,62 @@ function openWebSocket(extraParams: Record<string, string> = {}): Promise<void> 
       setConnectionStatus("idle");
       return;
     }
-    // Don't set idle immediately — backend may be reconnecting.
-    // The backend will send reconnecting/reconnected/reconnect_failed messages.
-    // If backend reconnects, the WS will be replaced so onclose on this ws is fine.
-    // If backend fails, we'll get reconnect_failed which calls cleanup.
     console.log("WebSocket closed", event.code, event.reason);
+    if (event.code === 4000) {
+      setConnectionStatus("failed");
+      setStatus("Không thể kết nối lại. Nhấn “Thử lại” để tiếp tục phiên.");
+    }
   };
 
   return new Promise<void>((resolve, reject) => {
     ws!.onopen = () => resolve();
     ws!.onerror = () => reject(new Error("WebSocket error"));
   });
+}
+
+
+function sendTranscriptSnapshot(): void {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const snapshot = [...utterances, currentUtt].filter(
+    (u) =>
+      u.originalFinal ||
+      u.translationFinal ||
+      u.originalPartial ||
+      u.translationPartial,
+  );
+  if (!snapshot.length) return;
+  try {
+    ws.send(JSON.stringify({ type: "utterances", utterances: snapshot }));
+  } catch { /* socket closed between readyState check and send */ }
+}
+
+
+async function retryConnection(): Promise<void> {
+  if (connectionStatus !== "failed" || manualRetryInProgress) return;
+  manualRetryInProgress = true;
+  manualStopRequested = false;
+  resumeTranscriptOnNextSession = true;
+  setConnectionStatus("reconnecting");
+  setStatus("Đang thử kết nối lại…");
+
+  try {
+    await openWebSocket(lastWebSocketParams);
+    setConnectionStatus("connected");
+    setStatus("Đã kết nối lại thủ công");
+    if (pendingAudioOverflowed) {
+      currentUtt.originalFinal += "[mất âm thanh trong lúc chờ thử lại; buffer trình duyệt đầy]";
+      pendingAudioOverflowed = false;
+      render();
+    }
+    flushPendingAudio();
+  } catch (error) {
+    console.error("Manual reconnect failed", error);
+    resumeTranscriptOnNextSession = false;
+    setConnectionStatus("failed");
+    setStatus("Thử lại chưa thành công. Vui lòng kiểm tra mạng và thử lại.");
+  } finally {
+    manualRetryInProgress = false;
+  }
 }
 
 
@@ -800,10 +868,12 @@ async function startRecorder(): Promise<void> {
     if (e.data.size > 0) {
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(e.data);
-      } else if (connectionStatus === "reconnecting") {
-        if (pendingAudioBlobs.length < 100) {
-          pendingAudioBlobs.push(e.data);
+      } else if (connectionStatus === "reconnecting" || connectionStatus === "failed") {
+        if (pendingAudioBlobs.length >= 100) {
+          pendingAudioBlobs.shift();
+          pendingAudioOverflowed = true;
         }
+        pendingAudioBlobs.push(e.data);
       }
     }
   };
@@ -1016,19 +1086,9 @@ function cleanup(): void {
   saveToHistory([...utterances, currentUtt], $mode(), $targetLang.value);
 
   pendingAudioBlobs = [];
+  pendingAudioOverflowed = false;
 
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    try {
-      const snapshot = [...utterances, currentUtt].filter(
-        (u) =>
-          u.originalFinal ||
-          u.translationFinal ||
-          u.originalPartial ||
-          u.translationPartial,
-      );
-      ws.send(JSON.stringify({ type: "utterances", utterances: snapshot }));
-    } catch { /* ws closed */ }
-  }
+  sendTranscriptSnapshot();
 
   stopBargeVad();
   if (mediaRecorder) {

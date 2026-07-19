@@ -10,7 +10,8 @@ export interface SonioxToken {
 export interface SonioxSttResponse {
   tokens?: SonioxToken[];
   finished?: boolean;
-  error_code?: string;
+  error_code?: string | number;
+  error_type?: string;
   error_message?: string;
   session_done?: boolean;
   session_id?: string;
@@ -22,6 +23,8 @@ export interface SonioxSttResponse {
   reconnected?: boolean;
   downtime_ms?: number;
   downtime_text?: string;
+  buffered_audio_bytes?: number;
+  dropped_audio_bytes?: number;
   reconnect_failed?: boolean;
   max_retries?: number;
   error_message_plain?: string;

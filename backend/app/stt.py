@@ -103,6 +103,8 @@ async def handle_stt(
     target_lang: str | None,
     on_endpoint: Callable[[], Awaitable[None]] | None = None,
     on_final_segment: Callable[[dict], Awaitable[None]] | None = None,
+    finalize_session_on_exit: bool = True,
+    finished_event: asyncio.Event | None = None,
 ) -> None:
     """Read STT responses: forward to browser, route tokens to TTS queue,
     call `on_endpoint` whenever an <end> token closes an utterance,
@@ -113,6 +115,7 @@ async def handle_stt(
     current_speaker = None
     current_lang = None
     utterance_start_ms: int | None = None
+    stream_finished = False
     try:
         while True:
             message = await stt_ws.recv()
@@ -139,7 +142,8 @@ async def handle_stt(
                 if text == "<end>":
                     got_end = True
                     direction = _direction(token, mode, lang_a, lang_b)
-                    await tts_queue.put((TTS_END, direction))
+                    if tts_queue is not None:
+                        await tts_queue.put((TTS_END, direction))
                     if on_endpoint is not None:
                         await on_endpoint()
                     if on_final_segment is not None and (current_original or current_translation):
@@ -162,7 +166,8 @@ async def handle_stt(
                     target = _resolve_tts_target(
                         token, mode, lang_a, lang_b, target_lang
                     )
-                    await tts_queue.put((TTS_TEXT, text, target))
+                    if tts_queue is not None:
+                        await tts_queue.put((TTS_TEXT, text, target))
                     text_pushed = True
                 else:
                     if token.get("is_final"):
@@ -176,21 +181,28 @@ async def handle_stt(
                     text_pushed = True
 
             if data.get("finished"):
+                stream_finished = True
+                if finished_event is not None:
+                    finished_event.set()
                 break
     except (WebSocketDisconnect, RuntimeError, websockets.ConnectionClosedOK):
         pass
     except websockets.ConnectionClosedError as e:
         log.warning("stt_ws_closed", error=str(e))
     finally:
-        if tts_queue is not None:
-            await tts_queue.put((TTS_END, None))
-            await tts_queue.put(TTS_NONE)
-        tts_state["stt_done"] = True
-        if not text_pushed:
-            try:
-                await browser_ws.send_json({"session_done": True})
-            except Exception:
-                pass
+        # A transient Soniox disconnect must not terminate the shared TTS
+        # queue. The reconnect loop owns final session cleanup and passes
+        # finalize_session_on_exit=False for each individual STT connection.
+        if finalize_session_on_exit or stream_finished:
+            if tts_queue is not None:
+                await tts_queue.put((TTS_END, None))
+                await tts_queue.put(TTS_NONE)
+            tts_state["stt_done"] = True
+            if tts_queue is None or not text_pushed:
+                try:
+                    await browser_ws.send_json({"session_done": True})
+                except Exception:
+                    pass
 
 
 def _resolve_tts_target(
@@ -233,7 +245,7 @@ async def stt_keepalive(stt_ws) -> None:
     try:
         while True:
             await asyncio.sleep(STT_KEEPALIVE_INTERVAL)
-            await stt_ws.send(json.dumps({"keep_alive": True}))
+            await stt_ws.send(json.dumps({"type": "keepalive"}))
     except websockets.ConnectionClosedOK:
         pass
     except websockets.ConnectionClosedError as e:
