@@ -22,6 +22,13 @@ TTS_AUDIO_FORMAT = "pcm_s16le"
 # Keepalive cadence for the idle TTS WebSocket connection (seconds).
 TTS_KEEPALIVE_INTERVAL = 20
 
+# Keepalive cadence for the idle STT WebSocket connection (seconds). Soniox
+# closes an STT connection that receives no messages for ~20-25s, so this
+# must stay comfortably under that threshold. Without this, the STT socket
+# silently drops every 10-25s during pauses in speech (no audio flowing).
+STT_KEEPALIVE_INTERVAL = 15
+
+
 # Endpointing: fires the <end> token when the speaker pauses, letting us
 # finalize the current TTS utterance stream quickly.
 MAX_ENDPOINT_DELAY_MS = 500
@@ -58,6 +65,27 @@ VOICES = [
     "Noah",
     "Owen",
 ]
+
+TTS_PROVIDERS = ["soniox", "openai"]
+
+VOICES_BY_PROVIDER: dict[str, list[str]] = {
+    "soniox": VOICES,
+    "openai": [
+        "alloy",
+        "echo",
+        "fable",
+        "onyx",
+        "nova",
+        "shimmer",
+        "coral",
+        "ash",
+        "sage",
+        "ballad",
+        "verse",
+    ],
+}
+
+DEFAULT_TTS_PROVIDER = "soniox"
 
 LANGUAGES = [
     ("af", "Afrikaans"),
@@ -129,6 +157,14 @@ def languages_json() -> str:
 
 def voices_json() -> str:
     return json.dumps(VOICES)
+
+
+def providers_json() -> str:
+    return json.dumps(TTS_PROVIDERS)
+
+
+def voices_by_provider_json() -> str:
+    return json.dumps(VOICES_BY_PROVIDER)
 
 
 def set_api_key(key: str) -> None:

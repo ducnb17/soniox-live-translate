@@ -1,10 +1,20 @@
+
+
 import {
   TTS_SAMPLE_RATE,
   BARGE_RMS_THRESHOLD,
   BARGE_HOLD_MS,
   BARGE_TTS_START_GRACE_MS,
+  RECONNECT_MAX_ATTEMPTS,
+  RECONNECT_BASE_DELAY_MS,
+  RECONNECT_MAX_DELAY_MS,
+  INPUT_DEVICE_KEY,
+  OUTPUT_DEVICE_KEY,
+  DEVICE_TEST_DURATION_MS,
   LANGUAGES,
-  VOICES,
+  TTS_PROVIDERS,
+  VOICES_BY_PROVIDER,
+  DEFAULT_TTS_PROVIDER,
 
   type SonioxSttResponse,
   type Utterance,
@@ -12,7 +22,21 @@ import {
   type AppState,
   type TranslationMode,
   type AudioSource,
+  type ConfigResponse,
 } from "./types";
+
+import {
+  listSessions,
+  getSession,
+  saveSession,
+  deleteSession,
+  clearSessions,
+  migrateFromLocalStorage,
+  type HistoryEntry,
+} from "./db";
+
+void migrateFromLocalStorage();
+
 
 
 // UTF-8 safe base64 (handles non-ASCII context text).
@@ -46,6 +70,8 @@ const $twoWayBlock = $<HTMLDivElement>("two-way-block");
 const $voice = $<HTMLSelectElement>("voice");
 const $voiceB = $<HTMLSelectElement>("voice-b");
 const $voiceBBlock = $<HTMLDivElement>("voice-b-block");
+const $providerA = $<HTMLSelectElement>("tts-provider");
+const $providerB = $<HTMLSelectElement>("tts-provider-b");
 const $diarization = $<HTMLInputElement>("diarization");
 const $langId = $<HTMLInputElement>("lang-id");
 const $tts = $<HTMLInputElement>("tts");
@@ -68,6 +94,17 @@ const $transcriptLink = $<HTMLAnchorElement>("transcript-link");
 const $dlJson = $<HTMLButtonElement>("dl-json");
 const $dlCsv = $<HTMLButtonElement>("dl-csv");
 const $themeToggle = $<HTMLButtonElement>("theme-toggle");
+const $retryBtn = $<HTMLButtonElement>("retry-btn");
+const $inputDevice = $<HTMLSelectElement>("input-device");
+const $outputDevice = $<HTMLSelectElement>("output-device");
+const $testInputBtn = $<HTMLButtonElement>("test-input-btn");
+const $testOutputBtn = $<HTMLButtonElement>("test-output-btn");
+const $inputVuMeter = $<HTMLDivElement>("input-vu-meter");
+const $inputVuBar = $<HTMLDivElement>("input-vu-bar");
+const $deviceFallbackWarning = $<HTMLParagraphElement>("device-fallback-warning");
+const $outputTestAudio = $<HTMLAudioElement>("output-test-audio");
+
+
 
 // ---------------------------------------------------------------------------
 // Populate selectors
@@ -82,21 +119,44 @@ function populateLangs(select: HTMLSelectElement, value: string): void {
   select.value = value;
 }
 
-function populateVoices(select: HTMLSelectElement, value: string): void {
-  for (const name of VOICES) {
+function populateVoices(select: HTMLSelectElement, provider: string, value: string): void {
+  select.innerHTML = "";
+  const voices = VOICES_BY_PROVIDER[provider] ?? VOICES_BY_PROVIDER[DEFAULT_TTS_PROVIDER];
+  for (const name of voices) {
     const opt = document.createElement("option");
     opt.value = name;
     opt.textContent = name;
     select.appendChild(opt);
   }
-  select.value = value;
+  select.value = voices.includes(value) ? value : voices[0] ?? "";
+}
+
+function populateProviders(select: HTMLSelectElement, value: string): void {
+  select.innerHTML = "";
+  for (const name of TTS_PROVIDERS) {
+    const opt = document.createElement("option");
+    opt.value = name;
+    opt.textContent = name;
+    select.appendChild(opt);
+  }
+  select.value = TTS_PROVIDERS.includes(value) ? value : DEFAULT_TTS_PROVIDER;
+}
+
+function rehydrateVoice(select: HTMLSelectElement, provider: string): void {
+  const current = select.value;
+  populateVoices(select, provider, current);
 }
 
 populateLangs($targetLang, "vi");
 populateLangs($langA, "en");
 populateLangs($langB, "es");
-populateVoices($voice, "Maya");
-populateVoices($voiceB, "Daniel");
+populateProviders($providerA, DEFAULT_TTS_PROVIDER);
+populateProviders($providerB, DEFAULT_TTS_PROVIDER);
+populateVoices($voice, $providerA.value, "Maya");
+populateVoices($voiceB, $providerB.value, "Daniel");
+
+$providerA.addEventListener("change", () => rehydrateVoice($voice, $providerA.value));
+$providerB.addEventListener("change", () => rehydrateVoice($voiceB, $providerB.value));
 
 // ---------------------------------------------------------------------------
 // Mode toggle
@@ -117,38 +177,12 @@ const DEFAULT_AUDIO_URL = "https://soniox.com/media/examples/spanish_weather_rep
 $audioUrl.value = new URLSearchParams(location.search).get("audio") || DEFAULT_AUDIO_URL;
 
 // ---------------------------------------------------------------------------
-// Session History (localStorage)
+// Session History (IndexedDB)
 // ---------------------------------------------------------------------------
-const HISTORY_KEY = "soniox_history_v1";
-const HISTORY_MAX = 50;
-
-interface HistoryEntry {
-  id: string;
-  ts: number;
-  mode: string;
-  targetLang: string;
-  utteranceCount: number;
-  utterances: Utterance[];
-}
-
-const sessionHistory = {
-  load(): HistoryEntry[] {
-    try { return JSON.parse(localStorage.getItem(HISTORY_KEY) ?? "[]"); }
-    catch { return []; }
-  },
-  save(entries: HistoryEntry[]): void {
-    try { localStorage.setItem(HISTORY_KEY, JSON.stringify(entries.slice(0, HISTORY_MAX))); }
-    catch { /* storage full */ }
-  },
-  push(entry: HistoryEntry): void { const l = this.load(); l.unshift(entry); this.save(l); },
-  remove(id: string): void       { this.save(this.load().filter((e) => e.id !== id)); },
-  clear(): void                  { localStorage.removeItem(HISTORY_KEY); },
-};
-
-function saveToHistory(utts: Utterance[], translationMode: string, targetLang: string): void {
+async function saveToHistory(utts: Utterance[], translationMode: string, targetLang: string): Promise<void> {
   const final = utts.filter((u) => u.originalFinal || u.translationFinal);
   if (!final.length) return;
-  sessionHistory.push({
+  await saveSession({
     id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
     ts: Date.now(),
     mode: translationMode,
@@ -157,13 +191,13 @@ function saveToHistory(utts: Utterance[], translationMode: string, targetLang: s
     utterances: final,
   });
   const panel = document.getElementById("history-panel");
-  if (panel?.classList.contains("open")) renderHistoryPanel();
+  if (panel?.classList.contains("open")) void renderHistoryPanel();
 }
 
-function renderHistoryPanel(): void {
+async function renderHistoryPanel(): Promise<void> {
   const list = document.getElementById("history-list");
   if (!list) return;
-  const entries = sessionHistory.load();
+  const entries = await listSessions();
   if (!entries.length) {
     list.innerHTML = '<p class="history-empty">Chưa có phiên nào.</p>';
     return;
@@ -192,44 +226,50 @@ function renderHistoryPanel(): void {
 
   list.querySelectorAll<HTMLButtonElement>(".hbtn-view").forEach((b) => {
     b.onclick = () => {
-      const e = sessionHistory.load().find((x) => x.id === b.dataset.id);
-      if (e) { utterances = e.utterances; render(); }
+      void (async () => {
+        const e = await getSession(b.dataset.id!);
+        if (e) { utterances = e.utterances; render(); }
+      })();
     };
   });
   list.querySelectorAll<HTMLButtonElement>(".hbtn-json").forEach((b) => {
     b.onclick = () => {
-      const e = sessionHistory.load().find((x) => x.id === b.dataset.id);
-      if (e) downloadBlob(new Blob([JSON.stringify(e, null, 2)], { type: "application/json" }), `transcript-${e.id}.json`);
+      void (async () => {
+        const e = await getSession(b.dataset.id!);
+        if (e) downloadBlob(new Blob([JSON.stringify(e, null, 2)], { type: "application/json" }), `transcript-${e.id}.json`);
+      })();
     };
   });
   list.querySelectorAll<HTMLButtonElement>(".hbtn-csv").forEach((b) => {
     b.onclick = () => {
-      const e = sessionHistory.load().find((x) => x.id === b.dataset.id);
-      if (!e) return;
-      const rows = [
-        ["speaker", "language", "original", "translation"].join(","),
-        ...e.utterances.map((u) =>
-          [u.speaker ?? "", u.language ?? "",
-           `"${(u.originalFinal ?? "").replace(/"/g, '""')}"`,
-           `"${(u.translationFinal ?? "").replace(/"/g, '""')}"`,
-          ].join(",")
-        ),
-      ];
-      downloadBlob(new Blob(["\uFEFF" + rows.join("\r\n")], { type: "text/csv;charset=utf-8" }), `transcript-${e.id}.csv`);
+      void (async () => {
+        const e = await getSession(b.dataset.id!);
+        if (!e) return;
+        const rows = [
+          ["speaker", "language", "original", "translation"].join(","),
+          ...e.utterances.map((u: Utterance) =>
+            [u.speaker ?? "", u.language ?? "",
+             `"${(u.originalFinal ?? "").replace(/"/g, '""')}"`,
+             `"${(u.translationFinal ?? "").replace(/"/g, '""')}"`,
+            ].join(",")
+          ),
+        ];
+        downloadBlob(new Blob(["\uFEFF" + rows.join("\r\n")], { type: "text/csv;charset=utf-8" }), `transcript-${e.id}.csv`);
+      })();
     };
   });
   list.querySelectorAll<HTMLButtonElement>(".hbtn-del").forEach((b) => {
-    b.onclick = () => { sessionHistory.remove(b.dataset.id!); renderHistoryPanel(); };
+    b.onclick = () => { void (async () => { await deleteSession(b.dataset.id!); await renderHistoryPanel(); })(); };
   });
 }
 
-function toggleHistoryPanel(): void {
+async function toggleHistoryPanel(): Promise<void> {
   const panel = document.getElementById("history-panel");
   const btn   = document.getElementById("btn-history-toggle");
   if (!panel || !btn) return;
   const open = panel.classList.toggle("open");
   btn.textContent = open ? "Lịch sử ▲" : "Lịch sử ▼";
-  if (open) renderHistoryPanel();
+  if (open) await renderHistoryPanel();
 }
 
 // ---------------------------------------------------------------------------
@@ -264,8 +304,17 @@ let micStream: MediaStream | null = null;
 let bargeTtsStartedAt = 0;
 let wasTtsAudible = false;
 
+// WebSocket auto-reconnect state.
+let reconnectAttempt = 0;
+let reconnectTimer: number | null = null;
+let intentionalClose = false;
+let lastExtraParams: Record<string, string> = {};
+let pendingAudioChunks: Blob[] = [];
+const PENDING_AUDIO_MAX = 300;
+
 
 function newUtt(): Utterance {
+
   return {
     speaker: null,
     language: null,
@@ -280,24 +329,30 @@ function newUtt(): Utterance {
 // WebSocket
 // ---------------------------------------------------------------------------
 function openWebSocket(extraParams: Record<string, string> = {}): Promise<void> {
+  lastExtraParams = extraParams;
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const m = $mode();
+
   const params = new URLSearchParams({
     mode: m,
     lang_id: String($langId.checked),
     diarize: String($diarization.checked),
-    voice: $voice.value,
     tts: String($tts.checked),
     ...extraParams,
   });
 
   if (m === "one_way") {
     params.set("target_lang", $targetLang.value);
+    params.set("voice", $voice.value);
+    params.set("provider", $providerA.value);
   } else {
     params.set("lang_a", $langA.value);
     params.set("lang_b", $langB.value);
     params.set("target_lang", $langB.value);
+    params.set("voice", $voice.value);
+    params.set("provider", $providerA.value);
     params.set("voice_b", $voiceB.value);
+    params.set("provider_b", $providerB.value);
   }
 
   const ctxText = $contextJson.value.trim();
@@ -325,6 +380,7 @@ function openWebSocket(extraParams: Record<string, string> = {}): Promise<void> 
       }
       if (data.error_code || data.error_message) {
         console.error("Server error:", data.error_code, data.error_message);
+        intentionalClose = true;
         setState("idle", data.error_message || `Server error: ${data.error_code}`);
         cleanup();
         return;
@@ -337,8 +393,11 @@ function openWebSocket(extraParams: Record<string, string> = {}): Promise<void> 
   };
 
   ws.onclose = (event: CloseEvent) => {
-    if (state !== "idle") {
-      console.warn("WebSocket closed unexpectedly", event.code, event.reason);
+    if (intentionalClose || state === "idle") return;
+    console.warn("WebSocket closed unexpectedly", event.code, event.reason);
+    if (state === "recording" || state === "playing-file" || state === "reconnecting") {
+      scheduleReconnect(event.code, event.reason);
+    } else {
       setState(
         "idle",
         `Connection closed unexpectedly (code ${event.code}${event.reason ? ": " + event.reason : ""})`,
@@ -348,10 +407,87 @@ function openWebSocket(extraParams: Record<string, string> = {}): Promise<void> 
   };
 
   return new Promise<void>((resolve, reject) => {
-    ws!.onopen = () => resolve();
+    ws!.onopen = () => {
+      intentionalClose = false;
+      flushPendingAudio();
+      resolve();
+    };
     ws!.onerror = () => reject(new Error("WebSocket error"));
   });
 }
+
+// ---------------------------------------------------------------------------
+// Auto-reconnect
+// ---------------------------------------------------------------------------
+function showRetryButton(): void {
+  $retryBtn.classList.remove("hidden");
+}
+
+function hideRetryButton(): void {
+  $retryBtn.classList.add("hidden");
+}
+
+function flushPendingAudio(): void {
+  if (!pendingAudioChunks.length || !ws || ws.readyState !== WebSocket.OPEN) return;
+  for (const chunk of pendingAudioChunks) {
+    try { ws.send(chunk); } catch { /* ws closed mid-flush */ }
+  }
+  pendingAudioChunks = [];
+}
+
+function scheduleReconnect(code: number, reason: string): void {
+  if (reconnectTimer !== null) return;
+
+  reconnectAttempt += 1;
+  if (reconnectAttempt > RECONNECT_MAX_ATTEMPTS) {
+    console.warn(`Reconnect: giving up after ${RECONNECT_MAX_ATTEMPTS} attempts`);
+    setState(
+      "idle",
+      `Connection lost (code ${code}${reason ? ": " + reason : ""}). Reconnect attempts exhausted.`,
+    );
+    cleanup();
+    return;
+  }
+
+  const backoff = Math.min(RECONNECT_BASE_DELAY_MS * 2 ** (reconnectAttempt - 1), RECONNECT_MAX_DELAY_MS);
+  const jitter = Math.random() * backoff * 0.2;
+  const delay = Math.round(backoff + jitter);
+
+  console.warn(
+    `Reconnect: attempt ${reconnectAttempt}/${RECONNECT_MAX_ATTEMPTS} in ${delay}ms (code ${code}${reason ? ": " + reason : ""})`,
+  );
+  setState(
+    "reconnecting",
+    `Reconnecting… (attempt ${reconnectAttempt}/${RECONNECT_MAX_ATTEMPTS})`,
+  );
+  showRetryButton();
+
+  reconnectTimer = window.setTimeout(() => {
+    reconnectTimer = null;
+    void doReconnect();
+  }, delay);
+}
+
+async function doReconnect(): Promise<void> {
+  try {
+    await openWebSocket(lastExtraParams);
+    reconnectAttempt = 0;
+    hideRetryButton();
+    setState(mode === "file" ? "playing-file" : "recording");
+  } catch (err) {
+    console.warn("Reconnect attempt failed:", (err as Error).message);
+    scheduleReconnect(0, (err as Error).message);
+  }
+}
+
+function manualRetry(): void {
+  if (reconnectTimer !== null) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  void doReconnect();
+}
+
 
 
 function showSessionInfo(id: string): void {
@@ -432,11 +568,19 @@ async function acquireInputStream(): Promise<MediaStream> {
   // without this, the mic can pick up the speaker's own TTS playback as
   // echo, which the barge-in VAD then misreads as the user talking over
   // the TTS.
-  return navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-  });
+  const audioConstraints: MediaTrackConstraints = {
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+  };
+  const selectedInputId = $inputDevice.value;
+  if (selectedInputId && selectedInputId !== "default") {
+    audioConstraints.deviceId = { exact: selectedInputId };
+  }
+  return navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
 
 }
+
 
 async function startRecorder(): Promise<void> {
   micStream = await acquireInputStream();
@@ -444,10 +588,19 @@ async function startRecorder(): Promise<void> {
 
 
   mediaRecorder.ondataavailable = (e: BlobEvent) => {
-    if (e.data.size > 0 && ws && ws.readyState === WebSocket.OPEN) {
+    if (e.data.size === 0) return;
+    if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(e.data);
+    } else if (ws) {
+      // Connection is down (reconnecting): buffer audio so it can be
+      // flushed once the socket reopens, capped to avoid unbounded growth.
+      pendingAudioChunks.push(e.data);
+      if (pendingAudioChunks.length > PENDING_AUDIO_MAX) {
+        pendingAudioChunks.splice(0, pendingAudioChunks.length - PENDING_AUDIO_MAX);
+      }
     }
   };
+
 
   mediaRecorder.start(100);
 
@@ -580,8 +733,200 @@ function stopBargeVad(): void {
 }
 
 // ---------------------------------------------------------------------------
+// Audio device selection (input/output)
+// ---------------------------------------------------------------------------
+const supportsSinkId = "setSinkId" in HTMLMediaElement.prototype;
+
+function showDeviceWarning(msg: string): void {
+  $deviceFallbackWarning.textContent = msg;
+  $deviceFallbackWarning.classList.remove("hidden");
+}
+
+function hideDeviceWarning(): void {
+  $deviceFallbackWarning.classList.add("hidden");
+}
+
+function loadStoredDevice(key: string): string {
+  try { return localStorage.getItem(key) ?? ""; } catch { return ""; }
+}
+
+function saveStoredDevice(key: string, value: string): void {
+  try { localStorage.setItem(key, value); } catch { /* storage disabled */ }
+}
+
+async function populateDeviceLists(): Promise<void> {
+  let devices: MediaDeviceInfo[];
+  try {
+    devices = await navigator.mediaDevices.enumerateDevices();
+  } catch {
+    return;
+  }
+
+  const inputs = devices.filter((d) => d.kind === "audioinput");
+  const outputs = devices.filter((d) => d.kind === "audiooutput");
+
+  const storedInput = loadStoredDevice(INPUT_DEVICE_KEY);
+  const storedOutput = loadStoredDevice(OUTPUT_DEVICE_KEY);
+  let missing = false;
+
+  $inputDevice.innerHTML = "";
+  const defaultInputOpt = document.createElement("option");
+  defaultInputOpt.value = "default";
+  defaultInputOpt.textContent = "Default microphone";
+  $inputDevice.appendChild(defaultInputOpt);
+  inputs.forEach((d, i) => {
+    const opt = document.createElement("option");
+    opt.value = d.deviceId;
+    opt.textContent = d.label || `Microphone ${i + 1}`;
+    $inputDevice.appendChild(opt);
+  });
+  if (storedInput && inputs.some((d) => d.deviceId === storedInput)) {
+    $inputDevice.value = storedInput;
+  } else {
+    if (storedInput) missing = true;
+    $inputDevice.value = "default";
+  }
+
+  $outputDevice.innerHTML = "";
+  const defaultOutputOpt = document.createElement("option");
+  defaultOutputOpt.value = "default";
+  defaultOutputOpt.textContent = "Default speaker";
+  $outputDevice.appendChild(defaultOutputOpt);
+  outputs.forEach((d, i) => {
+    const opt = document.createElement("option");
+    opt.value = d.deviceId;
+    opt.textContent = d.label || `Speaker ${i + 1}`;
+    $outputDevice.appendChild(opt);
+  });
+  if (storedOutput && outputs.some((d) => d.deviceId === storedOutput)) {
+    $outputDevice.value = storedOutput;
+  } else {
+    if (storedOutput) missing = true;
+    $outputDevice.value = "default";
+  }
+
+  if (missing) {
+    showDeviceWarning("A previously selected device is no longer available; reverted to default.");
+  } else if (!supportsSinkId) {
+    showDeviceWarning("This browser does not support choosing an output device; using system default.");
+  } else {
+    hideDeviceWarning();
+  }
+}
+
+let deviceTestStream: MediaStream | null = null;
+let deviceTestCtx: AudioContext | null = null;
+let deviceTestAnalyser: AnalyserNode | null = null;
+let deviceTestArray: Uint8Array<ArrayBuffer> | null = null;
+let deviceTestRaf: number | null = null;
+let deviceTestTimer: number | null = null;
+
+function stopInputDeviceTest(): void {
+  if (deviceTestRaf) cancelAnimationFrame(deviceTestRaf);
+  deviceTestRaf = null;
+  if (deviceTestTimer) clearTimeout(deviceTestTimer);
+  deviceTestTimer = null;
+  deviceTestAnalyser = null;
+  deviceTestArray = null;
+  if (deviceTestStream) {
+    deviceTestStream.getTracks().forEach((t) => t.stop());
+    deviceTestStream = null;
+  }
+  if (deviceTestCtx) {
+    void deviceTestCtx.close();
+    deviceTestCtx = null;
+  }
+  $inputVuMeter.classList.add("hidden");
+  $inputVuBar.style.width = "0%";
+  $testInputBtn.disabled = false;
+}
+
+function tickDeviceTest(): void {
+  if (!deviceTestAnalyser || !deviceTestArray) return;
+  deviceTestAnalyser.getByteTimeDomainData(deviceTestArray);
+  let sum = 0;
+  for (let i = 0; i < deviceTestArray.length; i++) {
+    const v = (deviceTestArray[i] - 128) / 128;
+    sum += v * v;
+  }
+  const rms = Math.sqrt(sum / deviceTestArray.length);
+  const pct = Math.min(100, Math.round(rms * 200));
+  $inputVuBar.style.width = `${pct}%`;
+  deviceTestRaf = requestAnimationFrame(tickDeviceTest);
+}
+
+async function testInputDevice(): Promise<void> {
+  stopInputDeviceTest();
+  $testInputBtn.disabled = true;
+  const selectedId = $inputDevice.value;
+  const constraints: MediaTrackConstraints = {};
+  if (selectedId && selectedId !== "default") constraints.deviceId = { exact: selectedId };
+
+  try {
+    deviceTestStream = await navigator.mediaDevices.getUserMedia({ audio: constraints });
+  } catch (err) {
+    showDeviceWarning(`Could not access microphone: ${(err as Error).message}`);
+    $testInputBtn.disabled = false;
+    return;
+  }
+
+  deviceTestCtx = new AudioContext();
+  const source = deviceTestCtx.createMediaStreamSource(deviceTestStream);
+  const analyser = deviceTestCtx.createAnalyser();
+  analyser.fftSize = 512;
+  analyser.smoothingTimeConstant = 0.4;
+  source.connect(analyser);
+  deviceTestAnalyser = analyser;
+  deviceTestArray = new Uint8Array(new ArrayBuffer(analyser.fftSize));
+  $inputVuMeter.classList.remove("hidden");
+  tickDeviceTest();
+
+  deviceTestTimer = window.setTimeout(() => stopInputDeviceTest(), DEVICE_TEST_DURATION_MS);
+}
+
+async function testOutputDevice(): Promise<void> {
+  const selectedId = $outputDevice.value;
+  const testCtx = new AudioContext();
+  const oscillator = testCtx.createOscillator();
+  oscillator.type = "sine";
+  oscillator.frequency.value = 440;
+  const gain = testCtx.createGain();
+  gain.gain.value = 0.2;
+  const dest = testCtx.createMediaStreamDestination();
+  oscillator.connect(gain);
+  gain.connect(dest);
+
+  $outputTestAudio.srcObject = dest.stream;
+
+  if (supportsSinkId && selectedId && selectedId !== "default") {
+    try {
+      await ($outputTestAudio as unknown as { setSinkId(id: string): Promise<void> }).setSinkId(selectedId);
+    } catch (err) {
+      showDeviceWarning(`Could not route audio to selected output: ${(err as Error).message}`);
+    }
+  } else if (!supportsSinkId) {
+    showDeviceWarning("This browser does not support choosing an output device; playing on system default.");
+  }
+
+  oscillator.start();
+  try {
+    await $outputTestAudio.play();
+  } catch { /* autoplay may be blocked; user gesture triggered this so should be fine */ }
+
+  window.setTimeout(() => {
+    oscillator.stop();
+    $outputTestAudio.pause();
+    $outputTestAudio.srcObject = null;
+    void testCtx.close();
+  }, 1500);
+}
+
+navigator.mediaDevices.ondevicechange = () => void populateDeviceLists();
+
+// ---------------------------------------------------------------------------
 // Session lifecycle
 // ---------------------------------------------------------------------------
+
 function resetSession(): void {
   audioCtx = new AudioContext({ sampleRate: TTS_SAMPLE_RATE });
   nextPlayTime = 0;
@@ -640,13 +985,23 @@ async function playFile(): Promise<void> {
 
 
 function stop(): void {
+  intentionalClose = true;
   setState("idle");
   cleanup();
 }
 
 function cleanup(): void {
+  if (reconnectTimer !== null) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  reconnectAttempt = 0;
+  pendingAudioChunks = [];
+  hideRetryButton();
+
   // Auto-save completed utterances to session history
-  saveToHistory([...utterances, currentUtt], $mode(), $targetLang.value);
+  void saveToHistory([...utterances, currentUtt], $mode(), $targetLang.value);
+
 
   if (ws && ws.readyState === WebSocket.OPEN) {
     try {
@@ -700,9 +1055,13 @@ function setState(s: AppState, message?: string): void {
   $langB.disabled = busy;
   $voice.disabled = busy;
   $voiceB.disabled = busy;
+  $providerA.disabled = busy;
+  $providerB.disabled = busy;
   $diarization.disabled = busy;
   $langId.disabled = busy;
   $tts.disabled = busy;
+  $inputDevice.disabled = busy;
+  $outputDevice.disabled = busy;
   document.querySelectorAll<HTMLInputElement>("input[name=mode]").forEach((r) => (r.disabled = busy));
   document.querySelectorAll<HTMLInputElement>("input[name=audio-source]").forEach((r) => (r.disabled = busy));
   syncBargeAvailability();
@@ -711,8 +1070,10 @@ function setState(s: AppState, message?: string): void {
 
   else if (s === "recording") setStatus("Listening…");
   else if (s === "playing-file") setStatus("Playing audio…");
+  else if (s === "reconnecting") setStatus("Reconnecting…");
   else setStatus("Ready");
 }
+
 
 
 // Barge-in only applies to Microphone input (see startRecorder). Keep the
@@ -935,6 +1296,13 @@ function refreshDownloadButtons(): void {
 
 $dlJson.addEventListener("click", downloadTranscriptJson);
 $dlCsv.addEventListener("click", downloadTranscriptCsv);
+$retryBtn.addEventListener("click", manualRetry);
+$inputDevice.addEventListener("change", () => saveStoredDevice(INPUT_DEVICE_KEY, $inputDevice.value));
+$outputDevice.addEventListener("change", () => saveStoredDevice(OUTPUT_DEVICE_KEY, $outputDevice.value));
+$testInputBtn.addEventListener("click", () => void testInputDevice());
+$testOutputBtn.addEventListener("click", () => void testOutputDevice());
+void populateDeviceLists();
+
 
 // ---------------------------------------------------------------------------
 // Dark mode
@@ -961,7 +1329,7 @@ $themeToggle.addEventListener("click", () => {
 // ---------------------------------------------------------------------------
 (window as unknown as Record<string, unknown>)["toggleHistoryPanel"] = toggleHistoryPanel;
 (window as unknown as Record<string, unknown>)["renderHistoryPanel"] = renderHistoryPanel;
-(window as unknown as Record<string, unknown>)["sessionHistory"] = sessionHistory;
+(window as unknown as Record<string, unknown>)["clearHistory"] = async () => { await clearSessions(); await renderHistoryPanel(); };
 
 // ---------------------------------------------------------------------------
 // PWA Service Worker

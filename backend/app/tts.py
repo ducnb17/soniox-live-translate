@@ -42,6 +42,7 @@ import websockets
 from fastapi import WebSocket, WebSocketDisconnect
 
 from .config import (
+    DEFAULT_TTS_PROVIDER,
     SONIOX_API_KEY,
     TTS_AUDIO_FORMAT,
     TTS_KEEPALIVE_INTERVAL,
@@ -58,7 +59,7 @@ TTS_BARGE = "barge"
 PREWARM_STREAM_ID = "prewarm"
 
 
-def get_tts_config(stream_id: str, voice: str, lang: str) -> dict[str, Any]:
+def get_tts_config(stream_id: str, voice: str, lang: str, provider: str = DEFAULT_TTS_PROVIDER) -> dict[str, Any]:
     return {
         "api_key": SONIOX_API_KEY,
         "stream_id": stream_id,
@@ -93,15 +94,20 @@ async def prewarm_stream(
     tts_state: dict,
     direction: str,
     voice: str,
+    provider: str = DEFAULT_TTS_PROVIDER,
 ) -> None:
     """Pre-open a TTS stream for `direction` so the first utterance doesn't
-    pay the round-trip for stream setup. Idempotent — skips if already open."""
+    pay the round-trip for stream setup. Idempotent — skips if already open.
+    Only Soniox supports the TTS WebSocket pre-warm today; other providers
+    are left for runtime stream creation."""
+    if provider != "soniox":
+        return
     d = tts_state["directions"].get(direction)
     if d is None or d["current_stream_id"] is not None:
         return
     stream_id = f"{PREWARM_STREAM_ID}-{direction}"
     try:
-        await tts_ws.send(json.dumps(get_tts_config(stream_id=stream_id, voice=voice, lang=direction)))
+        await tts_ws.send(json.dumps(get_tts_config(stream_id=stream_id, voice=voice, lang=direction, provider=provider)))
         d["current_stream_id"] = stream_id
         tts_state["stream_id_to_direction"][stream_id] = direction
         d["idle_event"].clear()
@@ -114,6 +120,7 @@ async def tts_sender(
     tts_state: dict,
     tts_ws,
     direction_voices: dict[str, str],
+    direction_providers: dict[str, str] | None = None,
 ) -> None:
     """Consume `tts_queue`: open a fresh per-utterance TTS stream per
     direction on demand, forward text chunks, finalize on `TTS_END`, and
@@ -149,6 +156,8 @@ async def tts_sender(
                     # lang_a/lang_b): drop silently.
                     continue
 
+                provider = direction_providers.get(direction, DEFAULT_TTS_PROVIDER) if direction_providers else DEFAULT_TTS_PROVIDER
+
                 # Open a fresh utterance stream if idle.
                 if d["current_stream_id"] is None:
                     await d["idle_event"].wait()
@@ -163,6 +172,7 @@ async def tts_sender(
                                 stream_id=stream_id,
                                 voice=direction_voices[direction],
                                 lang=direction,
+                                provider=provider,
                             )
                         )
                     )

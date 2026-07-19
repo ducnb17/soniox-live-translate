@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+      <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -103,9 +103,28 @@
         <input type="text" id="audio-url" class="audio-url-input" placeholder="https://example.com/audio.mp3">
       </div>
 
+      <div class="section" id="audio-devices-block">
+        <h3>7. Audio devices</h3>
+        <div class="device-row">
+          <select id="input-device"></select>
+          <button id="test-input-btn" class="device-test-btn" type="button">Test</button>
+        </div>
+        <div id="input-vu-meter" class="barge-meter hidden" title="Microphone input volume">
+          <div id="input-vu-bar" class="barge-bar"></div>
+        </div>
+        <div class="device-row">
+          <select id="output-device"></select>
+          <button id="test-output-btn" class="device-test-btn" type="button">Test</button>
+        </div>
+        <p id="device-fallback-warning" class="hint hidden"></p>
+        <audio id="output-test-audio" class="hidden"></audio>
+      </div>
+
       <div class="sidebar-footer">
         <span id="status" class="status">Ready</span>
+        <button id="retry-btn" class="retry-btn hidden" type="button">Retry connection</button>
       <div id="barge-meter" class="barge-meter hidden" title="Mic input volume">
+
         <div id="barge-bar" class="barge-bar"></div>
       </div>
         <div class="section hidden" id="audio-source-block">
@@ -151,7 +170,7 @@
       </div>
 
       <div class="section" id="download-block">
-        <h3>7. Save transcript</h3>
+        <h3>8. Save transcript</h3>
         <div class="download-row">
           <button id="dl-json" class="download-btn" type="button" disabled>
             <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -168,15 +187,15 @@
         </div>
       </div>
 
-      <!-- 8. Session history -->
+      <!-- 9. Session history -->
       <div class="history-section">
         <button id="btn-history-toggle" class="btn-history-toggle"
-                onclick="toggleHistoryPanel()">Lịch sử ▼</button>
+                onclick="void toggleHistoryPanel()">Lịch sử ▼</button>
         <div id="history-panel" class="history-panel">
           <div class="history-toolbar">
             <span class="history-title">Phiên đã lưu</span>
             <button class="hbtn-clear"
-                    onclick="sessionHistory.clear();renderHistoryPanel()">Xóa tất cả</button>
+                    onclick="void clearHistory()">Xóa tất cả</button>
           </div>
           <div id="history-list" class="history-list"></div>
         </div>

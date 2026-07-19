@@ -16,6 +16,7 @@ import os
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import Any
 
 import structlog
 
@@ -47,7 +48,7 @@ def configure_logging(*, file_logging: bool = True, level: str = "INFO") -> None
         return
     _CONFIGURED = True
 
-    shared_processors = [
+    shared_processors: list[Any] = [
         structlog.contextvars.merge_contextvars,
         structlog.stdlib.add_log_level,
         structlog.processors.TimeStamper(fmt="iso"),

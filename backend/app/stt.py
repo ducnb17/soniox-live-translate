@@ -11,7 +11,9 @@ import httpx
 import websockets
 from fastapi import WebSocket, WebSocketDisconnect
 
+from .config import STT_KEEPALIVE_INTERVAL
 from .logging_config import get_logger
+
 
 log = get_logger("stt")
 
@@ -91,8 +93,23 @@ async def stream_url_to_stt(
                 log.warning("stt_end_signal_failed", error=str(e))
 
 
+async def stt_keepalive(stt_ws) -> None:
+    """Send a periodic keepalive control message to the STT WebSocket to
+    prevent Soniox from idle-closing the connection during pauses in speech
+    (no audio bytes flowing). Mirrors tts.py's tts_keepalive()."""
+    try:
+        while True:
+            await asyncio.sleep(STT_KEEPALIVE_INTERVAL)
+            await stt_ws.send(json.dumps({"type": "keepalive"}))
+    except websockets.ConnectionClosedOK:
+        pass
+    except websockets.ConnectionClosedError as e:
+        log.warning("stt_keepalive_stopped", error=str(e))
+
+
 async def handle_stt(
     stt_ws,
+
     browser_ws: WebSocket,
     tts_queue: asyncio.Queue[Any] | None,
     tts_state: dict,

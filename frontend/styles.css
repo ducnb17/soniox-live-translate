@@ -335,6 +335,12 @@ select:disabled,
 /* Helpers for M1 additions */
 .hidden { display: none !important; }
 .mt-4 { margin-top: 8px; }
+.field-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: #6b7280;
+  margin-bottom: 2px;
+}
 .hint {
   font-size: 12px;
   color: #6b7280;
@@ -490,6 +496,54 @@ textarea#context-json {
   cursor: not-allowed;
 }
 
+.retry-btn {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid #2563eb;
+  border-radius: 8px;
+  background: #eff6ff;
+  color: #2563eb;
+  font-size: 12px;
+  font-weight: 600;
+  transition: background 0.15s, color 0.15s;
+}
+.retry-btn:hover {
+  background: #2563eb;
+  color: #fff;
+}
+
+/* Audio device selection */
+.device-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.device-row select {
+  flex: 1;
+  min-width: 0;
+}
+.device-test-btn {
+  flex-shrink: 0;
+  padding: 9px 14px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #374151;
+  font-size: 13px;
+  font-weight: 500;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+}
+.device-test-btn:hover:not(:disabled) {
+  border-color: #2563eb;
+  color: #2563eb;
+  background: #eff6ff;
+}
+.device-test-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+
 /* --------------------------------------------------------------------------- */
 /* Dark mode                                                                   */
 /* --------------------------------------------------------------------------- */
@@ -535,6 +589,19 @@ textarea#context-json {
 [data-theme="dark"] .hint { color: var(--text-muted); }
 [data-theme="dark"] .mode-toggle { background: var(--surface-2); color: var(--accent); border-color: var(--border-soft); }
 [data-theme="dark"] .mode-toggle:hover:not(:disabled) { background: rgba(59,130,246,0.15); }
+[data-theme="dark"] .retry-btn { background: rgba(59,130,246,0.15); color: var(--accent); border-color: var(--accent); }
+[data-theme="dark"] .retry-btn:hover { background: var(--accent); color: #fff; }
+[data-theme="dark"] .device-test-btn {
+  background: var(--surface-2);
+  color: var(--text);
+  border-color: var(--border-soft);
+}
+[data-theme="dark"] .device-test-btn:hover:not(:disabled) {
+  background: rgba(59,130,246,0.15);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
 [data-theme="dark"] textarea#context-json { background: var(--surface-2); color: var(--text); border-color: var(--border-soft); }
 [data-theme="dark"] .segmented { border-color: var(--border-soft); }
 [data-theme="dark"] .segmented .seg span { background: var(--surface-2); color: #cbd5e1; }

@@ -17,10 +17,22 @@ from fastapi import Body, FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .config import LANGUAGES, SONIOX_API_KEY, STT_URL, TTS_URL, VOICES, is_configured, set_api_key
+from .config import (
+    DEFAULT_TTS_PROVIDER,
+    LANGUAGES,
+    SONIOX_API_KEY,
+    STT_URL,
+    TTS_URL,
+    TTS_PROVIDERS,
+    VOICES,
+    VOICES_BY_PROVIDER,
+    is_configured,
+    set_api_key,
+)
 from .context_builder import build_stt_config
-from .stt import handle_stt, pipe_browser_to_stt, stream_url_to_stt
+from .stt import handle_stt, pipe_browser_to_stt, stream_url_to_stt, stt_keepalive
 from .tts import (
+
     new_tts_state,
     pipe_tts_to_browser,
     prewarm_stream,
@@ -60,6 +72,8 @@ async def client_config() -> JSONResponse:
             "voices": VOICES,
             "languages": [{"code": c, "name": n} for c, n in LANGUAGES],
             "configured": store_is_configured() or is_configured(),
+            "providers": TTS_PROVIDERS,
+            "voices_by_provider": VOICES_BY_PROVIDER,
         }
     )
 
@@ -116,6 +130,8 @@ async def translation_websocket(
     diarize: bool = True,
     voice: str = "Maya",
     voice_b: str | None = None,
+    provider: str = DEFAULT_TTS_PROVIDER,
+    provider_b: str | None = None,
     tts: bool = True,
     context_b64: str | None = None,
     audio_url: str | None = None,
@@ -145,6 +161,50 @@ async def translation_websocket(
         await browser_ws.close()
         return
 
+    if tts:
+        provider = provider.strip().lower() if provider else DEFAULT_TTS_PROVIDER
+        provider_b = (provider_b or provider).strip().lower() if (provider_b or provider) else DEFAULT_TTS_PROVIDER
+
+        if provider not in TTS_PROVIDERS:
+            await browser_ws.send_json(
+                {
+                    "error_code": "unsupported_provider",
+                    "error_message": f"TTS provider {provider!r} is not supported.",
+                }
+            )
+            await browser_ws.close()
+            return
+        if provider_b not in TTS_PROVIDERS:
+            await browser_ws.send_json(
+                {
+                    "error_code": "unsupported_provider",
+                    "error_message": f"TTS provider {provider_b!r} is not supported.",
+                }
+            )
+            await browser_ws.close()
+            return
+
+        provider_voices = VOICES_BY_PROVIDER.get(provider, [])
+        if voice not in provider_voices:
+            await browser_ws.send_json(
+                {
+                    "error_code": "bad_config",
+                    "error_message": f"Voice {voice!r} is not available for provider {provider!r}",
+                }
+            )
+            await browser_ws.close()
+            return
+        provider_b_voices = VOICES_BY_PROVIDER.get(provider_b, [])
+        if (voice_b or voice) not in provider_b_voices:
+            await browser_ws.send_json(
+                {
+                    "error_code": "bad_config",
+                    "error_message": f"Voice {voice_b or voice!r} is not available for provider {provider_b!r}",
+                }
+            )
+            await browser_ws.close()
+            return
+
     context = _parse_context(context_b64)
     stt_config = build_stt_config(
         mode=mode,
@@ -169,9 +229,14 @@ async def translation_websocket(
             lang_a: voice_b or voice,
             lang_b: voice,
         }
+        direction_providers = {
+            lang_a: provider_b or provider,
+            lang_b: provider,
+        }
     else:
         directions = [target_lang]
         direction_voices = {target_lang: voice}
+        direction_providers = {target_lang: provider}
 
     session = transcript_store.new()
     await browser_ws.send_json({"session_id": session.id})
@@ -219,13 +284,16 @@ async def translation_websocket(
                     tts_state=tts_state,
                     direction=direction,
                     voice=direction_voices[direction],
+                    provider=direction_providers[direction],
                 )
 
         async with asyncio.TaskGroup() as tg:
             tg.create_task(input_coro)
+            tg.create_task(stt_keepalive(stt_ws=stt_ws))
             tg.create_task(
                 handle_stt(
                     stt_ws=stt_ws,
+
                     browser_ws=browser_ws,
                     tts_queue=tts_queue,
                     tts_state=tts_state,
@@ -236,12 +304,14 @@ async def translation_websocket(
                 )
             )
             if tts:
+                assert tts_queue is not None
                 tg.create_task(
                     tts_sender(
                         tts_queue=tts_queue,
                         tts_state=tts_state,
                         tts_ws=tts_ws,
                         direction_voices=direction_voices,
+                        direction_providers=direction_providers,
                     )
                 )
                 tg.create_task(
