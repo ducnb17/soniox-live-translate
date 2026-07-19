@@ -25,6 +25,7 @@ import {
   type ConversationExportFormat,
   type ConversationSummary,
 } from "./conversation-api";
+import { addTtsUsage, emptyTtsUsage, formatTtsCostHint } from "./tts-usage";
 
 
 // UTF-8 safe base64 (handles non-ASCII context text).
@@ -375,8 +376,29 @@ if (navigator.mediaDevices) {
 // ---------------------------------------------------------------------------
 // TTS Provider selection
 // ---------------------------------------------------------------------------
-let ttsProviders: any[] = [];
+interface TtsProviderInfo {
+  id: string;
+  name: string;
+  requires_api_key: boolean;
+  approximate_cost_per_1m_chars: number;
+  has_api_key: boolean;
+}
+
+let ttsProviders: TtsProviderInfo[] = [];
 let currentTtsProvider = "soniox";
+let ttsSessionUsage = emptyTtsUsage();
+
+function updateTtsCostHint(): void {
+  const provider = ttsProviders.find((item) => item.id === currentTtsProvider);
+  if (!provider) {
+    $ttsCostHint.textContent = "";
+    return;
+  }
+  $ttsCostHint.textContent = formatTtsCostHint(
+    provider.approximate_cost_per_1m_chars,
+    ttsSessionUsage,
+  );
+}
 
 async function loadTtsProviders(): Promise<void> {
   try {
@@ -388,11 +410,7 @@ async function loadTtsProviders(): Promise<void> {
     const cfg = await cfgResp.json();
     currentTtsProvider = cfg.current_provider || "soniox";
     $ttsProvider.value = currentTtsProvider;
-    await onTtsProviderChange();
-    // Set saved voice
-    if (cfg.current_voice) {
-      setTimeout(() => { $ttsVoice.value = cfg.current_voice; }, 200);
-    }
+    await onTtsProviderChange(cfg.current_voice || "");
   } catch {
     setTimeout(loadTtsProviders, 3000);
   }
@@ -408,7 +426,7 @@ function populateTtsProviderSelect(): void {
   }
 }
 
-async function onTtsProviderChange(): Promise<void> {
+async function onTtsProviderChange(savedVoice = ""): Promise<void> {
   const pid = $ttsProvider.value;
   currentTtsProvider = pid;
   const provider = ttsProviders.find(p => p.id === pid);
@@ -416,21 +434,19 @@ async function onTtsProviderChange(): Promise<void> {
   // Show/hide API key row
   $ttsApiKeyRow.style.display = provider?.requires_api_key ? "block" : "none";
 
-  // Update cost hint
-  if (provider) {
-    $ttsCostHint.textContent = `Cost: ~$${provider.approximate_cost_per_1m_chars}/million chars`;
-  }
+  updateTtsCostHint();
 
   // Load voices
-  await loadTtsVoices(pid);
+  await loadTtsVoices(pid, savedVoice);
 }
 
-async function loadTtsVoices(providerId: string): Promise<void> {
+async function loadTtsVoices(providerId: string, savedVoice = ""): Promise<void> {
   $ttsVoice.innerHTML = '<option value="">Loading...</option>';
   try {
     const lang = $mode() === "two_way" ? $langB.value : $targetLang.value;
     const resp = await fetch(`/api/tts/providers/${providerId}/voices?lang=${lang}`);
-    const voices = await resp.json();
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const voices = await resp.json() as Array<{ id: string; name: string }>;
     $ttsVoice.innerHTML = "";
     for (const v of voices) {
       const opt = document.createElement("option");
@@ -438,23 +454,47 @@ async function loadTtsVoices(providerId: string): Promise<void> {
       opt.textContent = v.name;
       $ttsVoice.appendChild(opt);
     }
+    if (savedVoice && voices.some((voice) => voice.id === savedVoice)) {
+      $ttsVoice.value = savedVoice;
+    }
   } catch {
     $ttsVoice.innerHTML = '<option value="">Error loading</option>';
   }
 }
 
-$ttsProvider.addEventListener("change", onTtsProviderChange);
+async function saveTtsSelection(): Promise<void> {
+  const response = await fetch("/api/tts/config", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider_id: $ttsProvider.value, voice: $ttsVoice.value }),
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+}
+
+$ttsProvider.addEventListener("change", () => {
+  void (async () => {
+    await onTtsProviderChange();
+    await saveTtsSelection();
+  })().catch((error: unknown) => setStatus(`Không thể lưu TTS provider: ${(error as Error).message}`));
+});
+
+$ttsVoice.addEventListener("change", () => {
+  void saveTtsSelection().catch((error: unknown) => {
+    setStatus(`Không thể lưu TTS voice: ${(error as Error).message}`);
+  });
+});
 
 $btnSaveTtsKey.addEventListener("click", async () => {
   const pid = $ttsProvider.value;
   const key = $ttsApiKey.value.trim();
   if (!key) return;
   try {
-    await fetch("/api/tts/config", {
+    const response = await fetch("/api/tts/config", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ provider_id: pid, api_key: key }),
+      body: JSON.stringify({ provider_id: pid, api_key: key, voice: $ttsVoice.value }),
     });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
     setStatus("API key saved");
     $ttsApiKey.value = "";
     await loadTtsProviders();
@@ -478,12 +518,21 @@ function syncMode(): void {
   $oneWayBlock.classList.toggle("hidden", two);
   $twoWayBlock.classList.toggle("hidden", !two);
   $voiceBBlock.classList.toggle("hidden", !two);
+  if (ttsProviders.length) void loadTtsVoices(currentTtsProvider, $ttsVoice.value);
 }
 
 document.querySelectorAll<HTMLInputElement>("input[name=mode]").forEach((r) =>
   r.addEventListener("change", syncMode),
 );
 syncMode();
+$targetLang.addEventListener("change", () => {
+  if (ttsProviders.length) void loadTtsVoices(currentTtsProvider, $ttsVoice.value);
+});
+$langB.addEventListener("change", () => {
+  if (ttsProviders.length && $mode() === "two_way") {
+    void loadTtsVoices(currentTtsProvider, $ttsVoice.value);
+  }
+});
 
 const DEFAULT_AUDIO_URL = "https://soniox.com/media/examples/spanish_weather_report.mp3";
 $audioUrl.value = new URLSearchParams(location.search).get("audio") || DEFAULT_AUDIO_URL;
@@ -797,7 +846,7 @@ function openWebSocket(extraParams: Record<string, string> = {}): Promise<void> 
   params.set("tts_provider", $ttsProvider.value);
 
   // Use TTS provider voice for one-way, or fallback to Soniox voices
-  const ttsVoice = currentTtsProvider === "soniox" ? $voice.value : $ttsVoice.value;
+  const ttsVoice = $ttsVoice.value || $voice.value;
   params.set("voice", ttsVoice);
   params.set("voice_b", currentTtsProvider === "soniox" ? $voiceB.value : ttsVoice);
 
@@ -841,6 +890,25 @@ function openWebSocket(extraParams: Record<string, string> = {}): Promise<void> 
       if (data.reconnect_failed) {
         setConnectionStatus("failed");
         setStatus(data.error_message || "Không thể kết nối lại.");
+        return;
+      }
+
+      if (data.tts_fallback) {
+        setStatus(
+          `${data.tts_fallback.from_provider} TTS lỗi/hết quota; ` +
+          `đã chuyển sang ${data.tts_fallback.to_provider}: ${data.tts_fallback.reason}`,
+        );
+        return;
+      }
+
+      if (data.tts_error) {
+        setStatus(`TTS không phát được: ${data.tts_error.message}`);
+        return;
+      }
+
+      if (data.tts_usage) {
+        ttsSessionUsage = addTtsUsage(ttsSessionUsage, data.tts_usage);
+        updateTtsCostHint();
         return;
       }
 
@@ -1191,6 +1259,8 @@ async function resetSession(): Promise<void> {
   utterances = [];
   currentUtt = newUtt();
   activeSources = [];
+  ttsSessionUsage = emptyTtsUsage();
+  updateTtsCostHint();
   render();
 }
 

@@ -37,13 +37,13 @@ a = Analysis(
         # http / ws
         'httpx', 'websockets', 'h11',
         # config / logging
-        'dotenv', 'structlog',
+        'dotenv', 'structlog', 'win32crypt', 'pywintypes',
         # tray / icon
         'pystray', 'PIL', 'PIL.Image', 'PIL.ImageDraw',
         # app
         'app', 'app.main', 'app.config', 'app.config_store',
         'app.stt', 'app.tts', 'app.context_builder', 'app.transcript',
-        'app.logging_config', 'app.db', 'app.tts_provider',
+        'app.logging_config', 'app.db', 'app.tts_provider', 'app.external_tts',
         'app.tts_providers', 'app.tts_providers.soniox_provider',
         'app.tts_providers.google_provider', 'app.tts_providers.openai_provider',
         'app.tts_providers.azure_provider', 'app.tts_providers.elevenlabs_provider',

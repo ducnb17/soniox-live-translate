@@ -51,6 +51,7 @@ from .config_store import (
 )
 from .logging_config import configure_logging, get_logger
 from .tts_provider import get_provider, get_available_providers
+from .external_tts import external_tts_sender
 from .db import (
     init_db,
     close_db,
@@ -360,6 +361,23 @@ async def translation_websocket(
 
     tts_queue: asyncio.Queue | None = asyncio.Queue() if tts else None
     tts_state: dict = new_tts_state(directions)
+    use_external_tts = tts and tts_provider != "soniox"
+    external_tts_task: asyncio.Task | None = None
+    if use_external_tts and tts_queue is not None:
+        external_provider = get_provider(
+            tts_provider,
+            api_key=get_tts_api_key(tts_provider),
+        )
+        external_tts_task = asyncio.create_task(
+            external_tts_sender(
+                tts_queue=tts_queue,
+                tts_state=tts_state,
+                browser_ws=browser_ws,
+                provider_id=tts_provider,
+                provider=external_provider,
+                direction_voices=direction_voices,
+            )
+        )
 
     # Audio buffer for pending data during reconnection (mic mode only).
     audio_buffer: bytearray = bytearray()
@@ -465,12 +483,12 @@ async def translation_websocket(
                     occurred_at=int(time.time() * 1000),
                 )
 
-            if is_reconnect and tts:
+            if is_reconnect and tts and not use_external_tts:
                 # Streams belong to the previous TTS WebSocket and cannot be
                 # reused after reconnecting.
                 tts_state = new_tts_state(directions)
 
-            if tts and tts_ws is None:
+            if tts and not use_external_tts and tts_ws is None:
                 tts_ws = await websockets.connect(
                     TTS_URL, ping_interval=10, ping_timeout=10, close_timeout=5
                 )
@@ -502,13 +520,14 @@ async def translation_websocket(
                     )
                 )
                 tg.create_task(stt_keepalive(stt_ws))
-                if tts:
+                if tts and not use_external_tts:
                     tg.create_task(
                         tts_sender(
                             tts_queue=tts_queue,
                             tts_state=tts_state,
                             tts_ws=tts_ws,
                             direction_voices=direction_voices,
+                            browser_ws=browser_ws,
                         )
                     )
                     tg.create_task(
@@ -663,6 +682,13 @@ async def translation_websocket(
     if tts_queue is not None:
         await tts_queue.put((TTS_END, None))
         await tts_queue.put(TTS_NONE)
+    if external_tts_task is not None:
+        try:
+            await asyncio.wait_for(external_tts_task, timeout=35.0)
+        except asyncio.TimeoutError:
+            external_tts_task.cancel()
+        except Exception as exc:
+            log.warning("external_tts_task_failed", error=str(exc))
     tts_state["stt_done"] = True
     session.close()
     transcript_store.finish(session)

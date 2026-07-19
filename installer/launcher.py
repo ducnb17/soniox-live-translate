@@ -3,7 +3,7 @@ Soniox Live Translate — Windows desktop launcher.
 Self-contained: NO imports from installer.* or packaging.*
 """
 from __future__ import annotations
-import os, sys, json, time, threading, webbrowser, logging
+import os, sys, time, threading, webbrowser, logging
 from pathlib import Path
 
 
@@ -59,19 +59,11 @@ def _config_path() -> Path:
 
 
 def _load_cfg() -> dict:
-    p = _config_path()
-    if not p.exists():
-        return {}
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-
-def _save_cfg(cfg: dict) -> None:
-    p = _config_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+    # Use the same DPAPI-aware loader as the backend. This also migrates a
+    # legacy plaintext config before the API key is copied into the process
+    # environment.
+    from app.config_store import load_config
+    return load_config()
 
 
 # ── Apply saved config → env BEFORE importing app modules ─────────────────

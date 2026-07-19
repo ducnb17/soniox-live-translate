@@ -28,6 +28,22 @@ export interface SonioxSttResponse {
   reconnect_failed?: boolean;
   max_retries?: number;
   error_message_plain?: string;
+  tts_fallback?: {
+    from_provider: string;
+    to_provider: string;
+    reason: string;
+  };
+  tts_error?: {
+    provider_id: string;
+    message: string;
+  };
+  tts_usage?: {
+    provider_id: string;
+    voice_id: string;
+    characters: number;
+    estimated_cost_usd: number;
+    cache_hit: boolean;
+  };
 }
 
 export interface Utterance {

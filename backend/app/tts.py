@@ -42,12 +42,12 @@ import websockets
 from fastapi import WebSocket, WebSocketDisconnect
 
 from .config import (
-    SONIOX_API_KEY,
     TTS_AUDIO_FORMAT,
     TTS_KEEPALIVE_INTERVAL,
     TTS_MODEL,
     TTS_SAMPLE_RATE,
 )
+from . import config as runtime_config
 from .logging_config import get_logger
 from .stt import TTS_END, TTS_NONE, TTS_TEXT
 
@@ -60,7 +60,7 @@ PREWARM_STREAM_ID = "prewarm"
 
 def get_tts_config(stream_id: str, voice: str, lang: str) -> dict[str, Any]:
     return {
-        "api_key": SONIOX_API_KEY,
+        "api_key": runtime_config.SONIOX_API_KEY,
         "stream_id": stream_id,
         "model": TTS_MODEL,
         "voice": voice,
@@ -114,12 +114,14 @@ async def tts_sender(
     tts_state: dict,
     tts_ws,
     direction_voices: dict[str, str],
+    browser_ws: WebSocket | None = None,
 ) -> None:
     """Consume `tts_queue`: open a fresh per-utterance TTS stream per
     direction on demand, forward text chunks, finalize on `TTS_END`, and
     honor barge-in by dropping stale items and cancelling open streams."""
     stream_counter = 0
     my_epoch = 0
+    direction_char_counts = {direction: 0 for direction in direction_voices}
     try:
         while True:
             data = await tts_queue.get()
@@ -180,6 +182,7 @@ async def tts_sender(
                     )
                 )
                 d["stream_used"] = True
+                direction_char_counts[direction] = direction_char_counts.get(direction, 0) + len(payload)
 
             elif kind == TTS_END:
                 _, direction = data
@@ -222,6 +225,21 @@ async def tts_sender(
                         # the session_done check (which requires the map to
                         # be empty) can fire.
                         tts_state["stream_id_to_direction"].pop(sid, None)
+                    char_count = direction_char_counts.get(tgt, 0)
+                    if char_count and browser_ws is not None:
+                        try:
+                            await browser_ws.send_json({
+                                "tts_usage": {
+                                    "provider_id": "soniox",
+                                    "voice_id": direction_voices[tgt],
+                                    "characters": char_count,
+                                    "estimated_cost_usd": 0.0,
+                                    "cache_hit": False,
+                                }
+                            })
+                        except Exception:
+                            pass
+                    direction_char_counts[tgt] = 0
     except websockets.ConnectionClosedOK:
         pass
     except websockets.ConnectionClosedError as e:
@@ -311,6 +329,37 @@ async def tts_keepalive(tts_ws) -> None:
         pass
     except websockets.ConnectionClosedError as e:
         log.warning("tts_keepalive_stopped", error=str(e))
+
+
+async def synthesize_soniox_text(text: str, voice: str, lang: str) -> bytes:
+    """Synthesize one complete utterance through Soniox for provider fallback."""
+    stream_id = "fallback"
+    ws = await websockets.connect(
+        runtime_config.TTS_URL,
+        ping_interval=10,
+        ping_timeout=10,
+        close_timeout=5,
+    )
+    chunks: list[bytes] = []
+    try:
+        await ws.send(json.dumps(get_tts_config(stream_id=stream_id, voice=voice, lang=lang)))
+        await ws.send(json.dumps({"stream_id": stream_id, "text": text, "text_end": False}))
+        await ws.send(json.dumps({"stream_id": stream_id, "text": "", "text_end": True}))
+        while True:
+            message = await asyncio.wait_for(ws.recv(), timeout=30.0)
+            data = json.loads(message)
+            if data.get("error_code") is not None:
+                raise RuntimeError(data.get("error_message") or str(data["error_code"]))
+            if data.get("audio"):
+                chunks.append(base64.b64decode(data["audio"]))
+            if data.get("terminated"):
+                break
+    finally:
+        await ws.close()
+    audio = b"".join(chunks)
+    if not audio:
+        raise RuntimeError("Soniox fallback returned no audio")
+    return audio
 
 
 # --------------------------------------------------------------------------- #

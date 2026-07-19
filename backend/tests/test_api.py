@@ -17,6 +17,25 @@ from app.main import app
 from app import main
 
 
+@pytest.fixture(autouse=True)
+def isolated_encrypted_config(tmp_path, monkeypatch):
+    """Keep API tests away from the user's real config and emulate DPAPI."""
+    from app import config_store
+
+    monkeypatch.setattr(config_store, "config_dir", lambda: tmp_path)
+    monkeypatch.setattr(config_store, "config_path", lambda: tmp_path / "config.json")
+    monkeypatch.setattr(
+        config_store,
+        "_protect_secret",
+        lambda value: config_store.DPAPI_PREFIX + value.encode().hex(),
+    )
+    monkeypatch.setattr(
+        config_store,
+        "_unprotect_secret",
+        lambda value: bytes.fromhex(value[len(config_store.DPAPI_PREFIX):]).decode(),
+    )
+
+
 @pytest.fixture
 def client():
     return TestClient(app)
@@ -69,11 +88,8 @@ class TestSetupPost:
         assert r.status_code == 400
         assert r.json()["ok"] is False
 
-    def test_accepts_valid_key(self, client, tmp_path, monkeypatch):
-        # Redirect config_store to a temp dir so we don't clobber real config.
+    def test_accepts_valid_key(self, client, tmp_path):
         from app import config_store
-        monkeypatch.setattr(config_store, "config_dir", lambda: tmp_path)
-        monkeypatch.setattr(config_store, "config_path", lambda: tmp_path / "config.json")
 
         r = client.post("/setup", json={"soniox_api_key": "new-test-key-xyz"})
         assert r.status_code == 200
@@ -84,7 +100,30 @@ class TestSetupPost:
         # File written
         import json
         cfg = json.loads((tmp_path / "config.json").read_text())
-        assert cfg["soniox_api_key"] == "new-test-key-xyz"
+        assert cfg["soniox_api_key"].startswith(config_store.DPAPI_PREFIX)
+        assert "new-test-key-xyz" not in (tmp_path / "config.json").read_text()
+        assert config_store.get_api_key() == "new-test-key-xyz"
+
+
+class TestTtsProviderApi:
+    expected_providers = {
+        "soniox", "google", "openai", "azure", "elevenlabs", "deepgram", "polly",
+    }
+
+    def test_lists_all_seven_provider_choices(self, client):
+        response = client.get("/api/tts/providers")
+
+        assert response.status_code == 200
+        assert {provider["id"] for provider in response.json()} == self.expected_providers
+
+    @pytest.mark.parametrize("provider_id", sorted(expected_providers))
+    def test_each_provider_voice_dropdown_has_options(self, client, provider_id):
+        response = client.get(f"/api/tts/providers/{provider_id}/voices?lang=en")
+
+        assert response.status_code == 200
+        voices = response.json()
+        assert voices
+        assert all(voice["id"] and voice["name"] for voice in voices)
 
 
 class TestConversationApi:

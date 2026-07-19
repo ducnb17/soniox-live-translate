@@ -16,7 +16,7 @@ class SonioxProvider(TTSProviderBase):
         voices = []
         for name in SONIOX_VOICES:
             voices.append(Voice(
-                id=name.lower(),
+                id=name,
                 name=name,
                 language=lang or "en",
                 gender="neutral",
