@@ -20,6 +20,7 @@ log = get_logger("stt")
 TTS_TEXT = "text"
 TTS_END = "end"
 TTS_NONE = None
+TTS_MAX_BUFFER_CHARS = 200
 
 
 async def pipe_browser_to_stt(
@@ -112,6 +113,7 @@ async def handle_stt(
     text_pushed = False
     current_original = ""
     current_translation = ""
+    full_translation = ""
     current_speaker = None
     current_lang = None
     utterance_start_ms: int | None = None
@@ -141,33 +143,47 @@ async def handle_stt(
 
                 if text == "<end>":
                     got_end = True
-                    direction = _direction(token, mode, lang_a, lang_b)
+                    direction = (
+                        target_lang
+                        if mode == "one_way"
+                        else _direction(token, mode, lang_a, lang_b)
+                    )
                     if tts_queue is not None:
+                        if current_translation:
+                            await tts_queue.put((TTS_TEXT, current_translation, direction))
                         await tts_queue.put((TTS_END, direction))
                     if on_endpoint is not None:
                         await on_endpoint()
-                    if on_final_segment is not None and (current_original or current_translation):
+                    if on_final_segment is not None and (current_original or full_translation):
                         await on_final_segment({
                             "original_text": current_original,
-                            "translated_text": current_translation,
+                            "translated_text": full_translation,
                             "speaker_label": str(current_speaker) if current_speaker is not None else None,
                             "source_lang": current_lang,
                             "started_at_ms": utterance_start_ms,
                             "ended_at_ms": data.get("end_time_ms") or (utterance_start_ms or 0) + 2000,
                         })
-                        current_original = ""
-                        current_translation = ""
-                        current_speaker = None
-                        current_lang = None
-                        utterance_start_ms = None
+                    current_original = ""
+                    current_translation = ""
+                    full_translation = ""
+                    current_speaker = None
+                    current_lang = None
+                    utterance_start_ms = None
                 elif token.get("translation_status") == "translation":
                     if token.get("is_final"):
                         current_translation += text
-                    target = _resolve_tts_target(
-                        token, mode, lang_a, lang_b, target_lang
-                    )
-                    if tts_queue is not None:
-                        await tts_queue.put((TTS_TEXT, text, target))
+                        full_translation += text
+                        if tts_queue is not None:
+                            target = _resolve_tts_target(
+                                token, mode, lang_a, lang_b, target_lang
+                            )
+                            while len(current_translation) > TTS_MAX_BUFFER_CHARS:
+                                split_at = _tts_buffer_split_index(current_translation)
+                                if split_at is None:
+                                    break
+                                chunk = current_translation[:split_at]
+                                current_translation = current_translation[split_at:]
+                                await tts_queue.put((TTS_TEXT, chunk, target))
                     text_pushed = True
                 else:
                     if token.get("is_final"):
@@ -222,6 +238,26 @@ def _resolve_tts_target(
     if src == lang_b:
         return lang_a
     return target_lang
+
+
+def _tts_buffer_split_index(text: str) -> int | None:
+    """Return a safe split at or just before the TTS buffer threshold."""
+    if len(text) <= TTS_MAX_BUFFER_CHARS:
+        return None
+
+    limit = min(TTS_MAX_BUFFER_CHARS, len(text) - 1)
+    punctuation_split = None
+    for index in range(limit):
+        if text[index] in ".!?;" and text[index + 1].isspace():
+            punctuation_split = index + 2
+    if punctuation_split is not None:
+        return punctuation_split
+
+    whitespace_index = max(
+        (index for index in range(limit) if text[index].isspace()),
+        default=-1,
+    )
+    return whitespace_index + 1 if whitespace_index >= 0 else None
 
 
 def _direction(token: dict, mode: str, lang_a: str | None, lang_b: str | None) -> str | None:

@@ -92,6 +92,10 @@ const $connectionDot = $<HTMLDivElement>("connection-dot");
 const $btnRetry = $<HTMLButtonElement>("btn-retry");
 const $ttsProvider = $<HTMLSelectElement>("tts-provider-select");
 const $ttsVoice = $<HTMLSelectElement>("tts-voice-select");
+const $ttsDelay = $<HTMLInputElement>("tts-delay-seconds");
+const $ttsDelayValue = $<HTMLSpanElement>("tts-delay-seconds-value");
+const $ttsPlaybackRate = $<HTMLInputElement>("tts-playback-rate");
+const $ttsPlaybackRateValue = $<HTMLSpanElement>("tts-playback-rate-value");
 const $ttsApiKey = $<HTMLInputElement>("tts-api-key");
 const $ttsApiKeyRow = $<HTMLDivElement>("tts-api-key-row");
 const $btnSaveTtsKey = $<HTMLButtonElement>("btn-save-tts-key");
@@ -387,6 +391,53 @@ interface TtsProviderInfo {
 let ttsProviders: TtsProviderInfo[] = [];
 let currentTtsProvider = "soniox";
 let ttsSessionUsage = emptyTtsUsage();
+const TTS_DELAY_SECONDS_KEY = "ttsDelaySeconds";
+const TTS_PLAYBACK_RATE_KEY = "ttsPlaybackRate";
+
+function readTtsDelaySeconds(): number {
+  let saved: string | null = null;
+  try { saved = localStorage.getItem(TTS_DELAY_SECONDS_KEY); } catch { /* storage disabled */ }
+  const value = Number(saved ?? "1");
+  return Number.isFinite(value) && value >= 1 && value <= 5 ? value : 1;
+}
+
+function updateTtsDelaySelection(): void {
+  $ttsDelayValue.textContent = $ttsDelay.value;
+  try { localStorage.setItem(TTS_DELAY_SECONDS_KEY, $ttsDelay.value); } catch { /* storage disabled */ }
+}
+
+function currentTtsDelaySeconds(): number {
+  const value = $ttsDelay.valueAsNumber;
+  return Number.isFinite(value) && value >= 1 && value <= 5 ? value : 1;
+}
+
+function readTtsPlaybackRate(): number {
+  let saved: string | null = null;
+  try { saved = localStorage.getItem(TTS_PLAYBACK_RATE_KEY); } catch { /* storage disabled */ }
+  const value = Number(saved ?? "1");
+  return Number.isFinite(value) && value >= 0.25 && value <= 2 ? value : 1;
+}
+
+function currentTtsPlaybackRate(): number {
+  const value = $ttsPlaybackRate.valueAsNumber;
+  return Number.isFinite(value) && value >= 0.25 && value <= 2 ? value : 1;
+}
+
+function formatTtsPlaybackRate(value: number): string {
+  return `${value.toFixed(2).replace(/0$/, "")}x`;
+}
+
+function updateTtsPlaybackRateSelection(): void {
+  $ttsPlaybackRateValue.textContent = formatTtsPlaybackRate($ttsPlaybackRate.valueAsNumber);
+  try { localStorage.setItem(TTS_PLAYBACK_RATE_KEY, $ttsPlaybackRate.value); } catch { /* storage disabled */ }
+}
+
+$ttsDelay.value = String(readTtsDelaySeconds());
+$ttsDelayValue.textContent = $ttsDelay.value;
+$ttsDelay.addEventListener("input", updateTtsDelaySelection);
+$ttsPlaybackRate.value = String(readTtsPlaybackRate());
+$ttsPlaybackRateValue.textContent = formatTtsPlaybackRate($ttsPlaybackRate.valueAsNumber);
+$ttsPlaybackRate.addEventListener("input", updateTtsPlaybackRateSelection);
 
 function updateTtsCostHint(): void {
   const provider = ttsProviders.find((item) => item.id === currentTtsProvider);
@@ -1128,10 +1179,16 @@ function playPcmChunk(chunk: Uint8Array): void {
   buffer.getChannelData(0).set(float32);
   const source = audioCtx.createBufferSource();
   source.buffer = buffer;
+  const playbackRate = currentTtsPlaybackRate();
+  // playbackRate thay đổi cả cao độ giọng nói (pitch); muốn giữ nguyên cao độ cần AudioWorklet/time-stretch riêng — chưa làm ở đây.
+  source.playbackRate.value = playbackRate;
   source.connect(audioCtx.destination);
-  const startAt = Math.max(audioCtx.currentTime, nextPlayTime);
+  const startsNewUtterance = nextPlayTime === 0 || audioCtx.currentTime >= nextPlayTime;
+  const startAt = startsNewUtterance
+    ? audioCtx.currentTime + currentTtsDelaySeconds()
+    : nextPlayTime;
   source.start(startAt);
-  nextPlayTime = startAt + buffer.duration;
+  nextPlayTime = startAt + buffer.duration / playbackRate;
   activeSources.push(source);
   source.onended = () => {
     const i = activeSources.indexOf(source);
@@ -1187,6 +1244,8 @@ function tickBarge(): void {
   $bargeBar.style.width = `${pct}%`;
 
   const now = performance.now();
+  // activeSources includes sources scheduled to start in the future, so
+  // barge-in remains available during the configured playback delay.
   const ttsAudible =
     activeSources.length > 0 || (state === "playing-file" && fileAudio != null && !fileAudio.paused);
 

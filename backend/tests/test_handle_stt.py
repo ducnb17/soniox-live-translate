@@ -31,12 +31,14 @@ class FakeBrowserWs:
 
 
 class TestHandleSttOneWay:
-    async def test_translation_tokens_routed_to_queue(self):
+    async def test_final_translation_is_queued_once_at_utterance_end(self):
         messages = [
             {
                 "tokens": [
                     {"text": "hola", "translation_status": "original", "is_final": True},
-                    {"text": "hello", "translation_status": "translation"},
+                    {"text": "draft", "translation_status": "translation", "is_final": False},
+                    {"text": "hel", "translation_status": "translation", "is_final": True},
+                    {"text": "lo", "translation_status": "translation", "is_final": True},
                 ]
             },
             {
@@ -66,16 +68,15 @@ class TestHandleSttOneWay:
         # All STT JSON was forwarded to browser
         assert len(browser_ws.sent) == 3
 
-        # Queue got: text "hello", end (with direction None for one_way),
-        # then the trailing end + None sentinel from finally.
+        # Queue got one complete translation, then its utterance end, followed
+        # by the trailing end + None sentinel from finally.
         items = []
         while not tts_queue.empty():
             items.append(tts_queue.get_nowait())
 
-        # First: text "hello" → target "vi"
-        assert items[0][0] == TTS_TEXT
-        assert items[0][1] == "hello"
-        assert items[0][2] == "vi"
+        # Non-final translation text is excluded, and all final fragments are
+        # emitted as one TTS_TEXT immediately before TTS_END.
+        assert items[0] == (TTS_TEXT, "hello", "vi")
 
         # Second: <end> token from the token stream
         assert items[1][0] == TTS_END
@@ -91,11 +92,12 @@ class TestHandleSttOneWay:
 
 
 class TestHandleSttTwoWay:
-    async def test_tokens_routed_by_source_language(self):
+    async def test_complete_utterances_routed_by_source_language(self):
         messages = [
             {
                 "tokens": [
-                    {"text": "hello", "translation_status": "translation", "source_language": "en"},
+                    {"text": "hel", "translation_status": "translation", "source_language": "en", "is_final": True},
+                    {"text": "lo", "translation_status": "translation", "source_language": "en", "is_final": True},
                 ]
             },
             {
@@ -105,7 +107,8 @@ class TestHandleSttTwoWay:
             },
             {
                 "tokens": [
-                    {"text": "hola", "translation_status": "translation", "source_language": "es"},
+                    {"text": "ho", "translation_status": "translation", "source_language": "es", "is_final": True},
+                    {"text": "la", "translation_status": "translation", "source_language": "es", "is_final": True},
                 ]
             },
             {
@@ -146,6 +149,52 @@ class TestHandleSttTwoWay:
         # Trailing <end> (direction=None) + None sentinel from finally
         assert items[4] == (TTS_END, None)
         assert items[5] is TTS_NONE
+
+
+class TestHandleSttLongTranslation:
+    async def test_long_translation_is_flushed_before_end(self):
+        long_translation = "This is a complete translated sentence. " * 6
+        messages = [
+            {
+                "tokens": [
+                    {
+                        "text": long_translation,
+                        "translation_status": "translation",
+                        "is_final": True,
+                    }
+                ]
+            },
+            {"tokens": [{"text": "<end>"}]},
+            {"finished": True},
+        ]
+        tts_queue: asyncio.Queue = asyncio.Queue()
+        callback = AsyncMock()
+
+        await handle_stt(
+            stt_ws=FakeSttWs(messages),
+            browser_ws=FakeBrowserWs(),
+            tts_queue=tts_queue,
+            tts_state=new_tts_state(["vi"]),
+            mode="one_way",
+            lang_a=None,
+            lang_b=None,
+            target_lang="vi",
+            on_final_segment=callback,
+        )
+
+        items = []
+        while not tts_queue.empty():
+            items.append(tts_queue.get_nowait())
+
+        utterance_end = items.index((TTS_END, "vi"))
+        text_items = items[:utterance_end]
+        assert len(text_items) == 2
+        assert all(item[0] == TTS_TEXT for item in text_items)
+        assert all(item[2] == "vi" for item in text_items)
+        assert len(text_items[0][1]) <= 200
+        assert text_items[0][1].rstrip().endswith(".")
+        assert "".join(item[1] for item in text_items) == long_translation
+        assert callback.await_args.args[0]["translated_text"] == long_translation
 
 
 class TestHandleSttErrorForwarded:
