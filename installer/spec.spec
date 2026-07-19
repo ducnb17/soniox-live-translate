@@ -6,6 +6,7 @@ ROOT          = os.path.abspath(os.path.join(SPECPATH, '..'))
 BACKEND       = os.path.join(ROOT, 'backend')
 FRONTEND_DIST = os.path.join(ROOT, 'frontend', 'dist')
 LAUNCHER      = os.path.join(ROOT, 'installer', 'launcher.py')
+ICON          = os.path.join(ROOT, 'installer', 'icon.ico')
 
 # CI copies backend/app → ROOT before running PyInstaller.
 # In dev, add ROOT+BACKEND so 'import app' resolves.
@@ -18,7 +19,7 @@ a = Analysis(
     [LAUNCHER],
     pathex=[ROOT, BACKEND],
     binaries=[],
-    datas=[(FRONTEND_DIST, 'frontend/dist')],
+    datas=[(FRONTEND_DIST, 'frontend/dist'), (ICON, '.')],
     hiddenimports=[
         # uvicorn
         'uvicorn', 'uvicorn.logging',
@@ -40,6 +41,9 @@ a = Analysis(
         'dotenv', 'structlog', 'win32crypt', 'pywintypes',
         # tray / icon
         'pystray', 'PIL', 'PIL.Image', 'PIL.ImageDraw',
+        # desktop webview
+        'webview', 'webview.platforms.winforms',
+        'webview.platforms.edgechromium', 'clr',
         # app
         'app', 'app.main', 'app.config', 'app.config_store',
         'app.stt', 'app.tts', 'app.context_builder', 'app.transcript',
@@ -64,7 +68,7 @@ exe = EXE(
     name='SonioxLiveTranslate',
     debug=False, strip=False, upx=True,
     console=False,
-    icon=None,
+    icon=ICON,
 )
 
 coll = COLLECT(

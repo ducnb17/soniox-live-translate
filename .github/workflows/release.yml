@@ -137,6 +137,11 @@ jobs:
           body: |
             ## Soniox Live Translate ${{ github.ref_name }}
 
+            ### Có gì mới
+            - Mở ứng dụng trong cửa sổ desktop native thay vì tab trình duyệt
+            - Đóng cửa sổ sẽ ẩn ứng dụng xuống system tray
+            - Icon ứng dụng thống nhất cho cửa sổ, file `.exe` và installer
+
             ### Cài đặt trên Windows
             1. Tải file `.exe` bên dưới
             2. Chạy installer → cài vào `Program Files`
@@ -146,4 +151,4 @@ jobs:
             ### Yêu cầu
             - Windows 10/11 (64-bit)
             - Soniox API key: https://console.soniox.com
-            - Chrome / Edge / Firefox
+            - Microsoft Edge WebView2 Runtime (có sẵn trên Windows 10/11 hiện đại)

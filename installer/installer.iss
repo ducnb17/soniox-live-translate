@@ -2,7 +2,7 @@
 ; Build: ISCC installer\installer.iss
 
 #define MyAppName       "Soniox Live Translate"
-#define MyAppVersion    "0.2.2"
+#define MyAppVersion    "0.2.3"
 
 
 #define MyAppPublisher  "ducnb17"
@@ -17,6 +17,7 @@ AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}/issues
 AppUpdatesURL={#MyAppURL}/releases
+SetupIconFile=..\installer\icon.ico
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes

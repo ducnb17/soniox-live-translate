@@ -1,6 +1,6 @@
 [project]
 name = "soniox-live-translate"
-version = "0.2.2"
+version = "0.2.3"
 description = "Real-time speech-to-speech translation with Soniox Live (STT + translation + TTS)."
 readme = "../README.md"
 requires-python = ">=3.13"

@@ -3,7 +3,7 @@ Soniox Live Translate — Windows desktop launcher.
 Self-contained: NO imports from installer.* or packaging.*
 """
 from __future__ import annotations
-import os, sys, time, threading, webbrowser, logging
+import os, sys, time, threading, logging
 from pathlib import Path
 
 
@@ -35,9 +35,11 @@ if getattr(sys, "frozen", False):
     # onedir: _MEIPASS == _internal/ dir next to the exe
     _MEIPASS = Path(sys._MEIPASS)  # type: ignore[attr-defined]
     _BACKEND = _MEIPASS
+    _ICON_PATH = _MEIPASS / "icon.ico"
 else:
     _ROOT = Path(__file__).resolve().parent.parent
     _BACKEND = _ROOT / "backend"
+    _ICON_PATH = _ROOT / "installer" / "icon.ico"
     if str(_BACKEND) not in sys.path:
         sys.path.insert(0, str(_BACKEND))
 
@@ -122,19 +124,33 @@ def _make_icon():
     return img
 
 
-def _run_tray(stop: threading.Event) -> None:
+def _run_tray(stop: threading.Event, window, quitting: threading.Event) -> None:
     import pystray
+
+    def quit_app(icon) -> None:
+        quitting.set()
+        try:
+            window.destroy()
+        finally:
+            stop.set()
+            icon.stop()
+
+    def open_settings() -> None:
+        window.load_url(f"{BASE_URL}/setup")
+        window.show()
+
     icon = pystray.Icon(
         "SonioxLiveTranslate",
         _make_icon(),
         "Soniox Live Translate",
         menu=pystray.Menu(
-            pystray.MenuItem("Open",      lambda: webbrowser.open(BASE_URL)),
-            pystray.MenuItem("Settings",  lambda: webbrowser.open(f"{BASE_URL}/setup")),
+            pystray.MenuItem("Open",      lambda: window.show()),
+            pystray.MenuItem("Settings",  lambda: open_settings()),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Quit",      lambda: (stop.set(), icon.stop())),
+            pystray.MenuItem("Quit",      lambda: quit_app(icon)),
         ),
     )
+    threading.Thread(target=lambda: (stop.wait(), icon.stop()), daemon=True).start()
     icon.run()
 
 
@@ -193,9 +209,33 @@ def main() -> None:
 
     log.info("server ready  port=%d  url=%s", PORT, start_url)
 
-    threading.Thread(target=lambda: (time.sleep(0.5), webbrowser.open(start_url)),
-                     daemon=True).start()
-    _run_tray(stop)
+    import webview
+    window = webview.create_window(
+        "Soniox Live Translate",
+        start_url,
+        width=1280,
+        height=800,
+        min_size=(900, 600),
+    )
+    quitting = threading.Event()
+
+    def on_closing() -> bool:
+        if quitting.is_set():
+            return True
+        window.hide()
+        return False
+
+    window.events.closing += on_closing
+    tray_thread = threading.Thread(
+        target=_run_tray,
+        args=(stop, window, quitting),
+        daemon=True,
+    )
+    tray_thread.start()
+    try:
+        webview.start(icon=str(_ICON_PATH))
+    finally:
+        stop.set()
     log.info("launcher exit")
 
 
