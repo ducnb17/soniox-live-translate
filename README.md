@@ -3,17 +3,18 @@
 Real-time speech-to-speech translation built on the **Soniox Live** APIs
 (real-time STT + translation + real-time TTS), with barge-in / turn-taking.
 
-Two WebSocket streams chained by a small FastAPI proxy:
+The browser frontend and FastAPI backend connect live STT/translation to the
+selected TTS provider:
 
 ```
-Browser (mic / file)
+Browser (microphone / tab-system audio / URL file)
    │  audio bytes (binary)
    ▼
 FastAPI /ws/translate ──► Soniox STT+translation (wss://stt-rt.soniox.com)
    │                          │ tokens (translation_status:"translation", <end>)
    │                          ▼
-   │  translation text ──►  TTS queue ──► Soniox TTS (wss://tts-rt.soniox.com)
-   │                          │   one stream per direction, multiplexed by stream_id
+   │  translation text ──►  TTS queue ──► Selected TTS provider
+   │                          │   (Soniox or external provider; Soniox fallback)
    │                          ▼
    ◄── PCM s16le @ 24kHz ────┘   → Web Audio API playback
 ```
@@ -22,75 +23,127 @@ FastAPI /ws/translate ──► Soniox STT+translation (wss://stt-rt.soniox.com)
 
 - **One-way** (detect speech → translate to target) and **two-way**
   (bilingual conversation, both languages spoken back).
-- **Per-utterance TTS streams** pre-warmed per direction for low first-word
-  latency. A single TTS WebSocket hosts up to 2 concurrent streams using
-  Soniox's `stream_id` multiplexing.
+- **Per-utterance Soniox TTS streams** are pre-warmed per direction for low
+  first-word latency. A single Soniox TTS WebSocket hosts up to 2 concurrent
+  streams using `stream_id` multiplexing.
 - **Barge-in / turn-taking:** the browser VAD (RMS on the mic stream)
   interrupts local playback instantly and asks the backend to cancel the
   currently-open Soniox TTS streams (`{"stream_id":...,"cancel":true}`). The
   backend also drains queued text and bumps a "barge epoch" so stale tokens
   are dropped.
+- **Automatic STT reconnection:** capped exponential backoff with jitter,
+  transcript preservation, buffered microphone audio, a visible reconnect
+  counter, downtime markers when the buffer overflows, and a manual Retry
+  button after all automatic attempts are exhausted.
+- **Input/output device selection:** choose System Default or any physical or
+  virtual device (including VB-Cable), hot-plug refresh via `devicechange`,
+  saved selection with a visible fallback when a device disappears, a live
+  microphone level meter, and a speaker test tone.
+- **Conversation history:** finalized segments are stored in SQLite; the UI
+  provides paginated history, FTS5 full-text search, TXT/SRT/JSON export,
+  deletion, retention settings, storage statistics, and manual cleanup.
+- **Seven TTS providers with Provider → Voice selection:** Soniox built-in,
+  Google Cloud TTS (Chirp3 HD), OpenAI, Azure Neural TTS, ElevenLabs,
+  Amazon Polly, and Deepgram Aura. External-provider failures visibly fall
+  back to Soniox; synthesized audio is cached and estimated character cost is
+  shown for the current session. Saved API keys are encrypted for the current
+  Windows user with DPAPI.
 - **Diarization & language identification** toggleable; rendered inline.
 - **Custom context / glossary** (domain, terms, translation_terms) via JSON
   textarea → base64 → STT config `context` block.
-- **Transcript download (client-side):** JSON / CSV export from the sidebar
-  — no PII roundtrip. Server also persists `backend/transcripts/<id>.json`
-  and exposes `GET /transcript/{id}`.
+- **Current transcript download:** JSON/CSV export remains available directly
+  from the active session, alongside the persisted conversation history.
+- **Microphone, tab/system audio, and URL/file inputs:** browser tab or screen
+  audio capture uses `getDisplayMedia`; microphone capture supports barge-in.
 - **Dark mode** toggle (saved to localStorage; respects OS preference).
 - **First-run setup page** (`/setup`) — persists the API key to
-  `%APPDATA%\SonioxLiveTranslate\config.json` (Windows), never bundled into
-  the installer.
+  `%APPDATA%\SonioxLiveTranslate\config.json` encrypted with Windows DPAPI,
+  never bundled into the installer.
 - **Windows installer** — system-tray desktop app built through the single
   supported desktop release pipeline, `.github/workflows/release.yml`
   (push a `v*.*.*` tag → installer appears on the Releases page).
-- TypeScript + Web Audio frontend built with Vite.
+- **Strict TypeScript + Web Audio frontend:** Vite provides hot reload in
+  development; `pnpm run build` runs `tsc --noEmit` before creating
+  `frontend/dist/`.
 
 ## Requirements
 
 - Python 3.13+
+- Node.js 20+ and pnpm 9.12+ (frontend development/build)
 - A Soniox API key (https://console.soniox.com)
-- A browser with microphone access (for mic mode)
+- Chrome or Edge with microphone permission; tab/system capture and explicit
+  speaker routing depend on browser/OS support
+- Optional API keys for external TTS providers
 
 ## Setup
-
-### Prerequisites
-
-- Python 3.13+
-- Node.js 20+ and pnpm 9+ (for the frontend build)
-- A Soniox API key (https://console.soniox.com)
-- A browser with microphone access (for mic mode)
 
 ### Development (hot reload)
 
 Two terminals — Vite dev server (frontend, port 5173) proxies to FastAPI
 (backend, port 8765):
 
-```bash
-# Terminal 1: backend
-cd backend
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env   # edit .env and put your SONIOX_API_KEY
-uvicorn app.main:app --reload --port 8765
+#### Terminal 1 — backend
 
-# Terminal 2: frontend (hot reload via Vite)
-cd frontend
-pnpm install
-pnpm dev
+Windows PowerShell:
+
+```powershell
+cd backend
+py -3.13 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+Copy-Item .env.example .env
+# Edit .env and replace your_key_here with your SONIOX_API_KEY.
+python -m uvicorn app.main:app --reload --port 8765
 ```
 
-Open <http://localhost:5173>. Vite proxies `/health`, `/config`, `/setup`,
-`/transcript`, and `/ws` to the backend on 8765.
+macOS/Linux:
+
+```bash
+cd backend
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+cp .env.example .env
+# Edit .env and replace your_key_here with your SONIOX_API_KEY.
+python -m uvicorn app.main:app --reload --port 8765
+```
+
+Confirm the backend before starting Vite:
+
+```text
+http://127.0.0.1:8765/health  →  {"status":"ok"}
+```
+
+#### Terminal 2 — frontend
+
+```bash
+cd frontend
+corepack enable
+corepack prepare pnpm@9.12.0 --activate
+pnpm install
+pnpm run dev
+```
+
+Open <http://127.0.0.1:5173>. Vite proxies `/health`, `/config`, `/setup`,
+`/transcript`, `/api`, and `/ws` to the backend on port 8765, so setup,
+history, retention, multi-TTS, and live translation use the same backend.
+
+On Windows, the `/setup` page can save keys into the DPAPI-encrypted user
+config. For cross-platform development, keep the Soniox key in `backend/.env`;
+DPAPI-backed key persistence is intentionally Windows-only.
 
 ### Production / desktop build
 
 ```bash
-cd frontend && pnpm install && pnpm build   # → frontend/dist/
-cd ../backend && uvicorn app.main:app --port 8765
+cd frontend
+pnpm install
+pnpm run build   # tsc --noEmit + Vite → frontend/dist/
+cd ../backend
+python -m uvicorn app.main:app --port 8765
 ```
 
-Open <http://localhost:8765>. The backend serves `frontend/dist/` if it
-exists, otherwise falls back to `frontend/` (source).
+Open <http://127.0.0.1:8765>. The production server serves the compiled
+`frontend/dist/`; run the frontend build before starting it.
 
 For mic mode: click the mode-toggle (bottom-left) to switch from "Play audio
 file" to "Start talking", then grant the browser microphone permission.
@@ -99,13 +152,13 @@ file" to "Start talking", then grant the browser microphone permission.
 
 1. **Pick mode** (One-way / Two-way).
 2. **Pick languages**: target (one-way) or the conversation pair (two-way).
-3. **Pick voices**: voice speaks the B-side translation (speaker B's
-   language); `voice_b` speaks the A-side translation (two-way only).
-4. **Settings**: diarization, language id, spoken translation, barge-in.
-5. **Custom context** (optional): JSON with `general`, `text`, `terms`,
+3. **Pick input/output devices**, then use Test Mic/Test Speaker if needed.
+4. **Pick a TTS provider and voice**; add that provider's API key when asked.
+5. **Settings**: diarization, language id, spoken translation, barge-in.
+6. **Custom context** (optional): JSON with `general`, `text`, `terms`,
    `translation_terms` keys.
-6. **Start talking** (mic) or **Play audio file** (URL sample provided).
-7. Stop; the transcript is saved server-side under your `session_id`.
+7. **Start talking**, share tab/system audio, or **Play audio file**.
+8. Stop; open **Phiên đã lưu** to search, export, or clean up history.
 
 ## API
 
@@ -117,6 +170,17 @@ file" to "Start talking", then grant the browser microphone permission.
 | `GET /setup/status` | `{configured: bool}` |
 | `POST /setup` | `{soniox_api_key, host?, port?}` — persist to user config |
 | `GET /transcript/{session_id}` | Persisted session transcript JSON |
+| `GET /api/conversations` | Paginated conversation history |
+| `GET /api/conversations/search` | FTS5 conversation search |
+| `GET /api/conversations/{id}` | Conversation details |
+| `DELETE /api/conversations/{id}` | Delete a conversation |
+| `GET /api/conversations/{id}/export` | Export `txt`, `srt`, or `json` |
+| `GET /api/retention/stats` | Conversation database statistics |
+| `POST /api/retention/cleanup` | Manually apply the selected retention period |
+| `GET /api/tts/providers` | List the seven TTS providers |
+| `GET /api/tts/providers/{id}/voices` | List voices for a provider/language |
+| `GET /api/tts/config` | Read the selected provider/voice and masked key status |
+| `POST /api/tts/config` | Update provider, voice, or encrypted API key |
 | `WS  /ws/translate` | Proxy between browser and Soniox STT+TTS |
 
 ### WebSocket query params
@@ -133,6 +197,8 @@ file" to "Start talking", then grant the browser microphone permission.
 | `tts` | true | enable TTS playback |
 | `context_b64` | — | base64-UTF8 JSON for STT `context` block |
 | `audio_url`, `audio_duration` | — | file test mode |
+| `input_device`, `output_device` | — | selected browser audio device IDs |
+| `tts_provider` | `soniox` | selected TTS provider ID |
 
 ## Project layout
 
@@ -142,19 +208,24 @@ backend/
 │  ├─ config.py           # env, VOICES, LANGUAGES, constants, set_api_key
 │  ├─ config_store.py     # %APPDATA% config.json read/write
 │  ├─ context_builder.py  # STT config + context normalization
+│  ├─ db.py               # SQLite history, FTS5, retention, export
+│  ├─ external_tts.py     # external synthesis, cache use, Soniox fallback
 │  ├─ stt.py              # ingress pipe (binary→STT, text→control), handle_stt
-│  ├─ tts.py             # multi-direction streams, barge-in, cancel, keepalive
+│  ├─ tts.py              # Soniox streams, barge-in, cancel, keepalive
+│  ├─ tts_provider.py     # seven-provider registry and bounded LRU cache
 │  ├─ transcript.py       # TranscriptStore (in-memory + JSON file)
 │  ├─ logging_config.py   # structlog + rotating file log
 │  └─ main.py             # FastAPI app + /setup routes
 ├─ tests/                  # pytest: context, routing, reconnect, DB, TTS, API
 ├─ .env / .env.example
-├─ transcripts/            # JSON files per session
 └─ pytest.ini
 frontend/
 ├─ src/
-│  ├─ app.ts              # main app: recorder, Web Audio PCM, VAD, download
-│  └─ types.ts            # Soniox token/response types, constants
+│  ├─ app.ts              # UI, recorder, Web Audio PCM, reconnect handling
+│  ├─ conversation-api.ts # paginated history/search/export REST client
+│  ├─ device-selection.ts # saved device resolution and fallback logic
+│  ├─ tts-usage.ts        # session character/cost aggregation
+│  └─ types.ts            # Soniox token/response types and constants
 ├─ index.html             # main UI (Vite entry)
 ├─ setup.html             # first-run setup page
 ├─ styles.css             # light + dark themes + setup styles
@@ -221,7 +292,7 @@ and attaches it to a new GitHub Release automatically.
   backend prompts a flush on each `<end>` token. Sanity-snapshot posting
   happens on Stop.
 - Barge thresholds are tuned for a quiet environment; tweak
-  `BARGE_RMS_THRESHOLD` / `BARGE_HOLD_MS` in `app.js` if needed.
+  `BARGE_RMS_THRESHOLD` / `BARGE_HOLD_MS` in `frontend/src/types.ts` if needed.
 - Voice names are Soniox built-in voices ("Maya", "Adrian", …), multilingual
   across 60+ languages.
 - **Tab/System audio mode:** when translating a shared tab/screen (e.g. a
