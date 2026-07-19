@@ -14,6 +14,7 @@ import {
   type AudioSource,
   type ConnectionStatus,
 } from "./types";
+import { resolveAudioDevices, type AudioDeviceLike } from "./device-selection";
 
 
 // UTF-8 safe base64 (handles non-ASCII context text).
@@ -134,30 +135,56 @@ function saveDeviceId(key: string, id: string): void {
 }
 
 async function refreshDeviceList(): Promise<void> {
-  if (!navigator.mediaDevices?.enumerateDevices) return;
-
-  const devices = await navigator.mediaDevices.enumerateDevices();
-  const inputs = devices.filter(d => d.kind === "audioinput" && d.deviceId);
-  const outputs = devices.filter(d => d.kind === "audiooutput" && d.deviceId);
-
-  const savedInput = getSavedDeviceId(INPUT_DEVICE_KEY);
-  const savedOutput = getSavedDeviceId(OUTPUT_DEVICE_KEY);
-
-  populateDeviceSelect($inputDevice, inputs, savedInput);
-  populateDeviceSelect($outputDevice, outputs, savedOutput);
-
-  // Warn if saved device is gone
-  if (savedInput !== "default" && !inputs.some(d => d.deviceId === savedInput)) {
-    saveDeviceId(INPUT_DEVICE_KEY, "default");
-    setStatus("Selected microphone not found, switched to System Default");
+  if (!navigator.mediaDevices?.enumerateDevices) {
+    populateDeviceSelect($inputDevice, [], "default");
+    populateDeviceSelect($outputDevice, [], "default");
+    setStatus("Audio device enumeration is not supported; using System Default");
+    return;
   }
-  if (savedOutput !== "default" && !outputs.some(d => d.deviceId === savedOutput)) {
-    saveDeviceId(OUTPUT_DEVICE_KEY, "default");
-    setStatus("Selected speaker not found, switched to System Default");
+
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const resolved = resolveAudioDevices(
+      devices,
+      getSavedDeviceId(INPUT_DEVICE_KEY),
+      getSavedDeviceId(OUTPUT_DEVICE_KEY),
+    );
+
+    populateDeviceSelect($inputDevice, resolved.inputs, resolved.inputId);
+    populateDeviceSelect($outputDevice, resolved.outputs, resolved.outputId);
+
+    const missing: string[] = [];
+    if (resolved.missingInput) {
+      saveDeviceId(INPUT_DEVICE_KEY, "default");
+      missing.push("microphone");
+    }
+    if (resolved.missingOutput) {
+      saveDeviceId(OUTPUT_DEVICE_KEY, "default");
+      missing.push("speaker");
+      if (audioCtx) {
+        void setAudioOutputDevice(audioCtx, "default").catch((error: unknown) => {
+          console.warn("Could not reroute active audio to System Default", error);
+        });
+      }
+    }
+
+    if (missing.length) {
+      setStatus(`Saved ${missing.join(" and ")} no longer available; switched to System Default`);
+    } else if (!resolved.inputs.length && !resolved.outputs.length) {
+      setStatus("No audio devices found; using System Default");
+    }
+  } catch (error) {
+    populateDeviceSelect($inputDevice, [], "default");
+    populateDeviceSelect($outputDevice, [], "default");
+    setStatus(`Could not read audio devices; using System Default (${(error as Error).message})`);
   }
 }
 
-function populateDeviceSelect(select: HTMLSelectElement, devices: MediaDeviceInfo[], savedId: string): void {
+function populateDeviceSelect(
+  select: HTMLSelectElement,
+  devices: readonly AudioDeviceLike[],
+  selectedId: string,
+): void {
   select.innerHTML = "";
   const defaultOpt = document.createElement("option");
   defaultOpt.value = "default";
@@ -170,24 +197,43 @@ function populateDeviceSelect(select: HTMLSelectElement, devices: MediaDeviceInf
     opt.textContent = d.label || `Device ${d.deviceId.slice(0, 8)}`;
     select.appendChild(opt);
   }
-  select.value = devices.some(d => d.deviceId === savedId) ? savedId : "default";
+  select.value = devices.some(d => d.deviceId === selectedId) ? selectedId : "default";
 }
 
 function onDeviceChange(): void {
-  $inputDevice.value = getSavedDeviceId(INPUT_DEVICE_KEY);
-  $outputDevice.value = getSavedDeviceId(OUTPUT_DEVICE_KEY);
-  refreshDeviceList();
+  void refreshDeviceList();
 }
 
 $inputDevice.addEventListener("change", () => {
   saveDeviceId(INPUT_DEVICE_KEY, $inputDevice.value);
-  refreshDeviceList();
+  setStatus(`Microphone set to ${$inputDevice.selectedOptions[0]?.textContent || "System Default"}`);
 });
 
 $outputDevice.addEventListener("change", () => {
   saveDeviceId(OUTPUT_DEVICE_KEY, $outputDevice.value);
-  refreshDeviceList();
+  setStatus(`Speaker set to ${$outputDevice.selectedOptions[0]?.textContent || "System Default"}`);
 });
+
+function isMissingDeviceError(error: unknown): boolean {
+  const name = error && typeof error === "object" && "name" in error ? String(error.name) : "";
+  return name === "NotFoundError" || name === "OverconstrainedError";
+}
+
+async function getSelectedInputStream(baseConstraints: MediaTrackConstraints): Promise<MediaStream> {
+  const deviceId = $inputDevice.value;
+  const selectedConstraints: MediaTrackConstraints = { ...baseConstraints };
+  if (deviceId !== "default") selectedConstraints.deviceId = { exact: deviceId };
+
+  try {
+    return await navigator.mediaDevices.getUserMedia({ audio: selectedConstraints });
+  } catch (error) {
+    if (deviceId === "default" || !isMissingDeviceError(error)) throw error;
+    $inputDevice.value = "default";
+    saveDeviceId(INPUT_DEVICE_KEY, "default");
+    setStatus("Selected microphone disappeared; switched to System Default");
+    return navigator.mediaDevices.getUserMedia({ audio: baseConstraints });
+  }
+}
 
 // Test input mic with level meter
 async function startTestMic(): Promise<void> {
@@ -198,12 +244,7 @@ async function startTestMic(): Promise<void> {
   $inputLevelMeter.classList.remove("hidden");
 
   try {
-    const constraints: MediaStreamConstraints = { audio: true };
-    const devId = $inputDevice.value;
-    if (devId !== "default") {
-      constraints.audio = { deviceId: { exact: devId } };
-    }
-    testMicStream = await navigator.mediaDevices.getUserMedia(constraints);
+    testMicStream = await getSelectedInputStream({});
     const ctx = new AudioContext();
     const source = ctx.createMediaStreamSource(testMicStream);
     const analyser = ctx.createAnalyser();
@@ -252,22 +293,45 @@ function stopTestMic(): void {
 $btnTestInput.addEventListener("click", startTestMic);
 $btnStopTestInput.addEventListener("click", stopTestMic);
 
+type SinkRoutableAudioContext = AudioContext & {
+  setSinkId?: (sinkId: string) => Promise<void>;
+};
+
+async function setAudioOutputDevice(ctx: AudioContext, deviceId: string): Promise<void> {
+  const setSinkId = (ctx as SinkRoutableAudioContext).setSinkId;
+  if (deviceId === "default") {
+    // An empty sink id selects the current OS default. This also reroutes an
+    // already-active context after its previously selected device is removed.
+    if (typeof setSinkId === "function") await setSinkId.call(ctx, "");
+    return;
+  }
+  if (typeof setSinkId !== "function") {
+    throw new Error("this browser cannot route audio to a selected output device");
+  }
+  await setSinkId.call(ctx, deviceId);
+}
+
 // Test output speaker
-function testSpeaker(): void {
+async function testSpeaker(): Promise<void> {
+  let ctx: AudioContext | null = null;
   try {
+    ctx = new AudioContext();
     const devId = $outputDevice.value;
-    const ctx = new AudioContext();
-    if (devId !== "default" && (ctx as any).setSinkId) {
-      (ctx as any).setSinkId(devId).then(() => playTestTone(ctx));
-    } else {
-      playTestTone(ctx);
-    }
+    await setAudioOutputDevice(ctx, devId);
+    playTestTone(ctx, "Playing test tone...");
   } catch (err) {
-    setStatus(`Speaker test failed: ${(err as Error).message}`);
+    $outputDevice.value = "default";
+    saveDeviceId(OUTPUT_DEVICE_KEY, "default");
+    if (ctx) {
+      await setAudioOutputDevice(ctx, "default").catch(() => undefined);
+      playTestTone(ctx, `Selected speaker unavailable; using System Default (${(err as Error).message})`);
+    } else {
+      setStatus(`Speaker test failed: ${(err as Error).message}`);
+    }
   }
 }
 
-function playTestTone(ctx: AudioContext): void {
+function playTestTone(ctx: AudioContext, message: string): void {
   const osc = ctx.createOscillator();
   const gain = ctx.createGain();
   osc.type = "sine";
@@ -276,17 +340,18 @@ function playTestTone(ctx: AudioContext): void {
   gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
   osc.connect(gain);
   gain.connect(ctx.destination);
+  osc.addEventListener("ended", () => { void ctx.close(); }, { once: true });
   osc.start(ctx.currentTime);
   osc.stop(ctx.currentTime + 0.3);
-  setStatus("Playing test tone...");
+  setStatus(message);
 }
 
 $btnTestOutput.addEventListener("click", testSpeaker);
 
 // Initialize devices
 if (navigator.mediaDevices) {
-  refreshDeviceList();
-  navigator.mediaDevices.ondevicechange = onDeviceChange;
+  void refreshDeviceList();
+  navigator.mediaDevices.addEventListener("devicechange", onDeviceChange);
 }
 
 // ---------------------------------------------------------------------------
@@ -848,14 +913,11 @@ async function acquireInputStream(): Promise<MediaStream> {
   // without this, the mic can pick up the speaker's own TTS playback as
   // echo, which the barge-in VAD then misreads as the user talking over
   // the TTS.
-  const constraints: MediaStreamConstraints = {
-    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-  };
-  const devId = $inputDevice.value;
-  if (devId !== "default") {
-    (constraints.audio as MediaTrackConstraints).deviceId = { exact: devId };
-  }
-  return navigator.mediaDevices.getUserMedia(constraints);
+  return getSelectedInputStream({
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+  });
 
 }
 
@@ -1011,11 +1073,20 @@ function stopBargeVad(): void {
 // ---------------------------------------------------------------------------
 // Session lifecycle
 // ---------------------------------------------------------------------------
-function resetSession(): void {
-  audioCtx = new AudioContext({ sampleRate: TTS_SAMPLE_RATE });
+async function resetSession(): Promise<void> {
+  if (audioCtx && audioCtx.state !== "closed") {
+    await audioCtx.close().catch(() => undefined);
+  }
+  const nextAudioCtx = new AudioContext({ sampleRate: TTS_SAMPLE_RATE });
+  audioCtx = nextAudioCtx;
   const devId = $outputDevice.value;
-  if (devId !== "default" && audioCtx && typeof (audioCtx as any).setSinkId === "function") {
-    (audioCtx as any).setSinkId(devId).catch(() => {});
+  try {
+    await setAudioOutputDevice(nextAudioCtx, devId);
+  } catch (error) {
+    $outputDevice.value = "default";
+    saveDeviceId(OUTPUT_DEVICE_KEY, "default");
+    await setAudioOutputDevice(nextAudioCtx, "default").catch(() => undefined);
+    setStatus(`Selected speaker unavailable; switched to System Default (${(error as Error).message})`);
   }
   nextPlayTime = 0;
   utterances = [];
@@ -1027,10 +1098,10 @@ function resetSession(): void {
 async function start(): Promise<void> {
   setState("recording");
   manualStopRequested = false;
-  resetSession();
-  setConnectionStatus("connected");
 
   try {
+    await resetSession();
+    setConnectionStatus("connected");
     await openWebSocket();
     await startRecorder();
   } catch (err) {
@@ -1049,10 +1120,10 @@ async function playFile(): Promise<void> {
   }
 
   setState("playing-file");
-  resetSession();
   fileTtsHeard = false;
 
   try {
+    await resetSession();
     fileAudio = new Audio(url);
     fileAudio.volume = 1.0;
     await new Promise<void>((resolve, reject) => {
@@ -1132,6 +1203,10 @@ function setState(s: AppState, message?: string): void {
   $diarization.disabled = busy;
   $langId.disabled = busy;
   $tts.disabled = busy;
+  $inputDevice.disabled = busy;
+  $outputDevice.disabled = busy;
+  $btnTestInput.disabled = busy;
+  $btnTestOutput.disabled = busy;
   document.querySelectorAll<HTMLInputElement>("input[name=mode]").forEach((r) => (r.disabled = busy));
   document.querySelectorAll<HTMLInputElement>("input[name=audio-source]").forEach((r) => (r.disabled = busy));
   syncBargeAvailability();
