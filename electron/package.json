@@ -1,6 +1,6 @@
 {
   "name": "soniox-live-translate-electron",
-  "version": "0.X.Y",
+  "version": "0.2.2",
   "private": true,
   "description": "Standalone desktop shell for Soniox Live Translate (Electron).",
   "main": "main.js",
