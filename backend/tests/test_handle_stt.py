@@ -66,7 +66,15 @@ class TestHandleSttOneWay:
         )
 
         # All STT JSON was forwarded to browser
-        assert len(browser_ws.sent) == 3
+        assert len(browser_ws.sent) == 4
+        assert browser_ws.sent[2] == {
+            "type": "line_ready",
+            "speaker": None,
+            "original_text": "hola",
+            "translated_text": "hello",
+            "lang": None,
+            "is_endpoint": True,
+        }
 
         # Queue got one complete translation, then its utterance end, followed
         # by the trailing end + None sentinel from finally.
@@ -317,7 +325,8 @@ class TestHandleSttExtraHold:
         while not tts_queue.empty():
             items.append(tts_queue.get_nowait())
 
-        assert len(browser_ws.sent) == 4
+        assert len(browser_ws.sent) == 6
+        assert [message["translated_text"] for message in browser_ws.sent if message.get("type") == "line_ready"] == ["A", "B"]
         assert committed_translations == ["A", "B"]
         assert sleep_delays == [
             pytest.approx(4.0, abs=0.05),
@@ -331,3 +340,75 @@ class TestHandleSttExtraHold:
             (TTS_END, None),
             TTS_NONE,
         ]
+
+
+async def test_external_translation_never_queues_original_text():
+    messages = [
+        {
+            "tokens": [
+                {"text": "Hello world.", "translation_status": "original", "is_final": True, "language": "en"},
+                {"text": "<end>"},
+            ]
+        },
+        {"finished": True},
+    ]
+    queue: asyncio.Queue = asyncio.Queue()
+
+    async def translate(text: str, source: str | None, target: str) -> str:
+        assert (text, source, target) == ("Hello world.", "en", "vi")
+        return "Xin chào thế giới."
+
+    await handle_stt(
+        stt_ws=FakeSttWs(messages),
+        browser_ws=FakeBrowserWs(),
+        tts_queue=queue,
+        tts_state=new_tts_state(["vi"]),
+        mode="one_way",
+        lang_a=None,
+        lang_b=None,
+        target_lang="vi",
+        translate_text=translate,
+    )
+
+    queued = []
+    while not queue.empty():
+        queued.append(queue.get_nowait())
+    spoken = [item[1] for item in queued if isinstance(item, tuple) and item[0] == TTS_TEXT]
+    assert spoken == ["Xin chào thế giới."]
+    assert all("Hello world" not in text for text in spoken)
+
+
+async def test_natural_endpoint_keeps_long_utterance_as_one_tts_line():
+    long_translation = "Một câu hoàn chỉnh; " * 18
+    messages = [
+        {
+            "tokens": [
+                {"text": "A complete thought.", "translation_status": "original", "is_final": True},
+                {"text": long_translation, "translation_status": "translation", "is_final": True},
+                {"text": "<end>"},
+            ]
+        },
+        {"finished": True},
+    ]
+    queue: asyncio.Queue = asyncio.Queue()
+    browser = FakeBrowserWs()
+
+    await handle_stt(
+        stt_ws=FakeSttWs(messages),
+        browser_ws=browser,
+        tts_queue=queue,
+        tts_state=new_tts_state(["vi"]),
+        mode="one_way",
+        lang_a=None,
+        lang_b=None,
+        target_lang="vi",
+    )
+
+    spoken = []
+    while not queue.empty():
+        item = queue.get_nowait()
+        if isinstance(item, tuple) and item[0] == TTS_TEXT:
+            spoken.append(item[1])
+    lines = [message for message in browser.sent if message.get("type") == "line_ready"]
+    assert spoken == [long_translation]
+    assert [line["translated_text"] for line in lines] == spoken

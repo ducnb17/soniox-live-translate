@@ -11,6 +11,7 @@ import httpx
 
 from ..tts_provider import TTSProviderBase, Voice, TTSProviderInfo, register_provider
 from ..logging_config import get_logger
+from ..provider_connection import test_get
 
 log = get_logger("azure_tts")
 
@@ -37,6 +38,14 @@ class AzureTTSProvider(TTSProviderBase):
     def __init__(self, api_key: str | None = None) -> None:
         self._api_key = api_key
         self._region = "eastus"  # default region
+
+    async def test_connection(self) -> tuple[bool, str]:
+        if not self._api_key:
+            return False, "Azure Speech API key is required"
+        return await test_get(
+            f"https://{self._region}.tts.speech.microsoft.com/cognitiveservices/voices/list",
+            headers={"Ocp-Apim-Subscription-Key": self._api_key},
+        )
 
     async def list_voices(self, lang: str | None = None) -> list[Voice]:
         voices = []
@@ -92,6 +101,7 @@ class AzureTTSProvider(TTSProviderBase):
             description="Microsoft neural voices for 100+ languages. Streaming support.",
             requires_api_key=True,
             supports_streaming=True,
+            tier="cheap",
             pricing_url="https://azure.microsoft.com/pricing/details/cognitive-services/speech-services/",
             approximate_cost_per_1m_chars=15.0,
         )

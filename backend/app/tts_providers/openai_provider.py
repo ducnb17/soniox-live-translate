@@ -13,6 +13,7 @@ import httpx
 
 from ..tts_provider import TTSProviderBase, Voice, TTSProviderInfo, register_provider
 from ..logging_config import get_logger
+from ..provider_connection import test_get
 
 log = get_logger("openai_tts")
 
@@ -24,6 +25,14 @@ OPENAI_VOICES = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]
 class OpenAITTSProvider(TTSProviderBase):
     def __init__(self, api_key: str | None = None) -> None:
         self._api_key = api_key
+
+    async def test_connection(self) -> tuple[bool, str]:
+        if not self._api_key:
+            return False, "OpenAI API key is required"
+        return await test_get(
+            "https://api.openai.com/v1/models",
+            headers={"Authorization": f"Bearer {self._api_key}"},
+        )
 
     async def list_voices(self, lang: str | None = None) -> list[Voice]:
         return [
@@ -69,6 +78,7 @@ class OpenAITTSProvider(TTSProviderBase):
             description="6 voices (tts-1/tts-1-hd). Low latency but no true streaming.",
             requires_api_key=True,
             supports_streaming=False,
+            tier="cheap",
             pricing_url="https://openai.com/pricing",
             approximate_cost_per_1m_chars=15.0,
         )

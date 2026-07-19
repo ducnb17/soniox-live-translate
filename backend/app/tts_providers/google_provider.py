@@ -12,6 +12,7 @@ import httpx
 
 from ..tts_provider import TTSProviderBase, Voice, TTSProviderInfo, register_provider
 from ..logging_config import get_logger
+from ..provider_connection import test_get
 
 log = get_logger("google_tts")
 
@@ -44,6 +45,14 @@ OTHER_VOICES = [  # Common languages
 class GoogleTTSProvider(TTSProviderBase):
     def __init__(self, api_key: str | None = None) -> None:
         self._api_key = api_key
+
+    async def test_connection(self) -> tuple[bool, str]:
+        if not self._api_key:
+            return False, "Google Cloud API key is required"
+        return await test_get(
+            "https://texttospeech.googleapis.com/v1/voices",
+            params={"key": self._api_key},
+        )
 
     async def list_voices(self, lang: str | None = None) -> list[Voice]:
         voices = []
@@ -114,6 +123,7 @@ class GoogleTTSProvider(TTSProviderBase):
             description="High-quality HD voices for Vietnamese & 40+ languages. Supports streaming.",
             requires_api_key=True,
             supports_streaming=False,
+            tier="cheap",
             pricing_url="https://cloud.google.com/text-to-speech/pricing",
             approximate_cost_per_1m_chars=16.0,
         )

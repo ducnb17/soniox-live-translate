@@ -108,6 +108,7 @@ async def handle_stt(
     finalize_session_on_exit: bool = True,
     finished_event: asyncio.Event | None = None,
     extra_hold_ms: int = 0,
+    translate_text: Callable[[str, str | None, str], Awaitable[str]] | None = None,
 ) -> None:
     """Read STT responses: forward to browser, route tokens to TTS queue,
     call `on_endpoint` whenever an <end> token closes an utterance,
@@ -118,22 +119,25 @@ async def handle_stt(
     full_translation = ""
     current_speaker = None
     current_lang = None
+    line_original_offset = 0
     utterance_start_ms: int | None = None
     stream_finished = False
-    pending_tts_chunks: list[tuple[str, str | None]] = []
+    pending_tts_chunks: list[tuple[str, str | None, dict[str, Any]]] = []
     hold_queue: asyncio.Queue[
-        tuple[float, list[tuple[str, str | None]], str | None, dict | None]
+        tuple[float, list[tuple[str, str | None, dict[str, Any]]], str | None, dict | None]
     ] | None = None
     hold_worker: asyncio.Task[None] | None = None
 
     async def commit_utterance(
-        tts_chunks: list[tuple[str, str | None]],
+        tts_chunks: list[tuple[str, str | None, dict[str, Any]]],
         direction: str | None,
         final_segment: dict | None,
     ) -> None:
-        if tts_queue is not None:
-            for chunk, chunk_direction in tts_chunks:
+        for chunk, chunk_direction, line_payload in tts_chunks:
+            if tts_queue is not None and chunk:
                 await tts_queue.put((TTS_TEXT, chunk, chunk_direction))
+            await browser_ws.send_json(line_payload)
+        if tts_queue is not None:
             await tts_queue.put((TTS_END, direction))
         if on_endpoint is not None:
             await on_endpoint()
@@ -173,6 +177,9 @@ async def handle_stt(
                 break
 
             got_end = False
+            message_has_end = any(
+                token.get("text") == "<end>" for token in data.get("tokens", [])
+            )
             for token in data.get("tokens", []):
                 text = token.get("text")
                 if not text:
@@ -194,8 +201,35 @@ async def handle_stt(
                     )
                     tts_chunks = pending_tts_chunks
                     pending_tts_chunks = []
-                    if tts_queue is not None and current_translation:
-                        tts_chunks.append((current_translation, direction))
+                    if translate_text is not None and current_original:
+                        external_target = _external_translation_target(
+                            mode, current_lang, lang_a, lang_b, target_lang
+                        )
+                        if external_target:
+                            try:
+                                current_translation = await translate_text(
+                                    current_original, current_lang, external_target
+                                )
+                                full_translation = current_translation
+                                direction = external_target
+                            except Exception as exc:
+                                log.error("external_translation_failed", error=str(exc))
+                                await browser_ws.send_json({
+                                    "translation_error": {"message": str(exc)}
+                                })
+                    remaining_original = current_original[line_original_offset:]
+                    if current_translation or remaining_original:
+                        tts_chunks.append((
+                            current_translation,
+                            direction,
+                            _line_ready_payload(
+                                speaker=current_speaker,
+                                original_text=remaining_original,
+                                translated_text=current_translation,
+                                lang=current_lang,
+                                is_endpoint=True,
+                            ),
+                        ))
                     final_segment = None
                     if current_original or full_translation:
                         final_segment = {
@@ -220,6 +254,7 @@ async def handle_stt(
                     full_translation = ""
                     current_speaker = None
                     current_lang = None
+                    line_original_offset = 0
                     utterance_start_ms = None
                 elif token.get("translation_status") == "translation":
                     if token.get("is_final"):
@@ -229,16 +264,29 @@ async def handle_stt(
                             target = _resolve_tts_target(
                                 token, mode, lang_a, lang_b, target_lang
                             )
-                            while len(current_translation) > TTS_MAX_BUFFER_CHARS:
+                            while (
+                                not message_has_end
+                                and len(current_translation) > TTS_MAX_BUFFER_CHARS
+                            ):
                                 split_at = _tts_buffer_split_index(current_translation)
                                 if split_at is None:
                                     break
                                 chunk = current_translation[:split_at]
                                 current_translation = current_translation[split_at:]
+                                original_chunk = current_original[line_original_offset:]
+                                line_original_offset = len(current_original)
+                                line_payload = _line_ready_payload(
+                                    speaker=current_speaker,
+                                    original_text=original_chunk,
+                                    translated_text=chunk,
+                                    lang=current_lang,
+                                    is_endpoint=False,
+                                )
                                 if hold_queue is not None:
-                                    pending_tts_chunks.append((chunk, target))
+                                    pending_tts_chunks.append((chunk, target, line_payload))
                                 else:
                                     await tts_queue.put((TTS_TEXT, chunk, target))
+                                    await browser_ws.send_json(line_payload)
                     text_pushed = True
                 else:
                     if token.get("is_final"):
@@ -307,6 +355,40 @@ def _resolve_tts_target(
     if src == lang_b:
         return lang_a
     return target_lang
+
+
+def _external_translation_target(
+    mode: str,
+    source_lang: str | None,
+    lang_a: str | None,
+    lang_b: str | None,
+    target_lang: str | None,
+) -> str | None:
+    if mode == "one_way":
+        return target_lang
+    if source_lang == lang_a:
+        return lang_b
+    if source_lang == lang_b:
+        return lang_a
+    return target_lang or lang_b
+
+
+def _line_ready_payload(
+    *,
+    speaker: Any,
+    original_text: str,
+    translated_text: str,
+    lang: str | None,
+    is_endpoint: bool,
+) -> dict[str, Any]:
+    return {
+        "type": "line_ready",
+        "speaker": speaker,
+        "original_text": original_text,
+        "translated_text": translated_text,
+        "lang": lang,
+        "is_endpoint": is_endpoint,
+    }
 
 
 def _tts_buffer_split_index(text: str) -> int | None:

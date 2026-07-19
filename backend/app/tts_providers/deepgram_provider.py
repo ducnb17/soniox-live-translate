@@ -10,6 +10,7 @@ import httpx
 
 from ..tts_provider import TTSProviderBase, Voice, TTSProviderInfo, register_provider
 from ..logging_config import get_logger
+from ..provider_connection import test_get
 
 log = get_logger("deepgram_tts")
 
@@ -26,6 +27,14 @@ DEEPGRAM_VOICES = [
 class DeepgramProvider(TTSProviderBase):
     def __init__(self, api_key: str | None = None) -> None:
         self._api_key = api_key
+
+    async def test_connection(self) -> tuple[bool, str]:
+        if not self._api_key:
+            return False, "Deepgram API key is required"
+        return await test_get(
+            "https://api.deepgram.com/v1/projects",
+            headers={"Authorization": f"Token {self._api_key}"},
+        )
 
     async def list_voices(self, lang: str | None = None) -> list[Voice]:
         return [
@@ -62,6 +71,7 @@ class DeepgramProvider(TTSProviderBase):
             description="Real-time low-latency TTS, optimized for live applications.",
             requires_api_key=True,
             supports_streaming=False,
+            tier="cheap",
             pricing_url="https://deepgram.com/pricing",
             approximate_cost_per_1m_chars=15.0,
         )

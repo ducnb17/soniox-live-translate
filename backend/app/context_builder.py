@@ -19,6 +19,7 @@ def build_stt_config(
     diarize: bool,
     context: dict[str, Any] | None,
     max_endpoint_delay_ms: int = MAX_ENDPOINT_DELAY_MS,
+    enable_translation: bool = True,
 ) -> dict[str, Any]:
     config: dict[str, Any] = {
         "api_key": SONIOX_API_KEY,
@@ -30,6 +31,10 @@ def build_stt_config(
         "enable_language_identification": lang_id,
     }
 
+    if context:
+        config["context"] = _normalize_context(context)
+    if not enable_translation:
+        return config
     if mode == "one_way":
         if not target_lang:
             raise ValueError("one_way mode requires target_lang")
@@ -40,9 +45,6 @@ def build_stt_config(
         config["translation"] = {"type": "two_way", "language_a": lang_a, "language_b": lang_b}
     else:
         raise ValueError(f"unknown mode: {mode!r}")
-
-    if context:
-        config["context"] = _normalize_context(context)
 
     return config
 

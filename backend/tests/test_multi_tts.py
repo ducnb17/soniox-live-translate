@@ -63,7 +63,10 @@ async def run_sender(provider, provider_id="openai", fallback=None):
 
 async def test_all_seven_providers_are_registered_and_have_voices():
     expected = {"soniox", "google", "openai", "azure", "elevenlabs", "deepgram", "polly"}
-    assert {info.id for info in get_available_providers()} == expected
+    infos = get_available_providers()
+    assert {info.id for info in infos} == expected
+    assert {info.tier for info in infos} <= {"free", "cheap", "premium"}
+    assert next(info for info in infos if info.id == "elevenlabs").tier == "premium"
     for provider_id in expected:
         provider = get_provider(provider_id)
         assert provider is not None

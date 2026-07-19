@@ -95,9 +95,10 @@ def _secret_values(cfg: dict[str, Any]) -> list[tuple[dict[str, Any], str]]:
     for key_name in ("soniox_api_key", "SONIOX_API_KEY"):
         if cfg.get(key_name):
             values.append((cfg, key_name))
-    keys = cfg.get("tts_api_keys")
-    if isinstance(keys, dict):
-        values.extend((keys, str(provider_id)) for provider_id, value in keys.items() if value)
+    for collection_name in ("tts_api_keys", "stt_api_keys", "translation_api_keys"):
+        keys = cfg.get(collection_name)
+        if isinstance(keys, dict):
+            values.extend((keys, str(provider_id)) for provider_id, value in keys.items() if value)
     return values
 
 
@@ -205,4 +206,53 @@ def set_tts_voice(provider_id: str, voice: str) -> None:
     if not isinstance(cfg.get("tts_voices"), dict):
         cfg["tts_voices"] = {}
     cfg["tts_voices"][provider_id] = voice
+    save_config(cfg)
+
+
+def _get_provider_api_key(collection: str, provider_id: str) -> str | None:
+    keys = load_config().get(collection, {})
+    return keys.get(provider_id) if isinstance(keys, dict) else None
+
+
+def _set_provider_api_key(collection: str, provider_id: str, key: str) -> None:
+    cfg = load_config()
+    if not isinstance(cfg.get(collection), dict):
+        cfg[collection] = {}
+    cfg[collection][provider_id] = key
+    save_config(cfg)
+
+
+def get_stt_api_key(provider_id: str) -> str | None:
+    return _get_provider_api_key("stt_api_keys", provider_id)
+
+
+def set_stt_api_key(provider_id: str, key: str) -> None:
+    _set_provider_api_key("stt_api_keys", provider_id, key)
+
+
+def get_stt_provider() -> str:
+    return str(load_config().get("stt_provider", "soniox"))
+
+
+def set_stt_provider(provider_id: str) -> None:
+    cfg = load_config()
+    cfg["stt_provider"] = provider_id
+    save_config(cfg)
+
+
+def get_translation_api_key(provider_id: str) -> str | None:
+    return _get_provider_api_key("translation_api_keys", provider_id)
+
+
+def set_translation_api_key(provider_id: str, key: str) -> None:
+    _set_provider_api_key("translation_api_keys", provider_id, key)
+
+
+def get_translation_provider() -> str:
+    return str(load_config().get("translation_provider", "soniox"))
+
+
+def set_translation_provider(provider_id: str) -> None:
+    cfg = load_config()
+    cfg["translation_provider"] = provider_id
     save_config(cfg)

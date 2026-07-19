@@ -70,8 +70,7 @@ const $actionBtn = $<HTMLButtonElement>("action");
 const $actionLabel = $actionBtn.querySelector<HTMLSpanElement>(".btn-label")!;
 const $modeToggle = $<HTMLButtonElement>("mode-toggle");
 const $audioUrl = $<HTMLInputElement>("audio-url");
-const $originalCol = $<HTMLDivElement>("original");
-const $translationCol = $<HTMLDivElement>("translation");
+const $transcriptFeed = $<HTMLDivElement>("transcript-feed");
 const $status = $<HTMLSpanElement>("status");
 const $delayStatus = $<HTMLSpanElement>("delay-status");
 const $bargeMeter = $<HTMLDivElement>("barge-meter");
@@ -103,6 +102,26 @@ const $ttsApiKey = $<HTMLInputElement>("tts-api-key");
 const $ttsApiKeyRow = $<HTMLDivElement>("tts-api-key-row");
 const $btnSaveTtsKey = $<HTMLButtonElement>("btn-save-tts-key");
 const $ttsCostHint = $<HTMLParagraphElement>("tts-cost-hint");
+const $ttsTierBadge = $<HTMLSpanElement>("tts-tier-badge");
+const $ttsProviderDescription = $<HTMLSpanElement>("tts-provider-description");
+const $ttsTestStatus = $<HTMLSpanElement>("tts-test-status");
+const $ttsKeyLink = $<HTMLAnchorElement>("tts-key-link");
+const $sttProvider = $<HTMLSelectElement>("stt-provider-select");
+const $sttApiKey = $<HTMLInputElement>("stt-api-key");
+const $sttApiKeyRow = $<HTMLDivElement>("stt-api-key-row");
+const $btnTestSttKey = $<HTMLButtonElement>("btn-test-stt-key");
+const $sttTestStatus = $<HTMLSpanElement>("stt-test-status");
+const $sttTierBadge = $<HTMLSpanElement>("stt-tier-badge");
+const $sttProviderDescription = $<HTMLSpanElement>("stt-provider-description");
+const $sttKeyLink = $<HTMLAnchorElement>("stt-key-link");
+const $translationProvider = $<HTMLSelectElement>("translation-provider-select");
+const $translationApiKey = $<HTMLInputElement>("translation-api-key");
+const $translationApiKeyRow = $<HTMLDivElement>("translation-api-key-row");
+const $btnTestTranslationKey = $<HTMLButtonElement>("btn-test-translation-key");
+const $translationTestStatus = $<HTMLSpanElement>("translation-test-status");
+const $translationTierBadge = $<HTMLSpanElement>("translation-tier-badge");
+const $translationProviderDescription = $<HTMLSpanElement>("translation-provider-description");
+const $translationKeyLink = $<HTMLAnchorElement>("translation-key-link");
 const $historyPanel = $<HTMLDivElement>("history-panel");
 const $historyList = $<HTMLDivElement>("history-list");
 const $historySearch = $<HTMLInputElement>("history-search");
@@ -111,6 +130,53 @@ const $historyLoadMore = $<HTMLButtonElement>("history-load-more");
 const $retentionDays = $<HTMLInputElement>("retention-days");
 const $retentionCleanup = $<HTMLButtonElement>("retention-cleanup");
 const $retentionStats = $<HTMLSpanElement>("retention-stats");
+
+function moveSettingsContent(): void {
+  const general = $<HTMLElement>("settings-general");
+  const ttsPanel = $<HTMLElement>("settings-tts");
+  const display = $<HTMLElement>("settings-display");
+  for (const id of [
+    "translation-mode-block", "one-way-block", "two-way-block",
+    "general-options-block", "device-block", "context-block", "audio-url-block",
+  ]) general.appendChild($(id));
+  const footer = document.querySelector<HTMLElement>(".sidebar-footer");
+  if (footer) general.appendChild(footer);
+  for (const id of ["voice-a-block", "voice-b-block", "tts-provider-block"]) {
+    ttsPanel.appendChild($(id));
+  }
+  for (const id of ["session-info", "download-block"]) display.appendChild($(id));
+  const history = document.querySelector<HTMLElement>(".history-section");
+  if (history) display.appendChild(history);
+  document.getElementById("settings-staging")?.remove();
+}
+
+moveSettingsContent();
+
+document.querySelectorAll<HTMLButtonElement>("[data-settings-tab]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const tab = button.dataset.settingsTab;
+    document.querySelectorAll<HTMLElement>("[data-settings-tab]").forEach((item) => {
+      item.classList.toggle("active", item.dataset.settingsTab === tab);
+    });
+    document.querySelectorAll<HTMLElement>("[data-settings-panel]").forEach((panel) => {
+      panel.classList.toggle("active", panel.dataset.settingsPanel === tab);
+    });
+  });
+});
+
+document.querySelectorAll<HTMLButtonElement>("[data-secret-target]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const input = document.getElementById(button.dataset.secretTarget || "") as HTMLInputElement | null;
+    if (input) input.type = input.type === "password" ? "text" : "password";
+  });
+});
+
+void fetch("/api/version")
+  .then((response) => response.json())
+  .then((data: { version?: string }) => {
+    $("app-version").textContent = data.version || "unknown";
+  })
+  .catch(() => { $("app-version").textContent = "unknown"; });
 
 // ---------------------------------------------------------------------------
 // Populate selectors
@@ -386,8 +452,22 @@ if (navigator.mediaDevices) {
 interface TtsProviderInfo {
   id: string;
   name: string;
+  description: string;
   requires_api_key: boolean;
+  tier: "free" | "cheap" | "premium";
+  pricing_url: string;
   approximate_cost_per_1m_chars: number;
+  has_api_key: boolean;
+}
+
+interface ProviderInfo {
+  id: string;
+  name: string;
+  description: string;
+  requires_api_key: boolean;
+  tier: "free" | "cheap" | "premium";
+  pricing_url: string;
+  signup_url?: string;
   has_api_key: boolean;
 }
 
@@ -509,7 +589,12 @@ async function onTtsProviderChange(savedVoice = ""): Promise<void> {
   const provider = ttsProviders.find(p => p.id === pid);
 
   // Show/hide API key row
-  $ttsApiKeyRow.style.display = provider?.requires_api_key ? "block" : "none";
+  $ttsApiKeyRow.style.display = "block";
+  $ttsApiKeyRow.classList.toggle("provider-no-key", !provider?.requires_api_key);
+  $ttsTierBadge.textContent = provider?.tier || "";
+  $ttsTierBadge.dataset.tier = provider?.tier || "";
+  $ttsProviderDescription.textContent = provider?.description || "";
+  $ttsKeyLink.href = provider?.pricing_url || "#";
 
   updateTtsCostHint();
 
@@ -564,21 +649,135 @@ $ttsVoice.addEventListener("change", () => {
 $btnSaveTtsKey.addEventListener("click", async () => {
   const pid = $ttsProvider.value;
   const key = $ttsApiKey.value.trim();
-  if (!key) return;
+  const provider = ttsProviders.find((item) => item.id === pid);
+  if (!key && provider?.requires_api_key) {
+    $ttsTestStatus.textContent = "❌ API key is required";
+    return;
+  }
   try {
-    const response = await fetch("/api/tts/config", {
+    $ttsTestStatus.textContent = "Testing…";
+    const response = await fetch(`/api/tts/providers/${pid}/test`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ provider_id: pid, api_key: key, voice: $ttsVoice.value }),
+      body: JSON.stringify({ api_key: key }),
     });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    setStatus("API key saved");
-    $ttsApiKey.value = "";
-    await loadTtsProviders();
-  } catch (err) {
-    setStatus("Failed to save API key");
+    const result = await response.json() as { ok: boolean; message: string };
+    $ttsTestStatus.textContent = `${result.ok ? "✅" : "❌"} ${result.message}`;
+    if (result.ok) {
+      setStatus("TTS connection verified and key saved");
+      $ttsApiKey.value = "";
+      await loadTtsProviders();
+    }
+  } catch (error) {
+    $ttsTestStatus.textContent = `❌ ${(error as Error).message}`;
   }
 });
+
+let sttProviders: ProviderInfo[] = [];
+let translationProviders: ProviderInfo[] = [];
+
+function populateProviderSelect(select: HTMLSelectElement, providers: ProviderInfo[]): void {
+  select.innerHTML = "";
+  for (const provider of providers) {
+    const option = document.createElement("option");
+    option.value = provider.id;
+    option.textContent = `${provider.name}${provider.has_api_key ? " [key]" : ""}`;
+    select.appendChild(option);
+  }
+}
+
+function showProviderMeta(
+  select: HTMLSelectElement,
+  providers: ProviderInfo[],
+  keyRow: HTMLElement,
+  badge: HTMLElement,
+  description: HTMLElement,
+  link: HTMLAnchorElement,
+): void {
+  const provider = providers.find((item) => item.id === select.value);
+  keyRow.classList.remove("hidden");
+  keyRow.classList.toggle("provider-no-key", !provider?.requires_api_key);
+  badge.textContent = provider?.tier || "";
+  badge.dataset.tier = provider?.tier || "";
+  description.textContent = provider?.description || "";
+  link.href = provider?.signup_url || provider?.pricing_url || "#";
+}
+
+async function loadDomainProviders(
+  domain: "stt" | "translation",
+  select: HTMLSelectElement,
+): Promise<ProviderInfo[]> {
+  const [providersResponse, configResponse] = await Promise.all([
+    fetch(`/api/${domain}/providers`),
+    fetch(`/api/${domain}/config`),
+  ]);
+  if (!providersResponse.ok || !configResponse.ok) throw new Error(`Could not load ${domain} providers`);
+  const providers = await providersResponse.json() as ProviderInfo[];
+  const config = await configResponse.json() as { current_provider?: string };
+  populateProviderSelect(select, providers);
+  select.value = config.current_provider || "soniox";
+  return providers;
+}
+
+async function testDomainProvider(
+  domain: "stt" | "translation",
+  select: HTMLSelectElement,
+  input: HTMLInputElement,
+  status: HTMLElement,
+): Promise<void> {
+  status.textContent = "Testing…";
+  try {
+    const response = await fetch(`/api/${domain}/providers/${select.value}/test`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ api_key: input.value.trim() }),
+    });
+    const result = await response.json() as { ok: boolean; message: string };
+    status.textContent = `${result.ok ? "✅" : "❌"} ${result.message}`;
+    if (result.ok) {
+      input.value = "";
+      setStatus(`${domain === "stt" ? "STT" : "Translation"} connection verified and key saved`);
+    }
+  } catch (error) {
+    status.textContent = `❌ ${(error as Error).message}`;
+  }
+}
+
+async function loadSpeechProviders(): Promise<void> {
+  try {
+    sttProviders = await loadDomainProviders("stt", $sttProvider);
+    showProviderMeta($sttProvider, sttProviders, $sttApiKeyRow, $sttTierBadge, $sttProviderDescription, $sttKeyLink);
+    translationProviders = await loadDomainProviders("translation", $translationProvider);
+    showProviderMeta(
+      $translationProvider, translationProviders, $translationApiKeyRow,
+      $translationTierBadge, $translationProviderDescription, $translationKeyLink,
+    );
+  } catch {
+    window.setTimeout(() => { void loadSpeechProviders(); }, 3000);
+  }
+}
+
+$sttProvider.addEventListener("change", () => {
+  $sttTestStatus.textContent = "";
+  showProviderMeta($sttProvider, sttProviders, $sttApiKeyRow, $sttTierBadge, $sttProviderDescription, $sttKeyLink);
+});
+$translationProvider.addEventListener("change", () => {
+  $translationTestStatus.textContent = "";
+  showProviderMeta(
+    $translationProvider, translationProviders, $translationApiKeyRow,
+    $translationTierBadge, $translationProviderDescription, $translationKeyLink,
+  );
+});
+$btnTestSttKey.addEventListener("click", () => {
+  void testDomainProvider("stt", $sttProvider, $sttApiKey, $sttTestStatus);
+});
+$btnTestTranslationKey.addEventListener("click", () => {
+  void testDomainProvider(
+    "translation", $translationProvider, $translationApiKey, $translationTestStatus,
+  );
+});
+
+void loadSpeechProviders();
 
 // Load providers on startup
 loadTtsProviders();
@@ -833,6 +1032,7 @@ let manualStopRequested = false;
 let lastWebSocketParams: Record<string, string> = {};
 let manualRetryInProgress = false;
 let resumeTranscriptOnNextSession = false;
+let feedAutoScroll = true;
 
 // Scheduled TTS audio sources for barge-in interrupt.
 let activeSources: AudioBufferSourceNode[] = [];
@@ -924,6 +1124,8 @@ function openWebSocket(extraParams: Record<string, string> = {}): Promise<void> 
   params.set("input_device", $inputDevice.value);
   params.set("output_device", $outputDevice.value);
   params.set("tts_provider", $ttsProvider.value);
+  params.set("stt_provider", $sttProvider.value || "soniox");
+  params.set("translation_provider", $translationProvider.value || "soniox");
 
   // Use TTS provider voice for one-way, or fallback to Soniox voices
   const ttsVoice = $ttsVoice.value || $voice.value;
@@ -989,6 +1191,16 @@ function openWebSocket(extraParams: Record<string, string> = {}): Promise<void> 
       if (data.tts_usage) {
         ttsSessionUsage = addTtsUsage(ttsSessionUsage, data.tts_usage);
         updateTtsCostHint();
+        return;
+      }
+
+      if (data.translation_error) {
+        setStatus(`Translation failed: ${data.translation_error.message}`);
+        return;
+      }
+
+      if (data.type === "line_ready") {
+        handleLineReady(data);
         return;
       }
 
@@ -1102,15 +1314,7 @@ function handleSttResult(data: SonioxSttResponse): void {
     if (!t.text) continue;
 
     if (t.text === "<end>") {
-      if (
-        currentUtt.originalFinal ||
-        currentUtt.translationFinal ||
-        currentUtt.originalPartial ||
-        currentUtt.translationPartial
-      ) {
-        utterances.push(currentUtt);
-        currentUtt = newUtt();
-      }
+      currentUtt = newUtt();
       continue;
     }
 
@@ -1128,6 +1332,22 @@ function handleSttResult(data: SonioxSttResponse): void {
     }
   }
 
+  render();
+}
+
+function handleLineReady(data: SonioxSttResponse): void {
+  const original = data.original_text || "";
+  const translated = data.translated_text || "";
+  if (!original && !translated) return;
+  utterances.push({
+    speaker: data.speaker ?? null,
+    language: data.lang || null,
+    originalFinal: original,
+    originalPartial: "",
+    translationFinal: translated,
+    translationPartial: "",
+  });
+  if (!data.is_endpoint) currentUtt = newUtt();
   render();
 }
 
@@ -1357,6 +1577,7 @@ async function resetSession(): Promise<void> {
   nextPlayTime = 0;
   utterances = [];
   currentUtt = newUtt();
+  feedAutoScroll = true;
   activeSources = [];
   ttsSessionUsage = emptyTtsUsage();
   updateTtsCostHint();
@@ -1546,76 +1767,56 @@ function setConnectionStatus(s: ConnectionStatus): void {
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
-function renderUtterance(u: Utterance, col: HTMLDivElement, side: "original" | "translation"): void {
-  const final = u[`${side}Final`];
-  const partial = u[`${side}Partial`];
-  if (!final && !partial) return;
-
-  const div = document.createElement("div");
-  div.className = "utterance";
-
-  const labels: string[] = [];
-  if (side === "original") {
-    if ($diarization.checked && u.speaker != null) labels.push(`Speaker ${u.speaker}`);
-    if ($langId.checked && u.language) labels.push(u.language);
-  } else if ($langId.checked) {
-    if ($mode() === "one_way") labels.push($targetLang.value);
-    else labels.push(u.language ? otherLang(u.language) : $langB.value);
-  }
-  if (labels.length) {
-    const lbl = document.createElement("div");
-    lbl.className = "label";
-    lbl.textContent = labels.join(" · ");
-    div.appendChild(lbl);
-  }
-
-  if (final) {
-    const finalSpan = document.createElement("span");
-    finalSpan.textContent = final;
-    div.appendChild(finalSpan);
-  }
-  if (partial) {
-    const partialSpan = document.createElement("span");
-    partialSpan.className = "partial";
-    partialSpan.textContent = partial;
-    div.appendChild(partialSpan);
-  }
-
-  col.appendChild(div);
+function hasUtteranceText(u: Utterance): boolean {
+  return Boolean(u.originalFinal || u.originalPartial || u.translationFinal || u.translationPartial);
 }
 
-function otherLang(spoken: string): string {
-  if (spoken === $langA.value) return $langB.value;
-  if (spoken === $langB.value) return $langA.value;
-  return spoken || "";
+function renderFeedLine(u: Utterance, interim = false): void {
+  if (!hasUtteranceText(u)) return;
+  const speaker = u.speaker ?? 0;
+  const line = document.createElement("div");
+  line.className = `feed-line speaker-${Math.abs(speaker) % 5}${interim ? " interim" : ""}`;
+
+  const label = document.createElement("div");
+  label.className = "speaker-label";
+  label.append(`Speaker ${u.speaker ?? "—"}: `);
+  const language = document.createElement("span");
+  language.className = "lang-tag";
+  language.textContent = u.language || "auto";
+  label.appendChild(language);
+  line.appendChild(label);
+
+  const original = document.createElement("div");
+  original.className = "original-text";
+  original.textContent = `${u.originalFinal}${u.originalPartial}`;
+  line.appendChild(original);
+
+  const translated = document.createElement("div");
+  translated.className = "translated-text";
+  translated.textContent = `${u.translationFinal}${u.translationPartial}`;
+  line.appendChild(translated);
+  $transcriptFeed.appendChild(line);
 }
 
 function render(): void {
-  $originalCol.innerHTML = "";
-  $translationCol.innerHTML = "";
-  const all = [...utterances, currentUtt];
-  for (const u of all) {
-    renderUtterance(u, $originalCol, "original");
-    renderUtterance(u, $translationCol, "translation");
+  const previousScrollTop = $transcriptFeed.scrollTop;
+  const shouldScroll = feedAutoScroll;
+  $transcriptFeed.innerHTML = "";
+  for (const utterance of utterances) renderFeedLine(utterance);
+  renderFeedLine(currentUtt, true);
+  if (shouldScroll) {
+    $transcriptFeed.scrollTop = $transcriptFeed.scrollHeight;
+  } else {
+    $transcriptFeed.scrollTop = previousScrollTop;
   }
-  syncRowHeights();
-  $originalCol.scrollTop = $originalCol.scrollHeight;
-  $translationCol.scrollTop = $translationCol.scrollHeight;
   refreshDownloadButtons();
 }
 
-function syncRowHeights(): void {
-  const o = $originalCol.children;
-  const t = $translationCol.children;
-  for (const el of o) (el as HTMLElement).style.minHeight = "";
-  for (const el of t) (el as HTMLElement).style.minHeight = "";
-  const n = Math.min(o.length, t.length);
-  for (let i = 0; i < n; i++) {
-    const h = Math.max((o[i] as HTMLElement).offsetHeight, (t[i] as HTMLElement).offsetHeight);
-    (o[i] as HTMLElement).style.minHeight = `${h}px`;
-    (t[i] as HTMLElement).style.minHeight = `${h}px`;
-  }
-}
+$transcriptFeed.addEventListener("scroll", () => {
+  const distanceFromBottom =
+    $transcriptFeed.scrollHeight - $transcriptFeed.scrollTop - $transcriptFeed.clientHeight;
+  feedAutoScroll = distanceFromBottom < 48;
+});
 
 // ---------------------------------------------------------------------------
 // Event listeners

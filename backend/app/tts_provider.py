@@ -14,6 +14,8 @@ from .logging_config import get_logger
 
 log = get_logger("tts_provider")
 
+VALID_PROVIDER_TIERS = frozenset({"free", "cheap", "premium"})
+
 
 @dataclass
 class Voice:
@@ -31,12 +33,22 @@ class TTSProviderInfo:
     description: str
     requires_api_key: bool
     supports_streaming: bool
+    tier: str
     pricing_url: str
     approximate_cost_per_1m_chars: float = 0.0
     provider_class: str = ""
 
+    def __post_init__(self) -> None:
+        if self.tier not in VALID_PROVIDER_TIERS:
+            allowed = ", ".join(sorted(VALID_PROVIDER_TIERS))
+            raise ValueError(f"tier must be one of: {allowed}")
+
 
 class TTSProviderBase(ABC):
+    @abstractmethod
+    async def test_connection(self) -> tuple[bool, str]:
+        ...
+
     @abstractmethod
     async def list_voices(self, lang: str | None = None) -> list[Voice]:
         ...

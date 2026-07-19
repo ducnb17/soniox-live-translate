@@ -29,7 +29,79 @@
         </button>
       </div>
 
-      <div class="section">
+      <div class="settings-workspace">
+        <nav class="settings-nav" aria-label="Settings sections">
+          <button class="settings-tab active" type="button" data-settings-tab="general"><span>⚙</span>General</button>
+          <button class="settings-tab" type="button" data-settings-tab="stt"><span>◉</span>Speech-to-Text</button>
+          <button class="settings-tab" type="button" data-settings-tab="tts"><span>🔊</span>Text-to-Speech</button>
+          <button class="settings-tab" type="button" data-settings-tab="translation"><span>文</span>Translation</button>
+          <button class="settings-tab" type="button" data-settings-tab="display"><span>▣</span>Display</button>
+          <button class="settings-tab" type="button" data-settings-tab="about"><span>ⓘ</span>About</button>
+        </nav>
+        <div class="settings-panels">
+          <section class="settings-panel active" id="settings-general" data-settings-panel="general">
+            <h2>General</h2>
+          </section>
+          <section class="settings-panel" id="settings-stt" data-settings-panel="stt">
+            <h2>Speech-to-Text</h2>
+            <div class="section provider-card">
+              <label for="stt-provider-select">Provider</label>
+              <select id="stt-provider-select"></select>
+              <div class="provider-meta"><span id="stt-tier-badge" class="tier-badge"></span><span id="stt-provider-description"></span></div>
+              <div class="device-row" id="stt-api-key-row">
+                <label for="stt-api-key">API Key</label>
+                <div class="secret-input-row">
+                  <input type="password" id="stt-api-key" class="audio-url-input" placeholder="Enter API key...">
+                  <button class="secret-toggle" type="button" data-secret-target="stt-api-key" aria-label="Show or hide API key">👁</button>
+                </div>
+                <div class="provider-actions">
+                  <button id="btn-test-stt-key" class="test-btn" type="button">Test</button>
+                  <span id="stt-test-status" class="provider-test-status"></span>
+                </div>
+                <a id="stt-key-link" class="provider-link" href="#" target="_blank" rel="noopener">Get key</a>
+              </div>
+            </div>
+          </section>
+          <section class="settings-panel" id="settings-tts" data-settings-panel="tts">
+            <h2>Text-to-Speech</h2>
+          </section>
+          <section class="settings-panel" id="settings-translation" data-settings-panel="translation">
+            <h2>Translation</h2>
+            <div class="section provider-card">
+              <label for="translation-provider-select">Translation Engine</label>
+              <select id="translation-provider-select"></select>
+              <div class="provider-meta"><span id="translation-tier-badge" class="tier-badge"></span><span id="translation-provider-description"></span></div>
+              <div class="device-row" id="translation-api-key-row">
+                <label for="translation-api-key">API Key</label>
+                <div class="secret-input-row">
+                  <input type="password" id="translation-api-key" class="audio-url-input" placeholder="Enter API key...">
+                  <button class="secret-toggle" type="button" data-secret-target="translation-api-key" aria-label="Show or hide API key">👁</button>
+                </div>
+                <div class="provider-actions">
+                  <button id="btn-test-translation-key" class="test-btn" type="button">Test</button>
+                  <span id="translation-test-status" class="provider-test-status"></span>
+                </div>
+                <a id="translation-key-link" class="provider-link" href="#" target="_blank" rel="noopener">Get key</a>
+              </div>
+            </div>
+          </section>
+          <section class="settings-panel" id="settings-display" data-settings-panel="display">
+            <h2>Display &amp; history</h2>
+          </section>
+          <section class="settings-panel" id="settings-about" data-settings-panel="about">
+            <h2>About</h2>
+            <div class="about-card">
+              <strong>Soniox Live Translate</strong>
+              <span>Version <span id="app-version">loading…</span></span>
+              <p>Real-time speech transcription, translation and spoken output.</p>
+            </div>
+          </section>
+        </div>
+      </div>
+
+      <div id="settings-staging">
+
+      <div class="section" id="translation-mode-block">
         <h3>1. Translation mode</h3>
         <div class="segmented">
           <label class="seg">
@@ -65,7 +137,7 @@
         <select id="voice-b"></select>
       </div>
 
-      <div class="section">
+      <div class="section" id="general-options-block">
         <h3>4. Settings (optional)</h3>
         <label class="checkbox">
           <input type="checkbox" id="diarization" checked>
@@ -119,7 +191,12 @@
         <div class="device-row" id="tts-api-key-row" style="display:none">
           <label for="tts-api-key">API Key</label>
           <input type="password" id="tts-api-key" class="audio-url-input" placeholder="Enter API key...">
-          <button id="btn-save-tts-key" class="test-btn" type="button" style="margin-top:4px">Save Key</button>
+          <div class="provider-actions">
+            <button class="secret-toggle" type="button" data-secret-target="tts-api-key" aria-label="Show or hide API key">👁</button>
+            <button id="btn-save-tts-key" class="test-btn" type="button">Test</button>
+            <span id="tts-test-status" class="provider-test-status"></span>
+          </div>
+          <a id="tts-key-link" class="provider-link" href="#" target="_blank" rel="noopener">Get key</a>
         </div>
         <div class="device-row">
           <label for="tts-voice-select">Voice</label>
@@ -145,9 +222,10 @@
           <input type="range" id="tts-playback-rate" min="0.25" max="2" step="0.05" value="1">
         </div>
         <p class="hint" id="tts-cost-hint"></p>
+        <div class="provider-meta"><span id="tts-tier-badge" class="tier-badge"></span><span id="tts-provider-description"></span></div>
       </div>
 
-      <details class="section collapsible">
+      <details class="section collapsible" id="context-block">
         <summary>5. Custom context (optional)</summary>
         <p class="hint">Domain context + glossary to improve specialized accuracy. JSON shape shown below.</p>
         <textarea id="context-json" rows="8" placeholder='{
@@ -158,7 +236,7 @@
 }'></textarea>
       </details>
 
-      <div class="section">
+      <div class="section" id="audio-url-block">
         <h3>6. Test with audio URL (optional)</h3>
         <input type="text" id="audio-url" class="audio-url-input" placeholder="https://example.com/audio.mp3">
       </div>
@@ -254,16 +332,16 @@
           <span id="retention-stats" class="retention-stats"></span>
         </div>
       </div>
+      </div>
     </aside>
 
     <main class="main">
-      <section class="column">
-        <h2>Original</h2>
-        <div id="original" class="transcript"></div>
-      </section>
-      <section class="column">
-        <h2>Translation</h2>
-        <div id="translation" class="transcript"></div>
+      <section class="feed">
+        <header class="feed-header">
+          <div><span class="feed-live-dot"></span>Live translation</div>
+          <span class="feed-hint">Original · Translation</span>
+        </header>
+        <div id="transcript-feed" class="transcript-feed" aria-live="polite"></div>
       </section>
     </main>
   </div>

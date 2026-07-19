@@ -50,6 +50,15 @@ from .tts import (
 from .transcript import TranscriptStore
 from .config_store import save_config, load_config, is_configured as store_is_configured
 from .config_store import (
+    get_api_key,
+    get_stt_api_key,
+    set_stt_api_key,
+    get_stt_provider,
+    set_stt_provider,
+    get_translation_api_key,
+    set_translation_api_key,
+    get_translation_provider,
+    set_translation_provider,
     get_tts_api_key,
     set_tts_api_key,
     remove_tts_api_key,
@@ -59,8 +68,20 @@ from .config_store import (
     set_tts_voice,
 )
 from .logging_config import configure_logging, get_logger
-from .tts_provider import get_provider, get_available_providers
+from .tts_provider import (
+    get_provider as get_tts_provider_instance,
+    get_available_providers as get_available_tts_providers,
+)
+from .stt_provider import (
+    get_provider as get_stt_provider_instance,
+    get_available_providers as get_available_stt_providers,
+)
+from .translation_provider import (
+    get_provider as get_translation_provider_instance,
+    get_available_providers as get_available_translation_providers,
+)
 from .external_tts import external_tts_sender
+from .version import APP_VERSION
 from .db import (
     init_db,
     close_db,
@@ -106,6 +127,11 @@ app = FastAPI(lifespan=lifespan)
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/version")
+async def api_version() -> dict[str, str]:
+    return {"version": APP_VERSION}
 
 
 @app.get("/config")
@@ -225,7 +251,7 @@ async def api_retention_stats() -> JSONResponse:
 
 @app.get("/api/tts/providers")
 async def api_tts_providers() -> JSONResponse:
-    providers = get_available_providers()
+    providers = get_available_tts_providers()
     result = [
         {
             "id": p.id,
@@ -233,6 +259,7 @@ async def api_tts_providers() -> JSONResponse:
             "description": p.description,
             "requires_api_key": p.requires_api_key,
             "supports_streaming": p.supports_streaming,
+            "tier": p.tier,
             "pricing_url": p.pricing_url,
             "approximate_cost_per_1m_chars": p.approximate_cost_per_1m_chars,
             "has_api_key": bool(get_tts_api_key(p.id)),
@@ -245,7 +272,7 @@ async def api_tts_providers() -> JSONResponse:
 @app.get("/api/tts/providers/{provider_id}/voices")
 async def api_tts_provider_voices(provider_id: str, lang: str = "en") -> JSONResponse:
     api_key = get_tts_api_key(provider_id)
-    provider = get_provider(provider_id, api_key=api_key)
+    provider = get_tts_provider_instance(provider_id, api_key=api_key)
     if provider is None:
         return JSONResponse({"error": f"Unknown provider: {provider_id}"}, status_code=404)
     voices = await provider.list_voices(lang=lang)
@@ -270,7 +297,7 @@ async def api_tts_config(payload: dict = Body(...)) -> JSONResponse:
 
 @app.get("/api/tts/config")
 async def api_get_tts_config() -> JSONResponse:
-    providers = get_available_providers()
+    providers = get_available_tts_providers()
     provider_keys = {}
     for p in providers:
         key = get_tts_api_key(p.id)
@@ -281,6 +308,123 @@ async def api_get_tts_config() -> JSONResponse:
         "current_voice": get_tts_voice(get_tts_provider()),
         "configured_providers": provider_keys,
     })
+
+
+@app.post("/api/tts/providers/{provider_id}/test")
+async def api_test_tts_provider(provider_id: str, payload: dict = Body(...)) -> JSONResponse:
+    key = str(payload.get("api_key") or "").strip()
+    provider = get_tts_provider_instance(provider_id, api_key=key or None)
+    if provider is None:
+        return JSONResponse({"ok": False, "message": f"Unknown provider: {provider_id}"}, status_code=404)
+    ok, message = await provider.test_connection()
+    if ok:
+        if key:
+            set_tts_api_key(provider_id, key)
+        set_tts_provider(provider_id)
+    return JSONResponse({"ok": ok, "message": message})
+
+
+@app.get("/api/stt/providers")
+async def api_stt_providers() -> JSONResponse:
+    return JSONResponse([
+        {
+            "id": p.id,
+            "name": p.name,
+            "description": p.description,
+            "requires_api_key": p.requires_api_key,
+            "supports_streaming": p.supports_streaming,
+            "supports_realtime_translation": p.supports_realtime_translation,
+            "tier": p.tier,
+            "pricing_url": p.pricing_url,
+            "approximate_cost_per_hour": p.approximate_cost_per_hour,
+            "has_api_key": bool(get_stt_api_key(p.id)) or (p.id == "soniox" and bool(get_api_key())),
+        }
+        for p in get_available_stt_providers()
+    ])
+
+
+@app.post("/api/stt/providers/{provider_id}/test")
+async def api_test_stt_provider(provider_id: str, payload: dict = Body(...)) -> JSONResponse:
+    key = str(payload.get("api_key") or "").strip()
+    provider = get_stt_provider_instance(provider_id, api_key=key or None)
+    if provider is None:
+        return JSONResponse({"ok": False, "message": f"Unknown provider: {provider_id}"}, status_code=404)
+    ok, message = await provider.test_connection()
+    if ok:
+        if key:
+            set_stt_api_key(provider_id, key)
+            if provider_id == "soniox":
+                cfg = load_config()
+                cfg["soniox_api_key"] = key
+                save_config(cfg)
+                set_api_key(key)
+        set_stt_provider(provider_id)
+    return JSONResponse({"ok": ok, "message": message})
+
+
+@app.get("/api/stt/config")
+async def api_get_stt_config() -> JSONResponse:
+    return JSONResponse({"current_provider": get_stt_provider()})
+
+
+@app.post("/api/stt/config")
+async def api_set_stt_config(payload: dict = Body(...)) -> JSONResponse:
+    provider_id = str(payload.get("provider_id") or "")
+    if get_stt_provider_instance(provider_id) is None:
+        return JSONResponse({"ok": False, "message": f"Unknown provider: {provider_id}"}, status_code=404)
+    set_stt_provider(provider_id)
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/translation/providers")
+async def api_translation_providers() -> JSONResponse:
+    return JSONResponse([
+        {
+            "id": p.id,
+            "name": p.name,
+            "description": p.description,
+            "requires_api_key": p.requires_api_key,
+            "supports_realtime_translation": p.supports_realtime_translation,
+            "tier": p.tier,
+            "pricing_url": p.pricing_url,
+            "signup_url": p.signup_url,
+            "has_api_key": bool(get_translation_api_key(p.id)) or (p.id == "soniox" and bool(get_api_key())),
+        }
+        for p in get_available_translation_providers()
+    ])
+
+
+@app.post("/api/translation/providers/{provider_id}/test")
+async def api_test_translation_provider(provider_id: str, payload: dict = Body(...)) -> JSONResponse:
+    key = str(payload.get("api_key") or "").strip()
+    provider = get_translation_provider_instance(provider_id, api_key=key or None)
+    if provider is None:
+        return JSONResponse({"ok": False, "message": f"Unknown provider: {provider_id}"}, status_code=404)
+    ok, message = await provider.test_connection()
+    if ok:
+        if key:
+            set_translation_api_key(provider_id, key)
+            if provider_id == "soniox":
+                cfg = load_config()
+                cfg["soniox_api_key"] = key
+                save_config(cfg)
+                set_api_key(key)
+        set_translation_provider(provider_id)
+    return JSONResponse({"ok": ok, "message": message})
+
+
+@app.get("/api/translation/config")
+async def api_get_translation_config() -> JSONResponse:
+    return JSONResponse({"current_provider": get_translation_provider()})
+
+
+@app.post("/api/translation/config")
+async def api_set_translation_config(payload: dict = Body(...)) -> JSONResponse:
+    provider_id = str(payload.get("provider_id") or "")
+    if get_translation_provider_instance(provider_id) is None:
+        return JSONResponse({"ok": False, "message": f"Unknown provider: {provider_id}"}, status_code=404)
+    set_translation_provider(provider_id)
+    return JSONResponse({"ok": True})
 
 
 @app.websocket("/ws/translate")
@@ -301,6 +445,8 @@ async def translation_websocket(
     input_device: str | None = None,
     output_device: str | None = None,
     tts_provider: str = "soniox",
+    stt_provider: str = "soniox",
+    translation_provider: str = "soniox",
     stt_delay_ms: int = MAX_ENDPOINT_DELAY_MS,
 ) -> None:
     await browser_ws.accept()
@@ -315,6 +461,36 @@ async def translation_websocket(
         await browser_ws.close()
         return
 
+    if stt_provider != "soniox":
+        provider_info = get_stt_provider_instance(
+            stt_provider, api_key=get_stt_api_key(stt_provider)
+        )
+        message = (
+            f"{provider_info.info.name if provider_info else stt_provider} is configured, "
+            "but its live audio adapter is not available for this browser stream"
+        )
+        await browser_ws.send_json({"error_code": "stt_adapter_unavailable", "error_message": message})
+        await browser_ws.close()
+        return
+
+    translation_engine = get_translation_provider_instance(
+        translation_provider,
+        api_key=(
+            None
+            if translation_provider == "soniox"
+            else get_translation_api_key(translation_provider)
+        ),
+    )
+    if translation_engine is None:
+        await browser_ws.send_json({
+            "error_code": "bad_translation_provider",
+            "error_message": f"Unknown translation provider: {translation_provider}",
+        })
+        await browser_ws.close()
+        return
+
+    translate_text = None if translation_provider == "soniox" else translation_engine.translate
+
     context = _parse_context(context_b64)
     endpoint_delay_ms = max(500, min(3000, stt_delay_ms))
     extra_hold_ms = max(0, stt_delay_ms - 3000)
@@ -327,6 +503,7 @@ async def translation_websocket(
         diarize=diarize,
         context=context,
         max_endpoint_delay_ms=endpoint_delay_ms,
+        enable_translation=translation_provider == "soniox",
     )
 
     if mode == "two_way":
@@ -377,7 +554,7 @@ async def translation_websocket(
     use_external_tts = tts and tts_provider != "soniox"
     external_tts_task: asyncio.Task | None = None
     if use_external_tts and tts_queue is not None:
-        external_provider = get_provider(
+        external_provider = get_tts_provider_instance(
             tts_provider,
             api_key=get_tts_api_key(tts_provider),
         )
@@ -531,6 +708,7 @@ async def translation_websocket(
                         finalize_session_on_exit=False,
                         finished_event=stt_finished_event,
                         extra_hold_ms=extra_hold_ms,
+                        translate_text=translate_text,
                     )
                 )
                 tg.create_task(stt_keepalive(stt_ws))

@@ -138,17 +138,19 @@ jobs:
             ## Soniox Live Translate ${{ github.ref_name }}
 
             ### Có gì mới
-            - Thêm độ trễ nhận diện STT 0–10 giây, kết hợp endpoint delay Soniox và FIFO hold buffer
-            - Mở rộng độ trễ đọc TTS lên 0–10 giây và giữ tùy chọn qua lần mở app tiếp theo
-            - Làm mượt ranh giới PCM bằng fade-in/fade-out 8 ms để giảm click/pop
-            - Hiển thị rõ tổng độ trễ đang cấu hình trong lúc dịch
-            - Nâng mặc định endpoint delay lên 1.5 giây để ưu tiên câu đầy đủ hơn
+            - Thêm registry, metadata giá và kiểm tra kết nối cho STT, TTS và Translation provider
+            - Test API key thành công sẽ mã hóa, lưu và chọn provider ngay lập tức
+            - Settings mới gồm 6 tab: General, Speech-to-Text, Text-to-Speech, Translation, Display và About
+            - Gộp transcript thành một feed; mỗi dòng có bản gốc mờ và bản dịch nổi bật, tô màu theo speaker
+            - Đồng bộ ranh giới mỗi dòng hiển thị với đúng một lượt TTS bằng message `line_ready`
+            - Hỗ trợ Google, DeepL và OpenAI làm translation engine sau mỗi utterance
+            - Giữ nguyên Soniox làm STT live mặc định; không mô phỏng streaming cho API không tương thích
 
             ### Cài đặt trên Windows
             1. Tải file `.exe` bên dưới
             2. Chạy installer → cài vào `Program Files`
             3. Mở app từ Desktop / Start Menu
-            4. Lần đầu: nhập Soniox API key → **Save**
+            4. Lần đầu: nhập Soniox API key; trong Settings có thể kiểm tra và lưu key provider khác bằng **Test**
 
             ### Yêu cầu
             - Windows 10/11 (64-bit)

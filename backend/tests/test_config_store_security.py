@@ -28,7 +28,7 @@ def fake_dpapi(tmp_path, monkeypatch):
     return tmp_path / "config.json"
 
 
-def test_save_encrypts_soniox_and_all_tts_keys(fake_dpapi):
+def test_save_encrypts_keys_for_all_provider_domains(fake_dpapi):
     secrets = {
         "soniox_api_key": "soniox-secret-readable",
         "tts_api_keys": {
@@ -40,6 +40,8 @@ def test_save_encrypts_soniox_and_all_tts_keys(fake_dpapi):
             "deepgram": "deepgram-secret-readable",
         },
         "tts_provider": "openai",
+        "stt_api_keys": {"deepgram": "stt-deepgram-secret"},
+        "translation_api_keys": {"deepl": "translation-deepl-secret"},
     }
 
     config_store.save_config(secrets)
@@ -53,11 +55,15 @@ def test_save_encrypts_soniox_and_all_tts_keys(fake_dpapi):
         "eleven-secret-readable",
         "aws-secret-readable",
         "deepgram-secret-readable",
+        "stt-deepgram-secret",
+        "translation-deepl-secret",
     ):
         assert plaintext not in raw_text
     raw = json.loads(raw_text)
     assert raw["soniox_api_key"].startswith(config_store.DPAPI_PREFIX)
     assert all(value.startswith(config_store.DPAPI_PREFIX) for value in raw["tts_api_keys"].values())
+    assert all(value.startswith(config_store.DPAPI_PREFIX) for value in raw["stt_api_keys"].values())
+    assert all(value.startswith(config_store.DPAPI_PREFIX) for value in raw["translation_api_keys"].values())
     assert config_store.load_config() == secrets
 
 

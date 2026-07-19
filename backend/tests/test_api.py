@@ -8,7 +8,7 @@ import os
 
 import pytest
 from fastapi.testclient import TestClient
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 # Set a dummy key so app imports cleanly.
 os.environ.setdefault("SONIOX_API_KEY", "test-key-for-api-tests")
@@ -46,6 +46,11 @@ class TestHealth:
         r = client.get("/health")
         assert r.status_code == 200
         assert r.json() == {"status": "ok"}
+
+    def test_returns_application_version(self, client):
+        response = client.get("/api/version")
+        assert response.status_code == 200
+        assert response.json()["version"] == "0.3.0"
 
 
 class TestConfig:
@@ -115,6 +120,10 @@ class TestTtsProviderApi:
 
         assert response.status_code == 200
         assert {provider["id"] for provider in response.json()} == self.expected_providers
+        assert all(
+            provider["tier"] in {"free", "cheap", "premium"}
+            for provider in response.json()
+        )
 
     @pytest.mark.parametrize("provider_id", sorted(expected_providers))
     def test_each_provider_voice_dropdown_has_options(self, client, provider_id):
@@ -124,6 +133,39 @@ class TestTtsProviderApi:
         voices = response.json()
         assert voices
         assert all(voice["id"] and voice["name"] for voice in voices)
+
+
+class SuccessfulConnectionProvider:
+    async def test_connection(self):
+        return True, "OK"
+
+
+@pytest.mark.parametrize(
+    ("domain", "getter_name", "key_setter_name", "provider_setter_name"),
+    [
+        ("tts", "get_tts_provider_instance", "set_tts_api_key", "set_tts_provider"),
+        ("stt", "get_stt_provider_instance", "set_stt_api_key", "set_stt_provider"),
+        (
+            "translation", "get_translation_provider_instance",
+            "set_translation_api_key", "set_translation_provider",
+        ),
+    ],
+)
+def test_successful_provider_test_saves_key_and_selects_provider(
+    client, monkeypatch, domain, getter_name, key_setter_name, provider_setter_name,
+):
+    key_setter = Mock()
+    provider_setter = Mock()
+    monkeypatch.setattr(main, getter_name, lambda provider_id, api_key=None: SuccessfulConnectionProvider())
+    monkeypatch.setattr(main, key_setter_name, key_setter)
+    monkeypatch.setattr(main, provider_setter_name, provider_setter)
+
+    response = client.post(f"/api/{domain}/providers/example/test", json={"api_key": "live-key"})
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "message": "OK"}
+    key_setter.assert_called_once_with("example", "live-key")
+    provider_setter.assert_called_once_with("example")
 
 
 class TestConversationApi:

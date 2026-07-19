@@ -12,6 +12,7 @@ import httpx
 
 from ..tts_provider import TTSProviderBase, Voice, TTSProviderInfo, register_provider
 from ..logging_config import get_logger
+from ..provider_connection import test_get
 
 log = get_logger("elevenlabs_tts")
 
@@ -24,6 +25,14 @@ class ElevenLabsProvider(TTSProviderBase):
     def __init__(self, api_key: str | None = None) -> None:
         self._api_key = api_key
         self._voices_cache: list[Voice] | None = None
+
+    async def test_connection(self) -> tuple[bool, str]:
+        if not self._api_key:
+            return False, "ElevenLabs API key is required"
+        return await test_get(
+            "https://api.elevenlabs.io/v1/user/subscription",
+            headers={"xi-api-key": self._api_key},
+        )
 
     async def list_voices(self, lang: str | None = None) -> list[Voice]:
         if not self._api_key:
@@ -96,6 +105,7 @@ class ElevenLabsProvider(TTSProviderBase):
             description="Highest quality AI voices, voice cloning, real-time streaming. Expensive but natural.",
             requires_api_key=True,
             supports_streaming=True,
+            tier="premium",
             pricing_url="https://elevenlabs.io/pricing",
             approximate_cost_per_1m_chars=180.0,
         )

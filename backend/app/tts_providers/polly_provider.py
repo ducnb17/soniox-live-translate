@@ -15,6 +15,7 @@ import httpx
 
 from ..tts_provider import TTSProviderBase, Voice, TTSProviderInfo, register_provider
 from ..logging_config import get_logger
+from ..provider_connection import test_get
 
 log = get_logger("polly_tts")
 
@@ -35,6 +36,24 @@ class PollyProvider(TTSProviderBase):
         # For Polly, api_key is "access_key_id:secret_access_key"
         self._api_key = api_key
         self._region = "us-east-1"
+
+    async def test_connection(self) -> tuple[bool, str]:
+        if not self._api_key or ":" not in self._api_key:
+            return False, "Amazon Polly requires access_key_id:secret_access_key format"
+        access_key, secret_key = self._api_key.split(":", 1)
+        now = datetime.now(timezone.utc)
+        timestamp = now.strftime("%Y%m%dT%H%M%SZ")
+        datestamp = now.strftime("%Y%m%d")
+        host = f"polly.{self._region}.amazonaws.com"
+        endpoint = f"https://{host}/v1/voices"
+        headers = {"Host": host, "X-Amz-Date": timestamp}
+        signed_headers = self._sign_v4(
+            method="GET", endpoint=endpoint, region=self._region,
+            service="polly", headers=headers, payload=b"",
+            access_key=access_key, secret_key=secret_key,
+            timestamp=timestamp, datestamp=datestamp,
+        )
+        return await test_get(endpoint, headers=signed_headers)
 
     async def list_voices(self, lang: str | None = None) -> list[Voice]:
         return [
@@ -139,6 +158,7 @@ class PollyProvider(TTSProviderBase):
             description="AWS neural TTS, 40+ voices. Cheap at scale. No true streaming.",
             requires_api_key=True,
             supports_streaming=False,
+            tier="cheap",
             pricing_url="https://aws.amazon.com/polly/pricing/",
             approximate_cost_per_1m_chars=16.0,
         )

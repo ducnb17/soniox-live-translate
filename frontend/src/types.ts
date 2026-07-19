@@ -8,6 +8,7 @@ export interface SonioxToken {
 }
 
 export interface SonioxSttResponse {
+  type?: string;
   tokens?: SonioxToken[];
   finished?: boolean;
   error_code?: string | number;
@@ -44,6 +45,12 @@ export interface SonioxSttResponse {
     estimated_cost_usd: number;
     cache_hit: boolean;
   };
+  translation_error?: { message: string };
+  speaker?: number | null;
+  original_text?: string;
+  translated_text?: string;
+  lang?: string | null;
+  is_endpoint?: boolean;
 }
 
 export interface Utterance {
