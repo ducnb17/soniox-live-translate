@@ -26,6 +26,8 @@ import {
   type ConversationSummary,
 } from "./conversation-api";
 import { addTtsUsage, emptyTtsUsage, formatTtsCostHint } from "./tts-usage";
+import { resolveTtsChunkSchedule } from "./tts-playback";
+import { StrictLineAudioQueue, type BufferedAudioLine } from "./tts-line-queue";
 
 
 // UTF-8 safe base64 (handles non-ASCII context text).
@@ -1019,6 +1021,9 @@ let mediaRecorder: MediaRecorder | null = null;
 let audioCtx: AudioContext | null = null;
 const FADE_MS = 8;
 let nextPlayTime = 0;
+let pendingChunkLineId: number | null = null;
+let pendingChunkEndsLine = false;
+let currentPlayingLineId: number | null = null;
 let utterances: Utterance[] = [];
 let currentUtt = newUtt();
 let fileAudio: HTMLAudioElement | null = null;
@@ -1034,8 +1039,19 @@ let manualRetryInProgress = false;
 let resumeTranscriptOnNextSession = false;
 let feedAutoScroll = true;
 
-// Scheduled TTS audio sources for barge-in interrupt.
-let activeSources: AudioBufferSourceNode[] = [];
+// Read-mode TTS queue: deliberately unbounded so backlog increases latency,
+// never data loss. A line becomes playable only after its final chunk arrives.
+const lineAudioQueue = new StrictLineAudioQueue<Uint8Array>();
+let nextLineIdToPlay: number | null = null;
+let activeLineSources: AudioBufferSourceNode[] = [];
+let playbackEpoch = 0;
+let lastRegisteredLineId = 0;
+let minimumAcceptedLineId = 1;
+let backendSessionDone = false;
+let audioLineReadyCount = 0;
+let audioLinePlayedCount = 0;
+let interruptedAudioLineCount = 0;
+let averageLineAudioSeconds = 3;
 
 // Barge-in VAD state
 let bargeAnalyser: AnalyserNode | null = null;
@@ -1045,7 +1061,7 @@ let bargeHoldSince = 0;
 let bargeArmed = false;
 let micStream: MediaStream | null = null;
 // Timestamp of the most recent empty -> non-empty transition of
-// activeSources (i.e. a new TTS chunk started playing after silence).
+// activeLineSources (i.e. a new TTS line started playing after silence).
 // Used to suppress barge-in during the initial grace window, since the
 // onset "pop" of TTS audio can be picked up by the mic as echo.
 let bargeTtsStartedAt = 0;
@@ -1199,6 +1215,12 @@ function openWebSocket(extraParams: Record<string, string> = {}): Promise<void> 
         return;
       }
 
+      if (data.type === "audio_chunk_meta") {
+        pendingChunkLineId = typeof data.line_id === "number" ? data.line_id : null;
+        pendingChunkEndsLine = data.line_audio_end === true;
+        return;
+      }
+
       if (data.type === "line_ready") {
         handleLineReady(data);
         return;
@@ -1221,12 +1243,25 @@ function openWebSocket(extraParams: Record<string, string> = {}): Promise<void> 
       }
       if (data.barge_ack) return;
       if (data.session_done) {
-        stop();
+        backendSessionDone = true;
+        maybeFinishSessionAfterAudio();
         return;
       }
       handleSttResult(data);
     } else {
-      handleTtsAudio(new Uint8Array(event.data as ArrayBuffer));
+      const lineId = pendingChunkLineId;
+      const lineAudioEnd = pendingChunkEndsLine;
+      pendingChunkLineId = null;
+      pendingChunkEndsLine = false;
+      if (lineId === null) {
+        console.warn("Received TTS audio without a preceding audio_chunk_meta message");
+        return;
+      }
+      handleTtsAudio(
+        new Uint8Array(event.data as ArrayBuffer),
+        lineId,
+        lineAudioEnd,
+      );
     }
   };
 
@@ -1339,6 +1374,16 @@ function handleLineReady(data: SonioxSttResponse): void {
   const original = data.original_text || "";
   const translated = data.translated_text || "";
   if (!original && !translated) return;
+  if (typeof data.line_id === "number" && translated && $tts.checked) {
+    lineAudioQueue.registerLine(data.line_id);
+    lastRegisteredLineId = Math.max(lastRegisteredLineId, data.line_id);
+    audioLineReadyCount += 1;
+    if (nextLineIdToPlay === null && currentPlayingLineId === null) {
+      nextLineIdToPlay = lineAudioQueue.firstLineId;
+    }
+    logTtsLineProgress();
+    updateDelayStatusIndicator();
+  }
   utterances.push({
     speaker: data.speaker ?? null,
     language: data.lang || null,
@@ -1418,8 +1463,12 @@ async function startRecorder(): Promise<void> {
 // ---------------------------------------------------------------------------
 // Audio playback (Web Audio API)
 // ---------------------------------------------------------------------------
-function playPcmChunk(chunk: Uint8Array): void {
-  if (!audioCtx) return;
+function playPcmChunk(
+  chunk: Uint8Array,
+  lineId: number,
+  onEnded: () => void,
+): AudioBufferSourceNode | null {
+  if (!audioCtx) return null;
   const evenLen = chunk.byteLength - (chunk.byteLength % 2);
   const int16 = new Int16Array(chunk.buffer as ArrayBuffer, chunk.byteOffset, evenLen / 2);
   const float32 = new Float32Array(int16.length);
@@ -1434,10 +1483,15 @@ function playPcmChunk(chunk: Uint8Array): void {
   const gainNode = audioCtx.createGain();
   source.connect(gainNode);
   gainNode.connect(audioCtx.destination);
-  const startsNewUtterance = nextPlayTime === 0 || audioCtx.currentTime >= nextPlayTime;
-  const startAt = startsNewUtterance
-    ? audioCtx.currentTime + currentTtsDelaySeconds()
-    : nextPlayTime;
+  const schedule = resolveTtsChunkSchedule(
+    audioCtx.currentTime,
+    nextPlayTime,
+    currentPlayingLineId,
+    lineId,
+    currentTtsDelaySeconds(),
+  );
+  if (schedule.isNewLine) currentPlayingLineId = schedule.currentLineId;
+  const startAt = schedule.startAt;
   const playbackDuration = buffer.duration / playbackRate;
   const endAt = startAt + playbackDuration;
   const fadeDuration = Math.min(FADE_MS / 1000, playbackDuration / 2);
@@ -1449,26 +1503,112 @@ function playPcmChunk(chunk: Uint8Array): void {
   }
   source.start(startAt);
   nextPlayTime = endAt;
-  activeSources.push(source);
+  activeLineSources.push(source);
   source.onended = () => {
-    const i = activeSources.indexOf(source);
-    if (i !== -1) activeSources.splice(i, 1);
+    const i = activeLineSources.indexOf(source);
+    if (i !== -1) activeLineSources.splice(i, 1);
+    onEnded();
   };
+  return source;
 }
 
 function interruptTtsAudio(): void {
-  for (const s of activeSources) {
+  playbackEpoch += 1;
+  const interruptedIds = lineAudioQueue.lineCount + (currentPlayingLineId === null ? 0 : 1);
+  interruptedAudioLineCount += interruptedIds;
+  lineAudioQueue.clear();
+  for (const s of activeLineSources) {
     try { s.stop(); } catch { /* already stopped */ }
   }
-  activeSources = [];
+  activeLineSources = [];
   if (audioCtx) nextPlayTime = audioCtx.currentTime;
+  pendingChunkLineId = null;
+  pendingChunkEndsLine = false;
+  currentPlayingLineId = null;
+  minimumAcceptedLineId = lastRegisteredLineId + 1;
+  nextLineIdToPlay = minimumAcceptedLineId;
+  updateDelayStatusIndicator();
 }
 
-function handleTtsAudio(chunk: Uint8Array): void {
-  playPcmChunk(chunk);
+function handleTtsAudio(
+  chunk: Uint8Array,
+  lineId: number,
+  lineAudioEnd: boolean,
+): void {
+  if (lineId < minimumAcceptedLineId) return;
+  lineAudioQueue.addChunk(lineId, chunk, lineAudioEnd);
+  if (nextLineIdToPlay === null) nextLineIdToPlay = lineAudioQueue.firstLineId;
+  tryPlayNextLine();
+  updateDelayStatusIndicator();
   if (state !== "playing-file" || !fileAudio || fileTtsHeard) return;
   fileTtsHeard = true;
   fileAudio.volume = 0.1;
+}
+
+function tryPlayNextLine(): void {
+  if (!audioCtx || currentPlayingLineId !== null) return;
+  if (nextLineIdToPlay === null) nextLineIdToPlay = lineAudioQueue.firstLineId;
+  const line = lineAudioQueue.takeReady(nextLineIdToPlay);
+  if (!line) return;
+  playBufferedLine(line);
+}
+
+function playBufferedLine(line: BufferedAudioLine<Uint8Array>): void {
+  const epoch = playbackEpoch;
+  let remainingChunks = line.chunks.length;
+  const lineAudioSeconds = line.chunks.reduce(
+    (total, chunk) => total + pcmChunkDurationSeconds(chunk),
+    0,
+  );
+  currentPlayingLineId = null;
+  for (const chunk of line.chunks) {
+    playPcmChunk(chunk, line.lineId, () => {
+      if (epoch !== playbackEpoch) return;
+      remainingChunks -= 1;
+      if (remainingChunks === 0) finishPlayingLine(line.lineId, lineAudioSeconds);
+    });
+  }
+  if (remainingChunks === 0) finishPlayingLine(line.lineId, lineAudioSeconds);
+  updateDelayStatusIndicator();
+}
+
+function finishPlayingLine(lineId: number, audioSeconds: number): void {
+  if (!lineAudioQueue.finishLine(lineId)) return;
+  audioLinePlayedCount += 1;
+  averageLineAudioSeconds = averageLineAudioSeconds * 0.8 + audioSeconds * 0.2;
+  currentPlayingLineId = null;
+  nextLineIdToPlay = lineAudioQueue.firstLineId ?? lineId + 1;
+  logTtsLineProgress();
+  updateDelayStatusIndicator();
+  tryPlayNextLine();
+  maybeFinishSessionAfterAudio();
+}
+
+function pcmChunkDurationSeconds(chunk: Uint8Array): number {
+  return chunk.byteLength / 2 / TTS_SAMPLE_RATE / currentTtsPlaybackRate();
+}
+
+function maybeFinishSessionAfterAudio(): void {
+  if (!backendSessionDone) return;
+  if (currentPlayingLineId !== null || lineAudioQueue.lineCount > 0) return;
+  logTtsLineProgress(true);
+  stop();
+}
+
+function logTtsLineProgress(force = false): void {
+  const accounted = audioLinePlayedCount + interruptedAudioLineCount;
+  const reachedMilestone =
+    (audioLineReadyCount > 0 && audioLineReadyCount % 10 === 0) ||
+    (accounted > 0 && accounted % 10 === 0);
+  if (!force && !reachedMilestone) return;
+  const summary =
+    `line_ready(audio)=${audioLineReadyCount}, played=${audioLinePlayedCount}, ` +
+    `interrupted=${interruptedAudioLineCount}, queued=${lineAudioQueue.lineCount}`;
+  if (force && audioLineReadyCount !== accounted) {
+    console.error(`[TTS line audit] MISMATCH: ${summary}`);
+  } else {
+    console.log(`[TTS line audit] ${summary}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1504,10 +1644,10 @@ function tickBarge(): void {
   $bargeBar.style.width = `${pct}%`;
 
   const now = performance.now();
-  // activeSources includes sources scheduled to start in the future, so
+  // activeLineSources includes sources scheduled to start in the future, so
   // barge-in remains available during the configured playback delay.
   const ttsAudible =
-    activeSources.length > 0 || (state === "playing-file" && fileAudio != null && !fileAudio.paused);
+    activeLineSources.length > 0 || (state === "playing-file" && fileAudio != null && !fileAudio.paused);
 
   // A new TTS chunk just started playing after silence: remember when, so we
   // can suppress barge-in for a short grace window (the onset "pop" of TTS
@@ -1575,10 +1715,23 @@ async function resetSession(): Promise<void> {
     setStatus(`Selected speaker unavailable; switched to System Default (${(error as Error).message})`);
   }
   nextPlayTime = 0;
+  pendingChunkLineId = null;
+  pendingChunkEndsLine = false;
+  currentPlayingLineId = null;
+  lineAudioQueue.clear();
+  nextLineIdToPlay = null;
+  activeLineSources = [];
+  playbackEpoch += 1;
+  lastRegisteredLineId = 0;
+  minimumAcceptedLineId = 1;
+  backendSessionDone = false;
+  audioLineReadyCount = 0;
+  audioLinePlayedCount = 0;
+  interruptedAudioLineCount = 0;
+  averageLineAudioSeconds = 3;
   utterances = [];
   currentUtt = newUtt();
   feedAutoScroll = true;
-  activeSources = [];
   ttsSessionUsage = emptyTtsUsage();
   updateTtsCostHint();
   render();
@@ -1746,7 +1899,19 @@ function setStatus(msg: string): void {
 }
 
 function updateDelayStatusIndicator(): void {
-  const totalDelaySeconds = currentSttDelaySeconds() + currentTtsDelaySeconds();
+  const scheduledPlaybackSeconds = audioCtx
+    ? Math.max(0, nextPlayTime - audioCtx.currentTime)
+    : 0;
+  const queuedAudioSeconds = lineAudioQueue.estimatedAudioSeconds(
+    pcmChunkDurationSeconds,
+    averageLineAudioSeconds,
+  );
+  const queuedLineDelaySeconds = lineAudioQueue.lineCount * currentTtsDelaySeconds();
+  const totalDelaySeconds =
+    currentSttDelaySeconds() +
+    scheduledPlaybackSeconds +
+    queuedAudioSeconds +
+    queuedLineDelaySeconds;
   const visible = state !== "idle" && totalDelaySeconds > 0;
   const formattedDelay = Number.isInteger(totalDelaySeconds)
     ? String(totalDelaySeconds)

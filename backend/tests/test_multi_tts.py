@@ -43,7 +43,7 @@ async def run_sender(provider, provider_id="openai", fallback=None):
     queue = asyncio.Queue()
     state = new_tts_state(["vi"])
     browser = FakeBrowser()
-    await queue.put((TTS_TEXT, "xin chào", "vi"))
+    await queue.put((TTS_TEXT, "xin chào", "vi", 1))
     await queue.put((TTS_END, "vi"))
     await queue.put(TTS_NONE)
     kwargs = {}
@@ -95,6 +95,12 @@ async def test_external_provider_synthesizes_then_reuses_cache_with_zero_second_
 
     assert provider.calls == 1
     assert first.audio == [b"pcm:nova:vi:xin ch\xc3\xa0o"]
+    assert first.json_messages[0] == {
+        "type": "audio_chunk_meta",
+        "line_id": 1,
+        "byte_length": len(first.audio[0]),
+        "line_audio_end": True,
+    }
     first_usage = next(message["tts_usage"] for message in first.json_messages if "tts_usage" in message)
     second_usage = next(message["tts_usage"] for message in second.json_messages if "tts_usage" in message)
     assert first_usage["characters"] == len("xin chào")
@@ -123,3 +129,29 @@ async def test_provider_quota_error_notifies_user_and_falls_back_to_soniox():
     assert browser.audio == [b"soniox-fallback-pcm"]
     assert usage["provider_id"] == "soniox"
     assert usage["characters"] == len("xin chào")
+
+
+async def test_external_provider_keeps_each_line_as_separate_labeled_audio():
+    tts_cache.clear()
+    provider = SuccessfulProvider()
+    queue = asyncio.Queue()
+    state = new_tts_state(["vi"])
+    browser = FakeBrowser()
+    await queue.put((TTS_TEXT, "dòng một", "vi", 11))
+    await queue.put((TTS_TEXT, "dòng hai", "vi", 12))
+    await queue.put((TTS_END, "vi"))
+    await queue.put(TTS_NONE)
+
+    await external_tts_sender(
+        tts_queue=queue,
+        tts_state=state,
+        browser_ws=browser,
+        provider_id="openai",
+        provider=provider,
+        direction_voices={"vi": "nova"},
+    )
+
+    metas = [message for message in browser.json_messages if message.get("type") == "audio_chunk_meta"]
+    assert [meta["line_id"] for meta in metas] == [11, 12]
+    assert all(meta["line_audio_end"] is True for meta in metas)
+    assert len(browser.audio) == 2

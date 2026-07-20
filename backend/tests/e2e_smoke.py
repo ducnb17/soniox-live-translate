@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import sys
+import tempfile
 import time
 
 # Ensure the backend dir is on sys.path so uvicorn can import `app.main`.
@@ -39,6 +40,10 @@ check.failed = 0
 
 async def main() -> int:
     print(f"=== E2E smoke test (self-hosted server on :{PORT}) ===\n")
+    # Keep the smoke test isolated from the desktop app's real per-user
+    # config. Linux cannot decrypt/migrate the Windows DPAPI store.
+    e2e_config_home = tempfile.TemporaryDirectory(prefix="soniox-e2e-config-")
+    os.environ["XDG_CONFIG_HOME"] = e2e_config_home.name
 
     config = uvicorn.Config(
         "app.main:app",
@@ -72,7 +77,9 @@ async def main() -> int:
 
     try:
         # --- Download audio locally ---
-        audio_path = "/tmp/opencode/e2e_audio.mp3"
+        audio_path = os.path.join(
+            tempfile.gettempdir(), "soniox-live-translate-e2e-audio.mp3"
+        )
         if not os.path.exists(audio_path):
             print("  downloading audio file...", flush=True)
             async with httpx.AsyncClient(timeout=60.0) as c:
@@ -270,6 +277,7 @@ async def main() -> int:
                 await server_task
             except (asyncio.CancelledError, Exception):
                 pass
+        e2e_config_home.cleanup()
 
 
 if __name__ == "__main__":

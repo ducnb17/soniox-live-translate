@@ -4,6 +4,7 @@ into the TTS queue, and pass STT JSON straight to the browser for rendering.
 
 import asyncio
 import json
+import re
 from contextlib import suppress
 from typing import Any
 from collections.abc import Awaitable, Callable
@@ -21,7 +22,7 @@ log = get_logger("stt")
 TTS_TEXT = "text"
 TTS_END = "end"
 TTS_NONE = None
-TTS_MAX_BUFFER_CHARS = 200
+LINE_MAX_CHARS = 80
 
 
 async def pipe_browser_to_stt(
@@ -120,6 +121,7 @@ async def handle_stt(
     current_speaker = None
     current_lang = None
     line_original_offset = 0
+    line_counter = int(tts_state.get("line_counter", 0))
     utterance_start_ms: int | None = None
     stream_finished = False
     pending_tts_chunks: list[tuple[str, str | None, dict[str, Any]]] = []
@@ -128,15 +130,38 @@ async def handle_stt(
     ] | None = None
     hold_worker: asyncio.Task[None] | None = None
 
+    def make_line_ready_payload(
+        *,
+        speaker: Any,
+        original_text: str,
+        translated_text: str,
+        lang: str | None,
+        is_endpoint: bool,
+    ) -> dict[str, Any]:
+        """Allocate the stable ID shared by one rendered line and its audio."""
+        nonlocal line_counter
+        line_counter += 1
+        tts_state["line_counter"] = line_counter
+        return _line_ready_payload(
+            line_id=line_counter,
+            speaker=speaker,
+            original_text=original_text,
+            translated_text=translated_text,
+            lang=lang,
+            is_endpoint=is_endpoint,
+        )
+
     async def commit_utterance(
         tts_chunks: list[tuple[str, str | None, dict[str, Any]]],
         direction: str | None,
         final_segment: dict | None,
     ) -> None:
         for chunk, chunk_direction, line_payload in tts_chunks:
-            if tts_queue is not None and chunk:
-                await tts_queue.put((TTS_TEXT, chunk, chunk_direction))
             await browser_ws.send_json(line_payload)
+            if tts_queue is not None and chunk:
+                await tts_queue.put(
+                    (TTS_TEXT, chunk, chunk_direction, line_payload["line_id"])
+                )
         if tts_queue is not None:
             await tts_queue.put((TTS_END, direction))
         if on_endpoint is not None:
@@ -219,17 +244,23 @@ async def handle_stt(
                                 })
                     remaining_original = current_original[line_original_offset:]
                     if current_translation or remaining_original:
-                        tts_chunks.append((
-                            current_translation,
-                            direction,
-                            _line_ready_payload(
-                                speaker=current_speaker,
-                                original_text=remaining_original,
-                                translated_text=current_translation,
-                                lang=current_lang,
-                                is_endpoint=True,
-                            ),
-                        ))
+                        translated_parts = _split_line_short(
+                            current_translation, LINE_MAX_CHARS
+                        ) or [""]
+                        for index, translated_part in enumerate(translated_parts):
+                            tts_chunks.append((
+                                translated_part,
+                                direction,
+                                make_line_ready_payload(
+                                    speaker=current_speaker,
+                                    original_text=(
+                                        remaining_original if index == 0 else ""
+                                    ),
+                                    translated_text=translated_part,
+                                    lang=current_lang,
+                                    is_endpoint=index == len(translated_parts) - 1,
+                                ),
+                            ))
                     final_segment = None
                     if current_original or full_translation:
                         final_segment = {
@@ -266,7 +297,7 @@ async def handle_stt(
                             )
                             while (
                                 not message_has_end
-                                and len(current_translation) > TTS_MAX_BUFFER_CHARS
+                                and len(current_translation) > LINE_MAX_CHARS
                             ):
                                 split_at = _tts_buffer_split_index(current_translation)
                                 if split_at is None:
@@ -275,7 +306,7 @@ async def handle_stt(
                                 current_translation = current_translation[split_at:]
                                 original_chunk = current_original[line_original_offset:]
                                 line_original_offset = len(current_original)
-                                line_payload = _line_ready_payload(
+                                line_payload = make_line_ready_payload(
                                     speaker=current_speaker,
                                     original_text=original_chunk,
                                     translated_text=chunk,
@@ -285,8 +316,10 @@ async def handle_stt(
                                 if hold_queue is not None:
                                     pending_tts_chunks.append((chunk, target, line_payload))
                                 else:
-                                    await tts_queue.put((TTS_TEXT, chunk, target))
                                     await browser_ws.send_json(line_payload)
+                                    await tts_queue.put(
+                                        (TTS_TEXT, chunk, target, line_payload["line_id"])
+                                    )
                     text_pushed = True
                 else:
                     if token.get("is_final"):
@@ -375,6 +408,7 @@ def _external_translation_target(
 
 def _line_ready_payload(
     *,
+    line_id: int,
     speaker: Any,
     original_text: str,
     translated_text: str,
@@ -383,6 +417,7 @@ def _line_ready_payload(
 ) -> dict[str, Any]:
     return {
         "type": "line_ready",
+        "line_id": line_id,
         "speaker": speaker,
         "original_text": original_text,
         "translated_text": translated_text,
@@ -393,13 +428,13 @@ def _line_ready_payload(
 
 def _tts_buffer_split_index(text: str) -> int | None:
     """Return a safe split at or just before the TTS buffer threshold."""
-    if len(text) <= TTS_MAX_BUFFER_CHARS:
+    if len(text) <= LINE_MAX_CHARS:
         return None
 
-    limit = min(TTS_MAX_BUFFER_CHARS, len(text) - 1)
+    limit = min(LINE_MAX_CHARS, len(text) - 1)
     punctuation_split = None
     for index in range(limit):
-        if text[index] in ".!?;" and text[index + 1].isspace():
+        if text[index] in ".!?…;" and text[index + 1].isspace():
             punctuation_split = index + 2
     if punctuation_split is not None:
         return punctuation_split
@@ -409,6 +444,110 @@ def _tts_buffer_split_index(text: str) -> int | None:
         default=-1,
     )
     return whitespace_index + 1 if whitespace_index >= 0 else None
+
+
+def _split_line_short(text: str, cap: int) -> list[str]:
+    """Split completed text into short, lossless, whole-word TTS lines.
+
+    Boundaries are preferred in this order: sentence punctuation, commas,
+    then whitespace. Separating whitespace stays attached to a chunk so
+    joining the returned list always reconstructs ``text`` exactly.
+    """
+    if not text:
+        return []
+    if cap <= 0:
+        raise ValueError("cap must be positive")
+
+    sentence_parts = _split_including_separators(
+        text, re.compile(r"(?<=[.!?…;])\s+|\n+")
+    )
+    chunks: list[str] = []
+    current = ""
+
+    def flush_current() -> None:
+        nonlocal current
+        if current:
+            chunks.append(current)
+            current = ""
+
+    def append_piece(piece: str) -> None:
+        nonlocal current
+        if not piece:
+            return
+        if len(piece) > cap:
+            flush_current()
+            chunks.extend(_pack_long_sentence(piece, cap))
+        elif current and len(current) + len(piece) > cap:
+            flush_current()
+            current = piece
+        else:
+            current += piece
+
+    for sentence_part in sentence_parts:
+        append_piece(sentence_part)
+    flush_current()
+    return chunks
+
+
+def _pack_long_sentence(text: str, cap: int) -> list[str]:
+    """Pack a long sentence by comma, falling back to whole words."""
+    comma_parts: list[str] = []
+    start = 0
+    for match in re.finditer(r",", text):
+        comma_parts.append(text[start:match.end()])
+        start = match.end()
+    if start < len(text):
+        comma_parts.append(text[start:])
+
+    chunks: list[str] = []
+    current = ""
+    for part in comma_parts:
+        if len(part) > cap:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.extend(_pack_whole_words(part, cap))
+        elif current and len(current) + len(part) > cap:
+            chunks.append(current)
+            current = part
+        else:
+            current += part
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _pack_whole_words(text: str, cap: int) -> list[str]:
+    """Pack text by whitespace without ever splitting a non-space token."""
+    tokens = re.findall(r"\S+|\s+", text)
+    chunks: list[str] = []
+    current = ""
+    for token in tokens:
+        if current and len(current) + len(token) > cap:
+            chunks.append(current)
+            current = ""
+        if len(token) > cap:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.append(token)
+        else:
+            current += token
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _split_including_separators(text: str, pattern: re.Pattern[str]) -> list[str]:
+    """Split after matched separators, retaining every original character."""
+    parts: list[str] = []
+    start = 0
+    for match in pattern.finditer(text):
+        parts.append(text[start:match.end()])
+        start = match.end()
+    if start < len(text):
+        parts.append(text[start:])
+    return parts
 
 
 def _direction(token: dict, mode: str, lang_a: str | None, lang_b: str | None) -> str | None:

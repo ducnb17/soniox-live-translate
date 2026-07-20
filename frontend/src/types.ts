@@ -9,6 +9,9 @@ export interface SonioxToken {
 
 export interface SonioxSttResponse {
   type?: string;
+  line_id?: number;
+  byte_length?: number;
+  line_audio_end?: boolean;
   tokens?: SonioxToken[];
   finished?: boolean;
   error_code?: string | number;
@@ -97,7 +100,7 @@ export const TTS_SAMPLE_RATE = 24000;
 
 export const BARGE_RMS_THRESHOLD = 0.05;
 export const BARGE_HOLD_MS = 220;
-// Grace period after a new TTS chunk starts playing (activeSources goes
+// Grace period after a new TTS line starts playing (activeLineSources goes
 // empty -> non-empty) during which barge-in is suppressed. This avoids the
 // initial "pop" of TTS audio (picked up as echo by the mic) from
 // immediately self-triggering a barge-in.

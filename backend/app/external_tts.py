@@ -31,14 +31,13 @@ async def external_tts_sender(
     fallback_synthesize: Callable[[str, str, str], Awaitable[bytes]] = synthesize_soniox_text,
 ) -> None:
     """Synthesize completed translated utterances and forward PCM to the UI."""
-    buffers = {direction: [] for direction in direction_voices}
+    buffers: dict[str, list[tuple[str, int]]] = {
+        direction: [] for direction in direction_voices
+    }
     my_epoch = tts_state["barge_epoch"]
 
-    async def synthesize_direction(direction: str) -> None:
+    async def synthesize_line(direction: str, text: str, line_id: int) -> None:
         nonlocal my_epoch
-        parts = buffers.get(direction, [])
-        text = "".join(parts).strip()
-        buffers[direction] = []
         if not text:
             return
         voice_id = direction_voices[direction]
@@ -90,6 +89,14 @@ async def external_tts_sender(
         if started_epoch != tts_state["barge_epoch"]:
             return
         if audio:
+            await browser_ws.send_json(
+                {
+                    "type": "audio_chunk_meta",
+                    "line_id": line_id,
+                    "byte_length": len(audio),
+                    "line_audio_end": True,
+                }
+            )
             await browser_ws.send_bytes(audio)
             await _safe_json(browser_ws, {
                 "tts_usage": {
@@ -101,6 +108,18 @@ async def external_tts_sender(
                 }
             })
         my_epoch = tts_state["barge_epoch"]
+
+    async def synthesize_direction(direction: str) -> None:
+        parts = buffers.get(direction, [])
+        buffers[direction] = []
+        grouped_lines: list[tuple[int, list[str]]] = []
+        for text, line_id in parts:
+            if grouped_lines and grouped_lines[-1][0] == line_id:
+                grouped_lines[-1][1].append(text)
+            else:
+                grouped_lines.append((line_id, [text]))
+        for line_id, line_parts in grouped_lines:
+            await synthesize_line(direction, "".join(line_parts).strip(), line_id)
 
     while True:
         data = await tts_queue.get()
@@ -116,9 +135,9 @@ async def external_tts_sender(
         if my_epoch != tts_state["barge_epoch"]:
             continue
         if kind == TTS_TEXT:
-            _, payload, direction = data
+            _, payload, direction, line_id = data
             if direction in buffers:
-                buffers[direction].append(payload)
+                buffers[direction].append((payload, line_id))
         elif kind == TTS_END:
             _, direction = data
             targets = [direction] if direction else list(buffers)

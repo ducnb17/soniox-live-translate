@@ -7,7 +7,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.stt import handle_stt, TTS_TEXT, TTS_END, TTS_NONE
+from app.stt import (
+    LINE_MAX_CHARS,
+    TTS_END,
+    TTS_NONE,
+    TTS_TEXT,
+    _split_line_short,
+    handle_stt,
+)
 from app.tts import new_tts_state
 
 
@@ -69,6 +76,7 @@ class TestHandleSttOneWay:
         assert len(browser_ws.sent) == 4
         assert browser_ws.sent[2] == {
             "type": "line_ready",
+            "line_id": 1,
             "speaker": None,
             "original_text": "hola",
             "translated_text": "hello",
@@ -84,7 +92,7 @@ class TestHandleSttOneWay:
 
         # Non-final translation text is excluded, and all final fragments are
         # emitted as one TTS_TEXT immediately before TTS_END.
-        assert items[0] == (TTS_TEXT, "hello", "vi")
+        assert items[0] == (TTS_TEXT, "hello", "vi", 1)
 
         # Second: <end> token from the token stream
         assert items[1][0] == TTS_END
@@ -147,16 +155,90 @@ class TestHandleSttTwoWay:
             items.append(tts_queue.get_nowait())
 
         # "hello" from en speaker → translate to es
-        assert items[0] == (TTS_TEXT, "hello", "es")
+        assert items[0] == (TTS_TEXT, "hello", "es", 1)
         # <end> from en speaker → direction es
         assert items[1] == (TTS_END, "es")
         # "hola" from es speaker → translate to en
-        assert items[2] == (TTS_TEXT, "hola", "en")
+        assert items[2] == (TTS_TEXT, "hola", "en", 2)
         # <end> from es speaker → direction en
         assert items[3] == (TTS_END, "en")
         # Trailing <end> (direction=None) + None sentinel from finally
         assert items[4] == (TTS_END, None)
         assert items[5] is TTS_NONE
+
+
+async def test_line_ids_increase_across_consecutive_utterances():
+    messages = [
+        {
+            "tokens": [
+                {"text": translated, "translation_status": "translation", "is_final": True},
+                {"text": "<end>"},
+            ]
+        }
+        for translated in ("dòng một", "dòng hai", "dòng ba")
+    ]
+    messages.append({"finished": True})
+    browser = FakeBrowserWs()
+    queue: asyncio.Queue = asyncio.Queue()
+
+    await handle_stt(
+        stt_ws=FakeSttWs(messages),
+        browser_ws=browser,
+        tts_queue=queue,
+        tts_state=new_tts_state(["vi"]),
+        mode="one_way",
+        lang_a=None,
+        lang_b=None,
+        target_lang="vi",
+    )
+
+    ready_lines = [item for item in browser.sent if item.get("type") == "line_ready"]
+    queued_lines = []
+    while not queue.empty():
+        item = queue.get_nowait()
+        if isinstance(item, tuple) and item[0] == TTS_TEXT:
+            queued_lines.append(item)
+
+    assert [line["line_id"] for line in ready_lines] == [1, 2, 3]
+    assert [item[3] for item in queued_lines] == [1, 2, 3]
+    assert [item[1] for item in queued_lines] == ["dòng một", "dòng hai", "dòng ba"]
+
+
+async def test_line_ids_continue_when_handle_stt_reconnects_with_session_state():
+    state = new_tts_state(["vi"])
+    observed_ids = []
+    for translated in ("trước reconnect", "sau reconnect"):
+        browser = FakeBrowserWs()
+        await handle_stt(
+            stt_ws=FakeSttWs([
+                {
+                    "tokens": [
+                        {
+                            "text": translated,
+                            "translation_status": "translation",
+                            "is_final": True,
+                        },
+                        {"text": "<end>"},
+                    ]
+                },
+                {"finished": True},
+            ]),
+            browser_ws=browser,
+            tts_queue=None,
+            tts_state=state,
+            mode="one_way",
+            lang_a=None,
+            lang_b=None,
+            target_lang="vi",
+        )
+        observed_ids.extend(
+            item["line_id"]
+            for item in browser.sent
+            if item.get("type") == "line_ready"
+        )
+
+    assert observed_ids == [1, 2]
+    assert state["line_counter"] == 2
 
 
 class TestHandleSttLongTranslation:
@@ -196,10 +278,13 @@ class TestHandleSttLongTranslation:
 
         utterance_end = items.index((TTS_END, "vi"))
         text_items = items[:utterance_end]
-        assert len(text_items) == 2
+        assert len(text_items) > 1
         assert all(item[0] == TTS_TEXT for item in text_items)
         assert all(item[2] == "vi" for item in text_items)
-        assert len(text_items[0][1]) <= 200
+        assert [item[3] for item in text_items] == list(
+            range(1, len(text_items) + 1)
+        )
+        assert all(len(item[1]) <= LINE_MAX_CHARS for item in text_items)
         assert text_items[0][1].rstrip().endswith(".")
         assert "".join(item[1] for item in text_items) == long_translation
         assert callback.await_args.args[0]["translated_text"] == long_translation
@@ -333,9 +418,9 @@ class TestHandleSttExtraHold:
             pytest.approx(4.0, abs=0.05),
         ]
         assert items == [
-            (TTS_TEXT, "A", "vi"),
+            (TTS_TEXT, "A", "vi", 1),
             (TTS_END, "vi"),
-            (TTS_TEXT, "B", "vi"),
+            (TTS_TEXT, "B", "vi", 2),
             (TTS_END, "vi"),
             (TTS_END, None),
             TTS_NONE,
@@ -378,7 +463,7 @@ async def test_external_translation_never_queues_original_text():
     assert all("Hello world" not in text for text in spoken)
 
 
-async def test_natural_endpoint_keeps_long_utterance_as_one_tts_line():
+async def test_natural_endpoint_splits_long_utterance_into_short_tts_lines():
     long_translation = "Một câu hoàn chỉnh; " * 18
     messages = [
         {
@@ -410,5 +495,35 @@ async def test_natural_endpoint_keeps_long_utterance_as_one_tts_line():
         if isinstance(item, tuple) and item[0] == TTS_TEXT:
             spoken.append(item[1])
     lines = [message for message in browser.sent if message.get("type") == "line_ready"]
-    assert spoken == [long_translation]
+    assert len(spoken) > 1
+    assert "".join(spoken) == long_translation
+    assert all(len(part) <= LINE_MAX_CHARS for part in spoken)
     assert [line["translated_text"] for line in lines] == spoken
+    assert [line["line_id"] for line in lines] == list(range(1, len(lines) + 1))
+    assert [line["is_endpoint"] for line in lines[:-1]] == [False] * (len(lines) - 1)
+    assert lines[-1]["is_endpoint"] is True
+
+
+def test_split_line_short_is_lossless_and_prefers_sentence_then_comma_boundaries():
+    text = (
+        "First clause is deliberately short; second clause keeps going, "
+        "with another comma, and enough whole words to exceed the cap.\n"
+        "Final thought… Follow-up."
+    )
+
+    chunks = _split_line_short(text, 45)
+
+    assert "".join(chunks) == text
+    assert all(len(chunk) <= 45 for chunk in chunks)
+    assert any(chunk.rstrip().endswith(",") for chunk in chunks)
+
+
+def test_split_line_short_keeps_a_single_over_cap_word_intact():
+    long_word = "x" * 90
+    text = f"short words {long_word} trailing words"
+
+    chunks = _split_line_short(text, 20)
+
+    assert "".join(chunks) == text
+    assert long_word in chunks
+    assert all(len(chunk) <= 20 or long_word in chunk for chunk in chunks)

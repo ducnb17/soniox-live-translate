@@ -676,7 +676,9 @@ async def translation_websocket(
             if is_reconnect and tts and not use_external_tts:
                 # Streams belong to the previous TTS WebSocket and cannot be
                 # reused after reconnecting.
+                previous_line_counter = tts_state.get("line_counter", 0)
                 tts_state = new_tts_state(directions)
+                tts_state["line_counter"] = previous_line_counter
 
             if tts and not use_external_tts and tts_ws is None:
                 tts_ws = await websockets.connect(

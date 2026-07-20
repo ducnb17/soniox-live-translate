@@ -138,13 +138,13 @@ jobs:
             ## Soniox Live Translate ${{ github.ref_name }}
 
             ### Có gì mới
-            - Thêm registry, metadata giá và kiểm tra kết nối cho STT, TTS và Translation provider
-            - Test API key thành công sẽ mã hóa, lưu và chọn provider ngay lập tức
-            - Settings mới gồm 6 tab: General, Speech-to-Text, Text-to-Speech, Translation, Display và About
-            - Gộp transcript thành một feed; mỗi dòng có bản gốc mờ và bản dịch nổi bật, tô màu theo speaker
-            - Đồng bộ ranh giới mỗi dòng hiển thị với đúng một lượt TTS bằng message `line_ready`
-            - Hỗ trợ Google, DeepL và OpenAI làm translation engine sau mỗi utterance
-            - Giữ nguyên Soniox làm STT live mặc định; không mô phỏng streaming cho API không tương thích
+            - Sửa lỗi audio TTS đến trễ bị nhận nhầm là câu mới và chèn delay giữa câu
+            - Gắn `line_id` thật xuyên suốt từ transcript đến từng binary PCM
+            - Chia bản dịch thành dòng ngắn tối đa 80 ký tự, ưu tiên dấu câu, dấu phẩy rồi từ hoàn chỉnh
+            - Hàng đợi Read mode phát tuần tự tuyệt đối từng dòng và không tự động drop khi backlog lớn
+            - Chỉ chuyển sang dòng tiếp theo sau khi toàn bộ audio dòng hiện tại phát xong
+            - Chỉ báo “Đang xử lý” phản ánh backlog audio thực tế; thêm audit số dòng nhận/phát
+            - Giữ `line_id` tăng liên tục qua reconnect và hỗ trợ đầy đủ các TTS provider ngoài Soniox
 
             ### Cài đặt trên Windows
             1. Tải file `.exe` bên dưới
