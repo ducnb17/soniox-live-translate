@@ -2,8 +2,15 @@ import asyncio
 import base64
 import json
 
-from app.stt import TTS_END, TTS_NONE, TTS_TEXT
-from app.tts import new_tts_state, pipe_tts_to_browser, prewarm_stream, tts_sender
+from app.tts import (
+    TTS_END,
+    TTS_NONE,
+    TTS_TEXT,
+    new_tts_state,
+    pipe_tts_to_browser,
+    prewarm_stream,
+    tts_sender,
+)
 
 
 class FakeTtsWs:

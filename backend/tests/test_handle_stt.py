@@ -9,13 +9,15 @@ import pytest
 
 from app.stt import (
     LINE_MAX_CHARS,
+    _split_line_short,
+)
+from app.tts import (
     TTS_END,
     TTS_NONE,
     TTS_TEXT,
-    _split_line_short,
-    handle_stt,
+    handle_stt_with_legacy_tts as handle_stt,
+    new_tts_state,
 )
-from app.tts import new_tts_state
 
 
 class FakeSttWs:
@@ -82,6 +84,8 @@ class TestHandleSttOneWay:
             "translated_text": "hello",
             "lang": None,
             "is_endpoint": True,
+            "target_lang": "vi",
+            "direction": "vi",
         }
 
         # Queue got one complete translation, then its utterance end, followed

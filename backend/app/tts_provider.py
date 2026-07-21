@@ -158,6 +158,14 @@ def get_available_providers() -> list[TTSProviderInfo]:
     return result
 
 
+def supports_session_streaming(provider: TTSProviderBase | None) -> bool:
+    """Whether a provider is valid for the independent ``/ws/tts`` session."""
+    if provider is None:
+        return False
+    info = getattr(provider, "info", None)
+    return info is None or bool(info.supports_streaming)
+
+
 # Import and register all providers
 from .tts_providers.soniox_provider import SonioxProvider  # noqa: E402
 from .tts_providers.google_provider import GoogleTTSProvider  # noqa: E402

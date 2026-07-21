@@ -10,13 +10,13 @@ selected TTS provider:
 Browser (microphone / tab-system audio / URL file)
    │  audio bytes (binary)
    ▼
-FastAPI /ws/translate ──► Soniox STT+translation (wss://stt-rt.soniox.com)
-   │                          │ tokens (translation_status:"translation", <end>)
-   │                          ▼
-   │  translation text ──►  TTS queue ──► Selected TTS provider
-   │                          │   (Soniox or external provider; Soniox fallback)
-   │                          ▼
-   ◄── PCM s16le @ 24kHz ────┘   → Web Audio API playback
+FastAPI /ws/stt ────────► Soniox STT+translation
+   │                         │ final line_ready JSON
+   ▼                         ▼
+Transcript UI        Browser TTS controller ──► FastAPI /ws/tts
+                                               │ selected TTS provider
+                                               ▼
+                               PCM s16le @ 24kHz → Web Audio API playback
 ```
 
 ## Features
@@ -181,7 +181,9 @@ file" to "Start talking", then grant the browser microphone permission.
 | `GET /api/tts/providers/{id}/voices` | List voices for a provider/language |
 | `GET /api/tts/config` | Read the selected provider/voice and masked key status |
 | `POST /api/tts/config` | Update provider, voice, or encrypted API key |
-| `WS  /ws/translate` | Proxy between browser and Soniox STT+TTS |
+| `WS  /ws/stt` | Browser audio to STT/translation JSON; never sends TTS audio |
+| `WS  /ws/tts` | Independent configure/speak/cancel TTS command and PCM channel |
+| `WS  /ws/translate` | Legacy combined-protocol compatibility endpoint |
 
 ### WebSocket query params
 
@@ -192,9 +194,6 @@ file" to "Start talking", then grant the browser microphone permission.
 | `lang_a`, `lang_b` | — | two-way conversation pair |
 | `lang_id` | true | enable language identification |
 | `diarize` | true | enable speaker diarization |
-| `voice` | `Maya` | voice for lang_b (two-way) / single direction (one-way) |
-| `voice_b` | — | voice for lang_a direction (two-way) |
-| `tts` | true | enable TTS playback |
 | `context_b64` | — | base64-UTF8 JSON for STT `context` block |
 | `audio_url`, `audio_duration` | — | file test mode |
 | `input_device`, `output_device` | — | selected browser audio device IDs |

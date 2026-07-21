@@ -32,14 +32,15 @@ from .config import (
 )
 from .context_builder import build_stt_config
 from .stt import (
-    TTS_END,
-    TTS_NONE,
     handle_stt,
     pipe_browser_to_stt,
     stt_keepalive,
     stream_url_to_stt,
 )
 from .tts import (
+    TTS_END,
+    TTS_NONE,
+    handle_stt_with_legacy_tts,
     new_tts_state,
     pipe_tts_to_browser,
     prewarm_stream,
@@ -81,6 +82,7 @@ from .translation_provider import (
     get_available_providers as get_available_translation_providers,
 )
 from .external_tts import external_tts_sender
+from .tts_session import serve_tts_websocket
 from .version import APP_VERSION
 from .db import (
     init_db,
@@ -432,6 +434,51 @@ async def api_set_translation_config(payload: dict = Body(...)) -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
+@app.websocket("/ws/tts")
+async def tts_websocket(browser_ws: WebSocket) -> None:
+    """Independent TTS command channel; it never owns an STT connection."""
+    await serve_tts_websocket(browser_ws)
+
+
+@app.websocket("/ws/stt")
+async def stt_websocket(
+    browser_ws: WebSocket,
+    mode: str = "one_way",
+    target_lang: str = "en",
+    lang_a: str | None = None,
+    lang_b: str | None = None,
+    lang_id: bool = True,
+    diarize: bool = True,
+    context_b64: str | None = None,
+    audio_url: str | None = None,
+    audio_duration: float | None = None,
+    input_device: str | None = None,
+    output_device: str | None = None,
+    stt_provider: str = "soniox",
+    translation_provider: str = "soniox",
+    stt_delay_ms: int = MAX_ENDPOINT_DELAY_MS,
+) -> None:
+    """STT-only public channel used by the split frontend controller."""
+    await translation_websocket(
+        browser_ws=browser_ws,
+        mode=mode,
+        target_lang=target_lang,
+        lang_a=lang_a,
+        lang_b=lang_b,
+        lang_id=lang_id,
+        diarize=diarize,
+        tts=False,
+        context_b64=context_b64,
+        audio_url=audio_url,
+        audio_duration=audio_duration,
+        input_device=input_device,
+        output_device=output_device,
+        stt_provider=stt_provider,
+        translation_provider=translation_provider,
+        stt_delay_ms=stt_delay_ms,
+    )
+
+
 @app.websocket("/ws/translate")
 async def translation_websocket(
     browser_ws: WebSocket,
@@ -455,6 +502,8 @@ async def translation_websocket(
     stt_delay_ms: int = MAX_ENDPOINT_DELAY_MS,
 ) -> None:
     await browser_ws.accept()
+    if not tts:
+        await browser_ws.send_json({"type": "stt_state", "state": "starting"})
 
     if not is_configured():
         await browser_ws.send_json(
@@ -541,8 +590,8 @@ async def translation_websocket(
         source_lang=lang_a if mode == "two_way" else None,
         input_device=input_device,
         output_device=output_device,
-        tts_provider=tts_provider,
-        tts_voice=voice,
+        tts_provider=tts_provider if tts else None,
+        tts_voice=voice if tts else None,
     )
     pending_segments: list[dict] = []
     segment_batch_size = 10
@@ -555,7 +604,7 @@ async def translation_websocket(
             await add_segments_batch(batch)
 
     tts_queue: asyncio.Queue | None = asyncio.Queue() if tts else None
-    tts_state: dict = new_tts_state(directions)
+    tts_state: dict = new_tts_state(directions) if tts else {"line_counter": 0}
     use_external_tts = tts and tts_provider != "soniox"
     external_tts_task: asyncio.Task | None = None
     if use_external_tts and tts_queue is not None:
@@ -629,6 +678,8 @@ async def translation_websocket(
                 STT_URL, ping_interval=10, ping_timeout=10, close_timeout=5
             )
             await stt_ws.send(json.dumps(stt_config))
+            if not tts:
+                await _safe_send_json(browser_ws, {"type": "stt_state", "state": "running"})
 
             if is_reconnect:
                 # Report reconnection success
@@ -701,8 +752,8 @@ async def translation_websocket(
 
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(do_browser_to_stt(stt_ws))
-                tg.create_task(
-                    handle_stt(
+                stt_task = (
+                    handle_stt_with_legacy_tts(
                         stt_ws=stt_ws,
                         browser_ws=browser_ws,
                         tts_queue=tts_queue,
@@ -717,7 +768,23 @@ async def translation_websocket(
                         extra_hold_ms=extra_hold_ms,
                         translate_text=translate_text,
                     )
+                    if tts
+                    else handle_stt(
+                        stt_ws=stt_ws,
+                        browser_ws=browser_ws,
+                        session_state=tts_state,
+                        mode=mode,
+                        lang_a=lang_a,
+                        lang_b=lang_b,
+                        target_lang=target_lang,
+                        on_final_segment=on_final_segment,
+                        finalize_session_on_exit=False,
+                        finished_event=stt_finished_event,
+                        extra_hold_ms=extra_hold_ms,
+                        translate_text=translate_text,
+                    )
                 )
+                tg.create_task(stt_task)
                 tg.create_task(stt_keepalive(stt_ws))
                 if tts and not use_external_tts:
                     tg.create_task(
@@ -809,6 +876,10 @@ async def translation_websocket(
                 "max_attempts": RECONNECT_MAX_RETRIES,
                 "downtime_start": int(downtime_start * 1000),
             })
+            if not tts:
+                await _safe_send_json(browser_ws, {
+                    "type": "stt_state", "state": "reconnecting"
+                })
             log.info(
                 "stt_reconnecting",
                 attempt=retry_count,
@@ -888,13 +959,16 @@ async def translation_websocket(
             external_tts_task.cancel()
         except Exception as exc:
             log.warning("external_tts_task_failed", error=str(exc))
-    tts_state["stt_done"] = True
+    if tts:
+        tts_state["stt_done"] = True
     session.close()
     transcript_store.finish(session)
     if pending_segments:
         await add_segments_batch(pending_segments)
         pending_segments.clear()
     await update_conversation(conv_id, ended_at=int(time.time() * 1000))
+    if not tts:
+        await _safe_send_json(browser_ws, {"type": "stt_state", "state": "idle"})
 
 
 async def _safe_send_json(ws: WebSocket, data: dict) -> None:

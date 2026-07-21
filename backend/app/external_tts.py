@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 from fastapi import WebSocket
 
 from .logging_config import get_logger
-from .stt import TTS_END, TTS_NONE, TTS_TEXT
+from .tts import TTS_END, TTS_NONE, TTS_TEXT
 from .tts import TTS_BARGE, synthesize_soniox_text
 from .tts_provider import TTSProviderBase, tts_cache
 

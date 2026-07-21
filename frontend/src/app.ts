@@ -28,6 +28,8 @@ import {
 import { addTtsUsage, emptyTtsUsage, formatTtsCostHint } from "./tts-usage";
 import { resolveTtsChunkSchedule } from "./tts-playback";
 import { StrictLineAudioQueue } from "./tts-line-queue";
+import { SttSessionController } from "./stt-session";
+import { TtsSessionController, type TtsRuntimeState } from "./tts-session";
 
 
 // UTF-8 safe base64 (handles non-ASCII context text).
@@ -63,7 +65,6 @@ const $voiceB = $<HTMLSelectElement>("voice-b");
 const $voiceBBlock = $<HTMLDivElement>("voice-b-block");
 const $diarization = $<HTMLInputElement>("diarization");
 const $langId = $<HTMLInputElement>("lang-id");
-const $tts = $<HTMLInputElement>("tts");
 const $barge = $<HTMLInputElement>("barge");
 const $bargeHint = $<HTMLParagraphElement>("barge-hint");
 const $contextJson = $<HTMLTextAreaElement>("context-json");
@@ -1022,14 +1023,10 @@ let mediaRecorder: MediaRecorder | null = null;
 let audioCtx: AudioContext | null = null;
 const FADE_MS = 8;
 let nextPlayTime = 0;
-let pendingChunkLineId: number | null = null;
-let pendingChunkEndsLine = false;
 let currentPlayingLineId: number | null = null;
 let utterances: Utterance[] = [];
 let currentUtt = newUtt();
 let fileAudio: HTMLAudioElement | null = null;
-let fileTtsHeard = false;
-let ws: WebSocket | null = null;
 let sessionId: string | null = null;
 let connectionStatus: ConnectionStatus = "idle";
 let pendingAudioBlobs: Blob[] = [];
@@ -1037,8 +1034,6 @@ let pendingAudioOverflowed = false;
 let manualStopRequested = false;
 let lastWebSocketParams: Record<string, string> = {};
 let manualRetryInProgress = false;
-// Whether the current/last session was started with TTS spoken output enabled.
-let sessionTtsEnabled = false;
 let resumeTranscriptOnNextSession = false;
 let feedAutoScroll = true;
 
@@ -1083,6 +1078,38 @@ let micStream: MediaStream | null = null;
 let bargeTtsStartedAt = 0;
 let wasTtsAudible = false;
 
+const sttSession = new SttSessionController({
+  onMessage: handleSttWebSocketMessage,
+  onState: (runtimeState, event) => {
+    if (runtimeState === "error" && !manualStopRequested) {
+      console.log("STT WebSocket closed", event?.code, event?.reason);
+    }
+  },
+});
+
+const ttsSession = new TtsSessionController({
+  onState: updateTtsButton,
+  onAudio: (audio, meta) => {
+    handleTtsAudio(new Uint8Array(audio), meta.line_id, meta.line_audio_end);
+  },
+  onError: (message) => showTtsErrorBanner(message),
+  onReset: () => interruptTtsAudio(),
+  onMessage: (message) => {
+    if (message.type === "tts_fallback") {
+      setStatus(
+        `${String(message.from_provider)} TTS failed; using ${String(message.to_provider)}: ` +
+        String(message.reason || "unknown error"),
+      );
+    } else if (message.type === "tts_usage") {
+      ttsSessionUsage = addTtsUsage(
+        ttsSessionUsage,
+        message as unknown as NonNullable<SonioxSttResponse["tts_usage"]>,
+      );
+      updateTtsCostHint();
+    }
+  },
+});
+
 
 function newUtt(): Utterance {
   return {
@@ -1099,9 +1126,9 @@ function newUtt(): Utterance {
 // WebSocket
 // ---------------------------------------------------------------------------
 function flushPendingAudio(): void {
-  if (ws && ws.readyState === WebSocket.OPEN) {
+  if (sttSession.isOpen()) {
     for (const blob of pendingAudioBlobs) {
-      try { ws.send(blob); } catch { break; }
+      try { if (!sttSession.sendAudio(blob)) break; } catch { break; }
     }
   }
   pendingAudioBlobs = [];
@@ -1126,7 +1153,6 @@ function openWebSocket(extraParams: Record<string, string> = {}): Promise<void> 
     lang_id: String($langId.checked),
     diarize: String($diarization.checked),
     voice: $voice.value,
-    tts: String(sessionTtsEnabled),
     ...extraParams,
   });
   const sttDelaySeconds = currentSttDelaySeconds();
@@ -1155,21 +1181,19 @@ function openWebSocket(extraParams: Record<string, string> = {}): Promise<void> 
   // Pass device selection to backend
   params.set("input_device", $inputDevice.value);
   params.set("output_device", $outputDevice.value);
-  params.set("tts_provider", $ttsProvider.value);
   params.set("stt_provider", $sttProvider.value || "soniox");
   params.set("translation_provider", $translationProvider.value || "soniox");
 
-  // Use TTS provider voice for one-way, or fallback to Soniox voices
-  const ttsVoice = $ttsVoice.value || $voice.value;
-  params.set("voice", ttsVoice);
-  params.set("voice_b", currentTtsProvider === "soniox" ? $voiceB.value : ttsVoice);
+  const url = `${proto}//${location.host}/ws/stt?${params}`;
+  return sttSession.connect(url);
+}
 
-  const url = `${proto}//${location.host}/ws/translate?${params}`;
-  ws = new WebSocket(url);
-  ws.binaryType = "arraybuffer";
-
-  ws.onmessage = (event: MessageEvent) => {
-    if (typeof event.data === "string") {
+function handleSttWebSocketMessage(event: MessageEvent): void {
+    if (typeof event.data !== "string") {
+      console.warn("Ignored unexpected binary data on the STT WebSocket");
+      return;
+    }
+    {
       const data: SonioxSttResponse = JSON.parse(event.data);
 
       if (data.session_id) {
@@ -1183,12 +1207,14 @@ function openWebSocket(extraParams: Record<string, string> = {}): Promise<void> 
       }
 
       if (data.reconnecting) {
+        sttSession.markReconnecting();
         setConnectionStatus("reconnecting");
         setStatus(`Đang kết nối lại… (lần ${data.attempt}/${data.max_attempts})`);
         return;
       }
 
       if (data.reconnected) {
+        sttSession.markConnected();
         setConnectionStatus("connected");
         setStatus(`Đã kết nối lại sau ${((data.downtime_ms || 0) / 1000).toFixed(1)}s`);
         // Insert downtime marker in transcript if provided
@@ -1207,51 +1233,17 @@ function openWebSocket(extraParams: Record<string, string> = {}): Promise<void> 
         return;
       }
 
-      if (data.tts_fallback) {
-        setStatus(
-          `${data.tts_fallback.from_provider} TTS lỗi/hết quota; ` +
-          `đã chuyển sang ${data.tts_fallback.to_provider}: ${data.tts_fallback.reason}`,
-        );
-        return;
-      }
-
-      if (data.tts_error) {
-              // Old-style tts_error from external_tts (provider_id + message).
-              setStatus(`TTS không phát được: ${data.tts_error.message}`);
-              return;
-            }
-
-      if (data.tts_usage) {
-        ttsSessionUsage = addTtsUsage(ttsSessionUsage, data.tts_usage);
-        updateTtsCostHint();
-        return;
-      }
-
       if (data.translation_error) {
         setStatus(`Translation failed: ${data.translation_error.message}`);
         return;
       }
 
-      if (data.type === "audio_chunk_meta") {
-        pendingChunkLineId = typeof data.line_id === "number" ? data.line_id : null;
-        pendingChunkEndsLine = data.line_audio_end === true;
+      if (data.type === "line_ready") {
+        handleLineReady(data);
         return;
       }
 
-      if (data.type === "line_ready") {
-              handleLineReady(data);
-              return;
-            }
-
-            if (data.type === "tts_error") {
-              // Streaming TTS error from pipe_tts_to_browser (deadlock-safe).
-              // The line was already marked done with 0 bytes — this is just
-              // the user-facing notification. Keep it sticky so it's not lost.
-              showTtsErrorBanner(
-                data.error_message || "TTS lỗi API key — kiểm tra lại ở Cài đặt > Text-to-Speech"
-              );
-              return;
-            }
+      if (data.type === "stt_state") return;
 
             if (data.error_code || data.error_message) {
         if (isRetryableSttError(data)) {
@@ -1275,44 +1267,11 @@ function openWebSocket(extraParams: Record<string, string> = {}): Promise<void> 
         return;
       }
       handleSttResult(data);
-    } else {
-      const lineId = pendingChunkLineId;
-      const lineAudioEnd = pendingChunkEndsLine;
-      pendingChunkLineId = null;
-      pendingChunkEndsLine = false;
-      if (lineId === null) {
-        console.warn("Received TTS audio without a preceding audio_chunk_meta message");
-        return;
-      }
-      handleTtsAudio(
-        new Uint8Array(event.data as ArrayBuffer),
-        lineId,
-        lineAudioEnd,
-      );
     }
-  };
-
-  ws.onclose = (event: CloseEvent) => {
-    if (manualStopRequested) {
-      setConnectionStatus("idle");
-      return;
-    }
-    console.log("WebSocket closed", event.code, event.reason);
-    if (event.code === 4000) {
-      setConnectionStatus("failed");
-      setStatus("Không thể kết nối lại. Nhấn “Thử lại” để tiếp tục phiên.");
-    }
-  };
-
-  return new Promise<void>((resolve, reject) => {
-    ws!.onopen = () => resolve();
-    ws!.onerror = () => reject(new Error("WebSocket error"));
-  });
-}
-
+  }
 
 function sendTranscriptSnapshot(): void {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (!sttSession.isOpen()) return;
   const snapshot = [...utterances, currentUtt].filter(
     (u) =>
       u.originalFinal ||
@@ -1322,7 +1281,7 @@ function sendTranscriptSnapshot(): void {
   );
   if (!snapshot.length) return;
   try {
-    ws.send(JSON.stringify({ type: "utterances", utterances: snapshot }));
+    sttSession.sendJson({ type: "utterances", utterances: snapshot });
   } catch { /* socket closed between readyState check and send */ }
 }
 
@@ -1401,9 +1360,21 @@ function handleLineReady(data: SonioxSttResponse): void {
   const original = data.original_text || "";
   const translated = data.translated_text || "";
   if (!original && !translated) return;
-  if (typeof data.line_id === "number" && translated && $tts.checked) {
-    lineAudioQueue.registerLine(data.line_id);
-    lastRegisteredLineId = Math.max(lastRegisteredLineId, data.line_id);
+  const lineId = data.line_id;
+  const sentToTts = typeof lineId === "number" && Boolean(translated) && ttsSession.speak({
+    requestId: `${sessionId || "session"}:${lineId}`,
+    lineId,
+    text: translated,
+    direction: data.target_lang || data.direction || data.lang || $targetLang.value,
+    voice: (
+      currentTtsProvider === "soniox" && $mode() === "two_way" && data.direction === $langA.value
+        ? $voiceB.value
+        : ($ttsVoice.value || $voice.value)
+    ),
+  });
+  if (typeof lineId === "number" && sentToTts) {
+    lineAudioQueue.registerLine(lineId);
+    lastRegisteredLineId = Math.max(lastRegisteredLineId, lineId);
     audioLineReadyCount += 1;
     if (nextLineIdToPlay === null && currentPlayingLineId === null) {
       nextLineIdToPlay = lineAudioQueue.firstLineId;
@@ -1467,8 +1438,8 @@ async function startRecorder(): Promise<void> {
 
   mediaRecorder.ondataavailable = (e: BlobEvent) => {
     if (e.data.size > 0) {
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(e.data);
+      if (sttSession.isOpen()) {
+        sttSession.sendAudio(e.data);
       } else if (connectionStatus === "reconnecting" || connectionStatus === "failed") {
         if (pendingAudioBlobs.length >= 100) {
           pendingAudioBlobs.shift();
@@ -1559,8 +1530,6 @@ function interruptTtsAudio(): void {
   }
   activeLineSources = [];
   if (audioCtx) nextPlayTime = audioCtx.currentTime;
-  pendingChunkLineId = null;
-  pendingChunkEndsLine = false;
   currentPlayingLineId = null;
   activeLinePendingChunks = 0;
   activeLineDoneScheduling = false;
@@ -1581,9 +1550,6 @@ function handleTtsAudio(
   if (nextLineIdToPlay === null) nextLineIdToPlay = lineAudioQueue.firstLineId;
   streamActiveLine();
   updateDelayStatusIndicator();
-  if (state !== "playing-file" || !fileAudio || fileTtsHeard) return;
-  fileTtsHeard = true;
-  fileAudio.volume = 0.1;
 }
 
 /**
@@ -1701,8 +1667,7 @@ function tickBarge(): void {
   const now = performance.now();
   // activeLineSources includes sources scheduled to start in the future, so
   // barge-in remains available during the configured playback delay.
-  const ttsAudible =
-    activeLineSources.length > 0 || (state === "playing-file" && fileAudio != null && !fileAudio.paused);
+  const ttsAudible = ttsSession.state === "on" && activeLineSources.length > 0;
 
   // A new TTS chunk just started playing after silence: remember when, so we
   // can suppress barge-in for a short grace window (the onset "pop" of TTS
@@ -1732,11 +1697,7 @@ function tickBarge(): void {
 
 function triggerBargeIn(): void {
   interruptTtsAudio();
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    try {
-      ws.send(JSON.stringify({ type: "barge" }));
-    } catch { /* ws closed */ }
-  }
+  ttsSession.cancelAll();
   setStatus("Barge-in: interrupted TTS");
 }
 
@@ -1749,6 +1710,58 @@ function stopBargeVad(): void {
   $bargeBar.classList.remove("armed");
   bargeArmed = false;
   bargeHoldSince = 0;
+}
+
+function ttsWebSocketUrl(): string {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  return `${proto}//${location.host}/ws/tts`;
+}
+
+async function toggleTts(): Promise<void> {
+  if (ttsSession.desiredEnabled) {
+    const retryAfterError = ttsSession.state === "error";
+    interruptTtsAudio();
+    ttsSession.disable();
+    if (!retryAfterError) {
+      setStatus(state === "idle" ? "TTS off" : "TTS stopped; STT is still running");
+      return;
+    }
+  }
+  try {
+    await ttsSession.enable(
+      ttsWebSocketUrl(),
+      {
+        provider: $ttsProvider.value || "soniox",
+        voice: $ttsVoice.value || $voice.value,
+        voiceB: $voiceB.value,
+        mode: $mode(),
+        targetLang: $mode() === "one_way" ? $targetLang.value : $langB.value,
+      },
+      state !== "idle" && sttSession.isOpen(),
+    );
+  } catch (error) {
+    showTtsErrorBanner((error as Error).message);
+  }
+}
+
+function updateTtsButton(runtimeState: TtsRuntimeState): void {
+  const label = $actionTtsBtn.querySelector<HTMLSpanElement>(".btn-label-tts")!;
+  const labels: Record<TtsRuntimeState, string> = {
+    off: "+ Read",
+    waiting_for_stt: "Read: waiting for STT",
+    connecting: "Read: connecting...",
+    on: "Stop reading",
+    stopping: "Read: stopping...",
+    error: "Read: retry",
+  };
+  label.textContent = labels[runtimeState];
+  $actionTtsBtn.dataset.state = runtimeState;
+  $actionTtsBtn.disabled = false;
+  const providerLocked = runtimeState === "connecting" || runtimeState === "on" || runtimeState === "stopping";
+  $ttsProvider.disabled = providerLocked;
+  $ttsVoice.disabled = providerLocked;
+  $ttsApiKey.disabled = providerLocked;
+  $btnSaveTtsKey.disabled = providerLocked;
 }
 
 // ---------------------------------------------------------------------------
@@ -1770,8 +1783,6 @@ async function resetSession(): Promise<void> {
     setStatus(`Selected speaker unavailable; switched to System Default (${(error as Error).message})`);
   }
   nextPlayTime = 0;
-  pendingChunkLineId = null;
-  pendingChunkEndsLine = false;
   currentPlayingLineId = null;
   activeLinePendingChunks = 0;
   activeLineDoneScheduling = false;
@@ -1796,17 +1807,18 @@ async function resetSession(): Promise<void> {
   render();
 }
 
-async function start(ttsEnabled = false): Promise<void> {
-  sessionTtsEnabled = ttsEnabled;
-  setState("recording", undefined, ttsEnabled);
+async function start(): Promise<void> {
+  setState("recording");
   manualStopRequested = false;
 
   try {
     await resetSession();
     setConnectionStatus("connected");
     await openWebSocket();
+    await ttsSession.onSttStarted();
     await startRecorder();
   } catch (err) {
+    if (manualStopRequested) return;
     console.error(err);
     setState("idle", `Failed to start: ${(err as Error).message}`);
     cleanup();
@@ -1814,21 +1826,19 @@ async function start(ttsEnabled = false): Promise<void> {
 }
 
 
-async function playFile(ttsEnabled = false): Promise<void> {
+async function playFile(): Promise<void> {
   const url = $audioUrl.value.trim();
   if (!url) {
     setStatus("Enter an audio URL");
     return;
   }
 
-  sessionTtsEnabled = ttsEnabled;
-  setState("playing-file", undefined, ttsEnabled);
-  fileTtsHeard = false;
+  setState("playing-file");
+  manualStopRequested = false;
 
   try {
     await resetSession();
     fileAudio = new Audio(url);
-    fileAudio.volume = 1.0;
     await new Promise<void>((resolve, reject) => {
       fileAudio!.addEventListener("loadedmetadata", () => resolve(), { once: true });
       fileAudio!.addEventListener("error", () => reject(new Error("audio load failed")), { once: true });
@@ -1838,9 +1848,11 @@ async function playFile(ttsEnabled = false): Promise<void> {
       audio_url: url,
       audio_duration: String(fileAudio.duration),
     });
+    await ttsSession.onSttStarted();
 
     await fileAudio.play();
   } catch (err) {
+    if (manualStopRequested) return;
     console.error(err);
     setState("idle", `Failed to play file: ${(err as Error).message}`);
     cleanup();
@@ -1875,10 +1887,8 @@ function cleanup(): void {
     fileAudio = null;
   }
   interruptTtsAudio();
-  if (ws) {
-    try { ws.close(); } catch { /* already closed */ }
-    ws = null;
-  }
+  ttsSession.onSttStopped();
+  sttSession.close();
   if ($historyPanel.classList.contains("open")) {
     // The backend flushes its final segment batch as the WebSocket session
     // closes. A short delay avoids racing that transaction.
@@ -1886,32 +1896,14 @@ function cleanup(): void {
   }
 }
 
-function setState(s: AppState, message?: string, ttsEnabled = false): void {
+function setState(s: AppState, message?: string): void {
   state = s;
   const busy = s !== "idle";
-  if (busy) {
-    // Show "Stop" on the button that was clicked; hide the other action button.
-    if (ttsEnabled) {
-      $actionTtsBtn.querySelector<HTMLSpanElement>(".btn-label-tts")!.textContent = "■ Stop";
-      $actionTtsBtn.dataset.state = "running";
-      $actionTtsBtn.disabled = false;
-      $actionBtn.classList.add("hidden");
-    } else {
-      $actionLabel.textContent = "Stop";
-      $actionBtn.dataset.state = "running";
-      $actionBtn.disabled = false;
-      $actionTtsBtn.classList.add("hidden");
-    }
-  } else {
-    $actionBtn.classList.remove("hidden");
-    $actionTtsBtn.classList.remove("hidden");
-    $actionBtn.dataset.state = "idle";
-    $actionTtsBtn.dataset.state = "idle";
-    $actionLabel.textContent = mode === "file" ? "Play audio file" : "Start talking";
-    $actionTtsBtn.querySelector<HTMLSpanElement>(".btn-label-tts")!.textContent = "+ Đọc";
-    $actionBtn.disabled = mode === "file" && !$audioUrl.value.trim();
-    $actionTtsBtn.disabled = mode === "file" && !$audioUrl.value.trim();
-  }
+  $actionBtn.dataset.state = busy ? "running" : "idle";
+  $actionLabel.textContent = busy
+    ? "Stop STT"
+    : (mode === "file" ? "Play audio file" : "Start STT");
+  $actionBtn.disabled = !busy && mode === "file" && !$audioUrl.value.trim();
   $modeToggle.disabled = busy;
   $audioUrl.disabled = busy;
   $targetLang.disabled = busy;
@@ -1921,7 +1913,6 @@ function setState(s: AppState, message?: string, ttsEnabled = false): void {
   $voiceB.disabled = busy;
   $diarization.disabled = busy;
   $langId.disabled = busy;
-  $tts.disabled = busy;
   $inputDevice.disabled = busy;
   $outputDevice.disabled = busy;
   $btnTestInput.disabled = busy;
@@ -1929,6 +1920,7 @@ function setState(s: AppState, message?: string, ttsEnabled = false): void {
   document.querySelectorAll<HTMLInputElement>("input[name=mode]").forEach((r) => (r.disabled = busy));
   document.querySelectorAll<HTMLInputElement>("input[name=audio-source]").forEach((r) => (r.disabled = busy));
   syncBargeAvailability();
+  updateTtsButton(ttsSession.state);
   if (message !== undefined) setStatus(message);
 
 
@@ -2082,20 +2074,14 @@ $actionBtn.addEventListener("click", () => {
   if (state !== "idle") {
     stop();
   } else if (mode === "file") {
-    void playFile(false);
+    void playFile();
   } else {
-    void start(false);
+    void start();
   }
 });
 
 $actionTtsBtn.addEventListener("click", () => {
-  if (state !== "idle") {
-    stop();
-  } else if (mode === "file") {
-    void playFile(true);
-  } else {
-    void start(true);
-  }
+  void toggleTts();
 });
 
 $modeToggle.addEventListener("click", () => {
@@ -2106,7 +2092,6 @@ $audioUrl.addEventListener("input", () => {
   if (state === "idle" && mode === "file") {
     const hasUrl = Boolean($audioUrl.value.trim());
     $actionBtn.disabled = !hasUrl;
-    $actionTtsBtn.disabled = !hasUrl;
   }
 });
 

@@ -154,10 +154,6 @@
           Enable language identification
         </label>
         <label class="checkbox">
-          <input type="checkbox" id="tts" checked>
-          Enable spoken translation
-        </label>
-        <label class="checkbox">
           <input type="checkbox" id="barge" checked>
           Barge-in (interrupt TTS when you speak)
         </label>
@@ -208,6 +204,7 @@
           <label for="tts-voice-select">Voice</label>
           <select id="tts-voice-select"></select>
         </div>
+        <p class="hint">Turn TTS off before changing provider or voice. STT and the source audio continue running.</p>
         <div class="device-row">
           <label for="stt-delay-seconds">
             Độ trễ nhận diện (giây): <span id="stt-delay-seconds-value">1.5</span>

@@ -10,6 +10,8 @@ export interface SonioxToken {
 export interface SonioxSttResponse {
   type?: string;
   line_id?: number;
+  request_id?: string;
+  epoch?: number;
   byte_length?: number;
   line_audio_end?: boolean;
   tokens?: SonioxToken[];
@@ -53,6 +55,8 @@ export interface SonioxSttResponse {
   original_text?: string;
   translated_text?: string;
   lang?: string | null;
+  target_lang?: string | null;
+  direction?: string | null;
   is_endpoint?: boolean;
 }
 

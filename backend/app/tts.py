@@ -31,7 +31,7 @@ State
         "barge_epoch": 0,
     }
 
-Queue payloads (from `stt.handle_stt`):
+Legacy queue payloads (created by `handle_stt_with_legacy_tts`):
 - `(TTS_TEXT, text, target, line_id)` — text for the rendered `line_id`
 - `(TTS_END, direction)`      — `<end>` token, finalize the current utterance in `direction`
 - `(TTS_BARGE, None)`         — barge-in: drain subsequent items of the same epoch and cancel
@@ -54,13 +54,84 @@ from .config import (
 )
 from . import config as runtime_config
 from .logging_config import get_logger
-from .stt import TTS_END, TTS_NONE, TTS_TEXT
-
 log = get_logger("tts")
 
+TTS_TEXT = "text"
+TTS_END = "end"
+TTS_NONE = None
 TTS_BARGE = "barge"
 
 PREWARM_STREAM_ID = "prewarm"
+
+
+async def handle_stt_with_legacy_tts(
+    *,
+    stt_ws,
+    browser_ws: WebSocket,
+    tts_queue: asyncio.Queue[Any] | None,
+    tts_state: dict[str, Any],
+    mode: str,
+    lang_a: str | None,
+    lang_b: str | None,
+    target_lang: str | None,
+    on_endpoint=None,
+    on_final_segment=None,
+    finalize_session_on_exit: bool = True,
+    finished_event: asyncio.Event | None = None,
+    extra_hold_ms: int = 0,
+    translate_text=None,
+) -> None:
+    """Compatibility adapter for ``/ws/translate``.
+
+    Queueing lives on the TTS side; the core STT handler only emits lines.
+    """
+    from .stt import handle_stt
+
+    text_pushed = False
+
+    async def queue_line(payload: dict[str, Any], direction: str | None) -> None:
+        nonlocal text_pushed
+        text = str(payload.get("translated_text") or "")
+        if tts_queue is not None and text:
+            text_pushed = True
+            await tts_queue.put((TTS_TEXT, text, direction, payload["line_id"]))
+            if payload.get("is_endpoint"):
+                await tts_queue.put((TTS_END, direction))
+
+    async def close_utterance() -> None:
+        if on_endpoint is not None:
+            await on_endpoint()
+
+    try:
+        await handle_stt(
+            stt_ws=stt_ws,
+            browser_ws=browser_ws,
+            session_state=tts_state,
+            mode=mode,
+            lang_a=lang_a,
+            lang_b=lang_b,
+            target_lang=target_lang,
+            on_endpoint=close_utterance,
+            on_line_ready=queue_line,
+            on_final_segment=on_final_segment,
+            finalize_session_on_exit=finalize_session_on_exit,
+            finished_event=finished_event,
+            extra_hold_ms=extra_hold_ms,
+            translate_text=translate_text,
+            send_session_done_on_finish=False,
+        )
+    finally:
+        finished = finished_event is not None and finished_event.is_set()
+        if finalize_session_on_exit or finished:
+            if tts_queue is not None:
+                await tts_queue.put((TTS_END, None))
+                await tts_queue.put(TTS_NONE)
+            tts_state["stt_done"] = True
+            if tts_queue is None or not text_pushed:
+                try:
+                    await browser_ws.send_json({"session_done": True})
+                except Exception:
+                    pass
 
 
 def get_tts_config(stream_id: str, voice: str, lang: str) -> dict[str, Any]:

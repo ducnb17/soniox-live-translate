@@ -8,6 +8,7 @@ import os
 
 import pytest
 from fastapi.testclient import TestClient
+from app.version import APP_VERSION
 from unittest.mock import AsyncMock, Mock
 
 # Set a dummy key so app imports cleanly.
@@ -50,7 +51,7 @@ class TestHealth:
     def test_returns_application_version(self, client):
         response = client.get("/api/version")
         assert response.status_code == 200
-        assert response.json()["version"] == "0.3.2"
+        assert response.json()["version"] == APP_VERSION
 
 
 class TestConfig:

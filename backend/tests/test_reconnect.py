@@ -16,8 +16,8 @@ from app.main import (
     _reconnect_delay,
     _websocket_close_details,
 )
-from app.stt import handle_stt, stt_keepalive
-from app.tts import new_tts_state
+from app.stt import stt_keepalive
+from app.tts import handle_stt_with_legacy_tts as handle_stt, new_tts_state
 
 
 class QueueBrowser:
@@ -171,7 +171,7 @@ async def test_clean_stt_finish_still_finalizes_session_during_reconnect_loop():
     assert state["stt_done"] is True
     assert queue.qsize() == 2
     assert browser.sent == [
-        {"tokens": [], "finished": True},
+        {"tokens": [], "finished": True, "type": "transcript_partial"},
         {"session_done": True},
     ]
 

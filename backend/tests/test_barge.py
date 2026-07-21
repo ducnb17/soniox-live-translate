@@ -9,13 +9,15 @@ import json
 import pytest
 
 from app.tts import (
+    TTS_END,
+    TTS_NONE,
+    TTS_TEXT,
     TTS_BARGE,
     new_tts_state,
     trigger_barge,
     _drain_queue,
     _cancel_open_streams,
 )
-from app.stt import TTS_TEXT, TTS_END, TTS_NONE
 
 
 class FakeTtsWs:

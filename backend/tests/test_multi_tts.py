@@ -1,8 +1,7 @@
 import asyncio
 
 from app.external_tts import external_tts_sender
-from app.stt import TTS_END, TTS_NONE, TTS_TEXT
-from app.tts import new_tts_state
+from app.tts import TTS_END, TTS_NONE, TTS_TEXT, new_tts_state
 from app.tts_provider import TTSCache, get_available_providers, get_provider, tts_cache
 
 
