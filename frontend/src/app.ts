@@ -1531,6 +1531,11 @@ function playPcmChunk(
     gainNode.gain.linearRampToValueAtTime(0, endAt);
   }
   source.start(startAt);
+  // Ensure the AudioContext is running. If it was auto-suspended (browser
+  // policy or Electron idle), onended never fires and the queue stalls.
+  if (audioCtx.state === "suspended") {
+    void audioCtx.resume();
+  }
   nextPlayTime = endAt;
   activeLineSources.push(source);
   source.onended = () => {
