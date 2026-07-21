@@ -47,6 +47,20 @@ button {
 }
 .tts-error-banner .tts-error-close:hover { background: #fee2e2; }
 .tts-error-banner.hidden { display: none; }
+.tts-error-banner .tts-error-settings {
+  flex-shrink: 0;
+  background: none;
+  border: 1px solid currentColor;
+  color: inherit;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.tts-error-banner .tts-error-settings:hover { background: rgba(153,27,27,0.08); }
+body.dark .tts-error-banner .tts-error-settings:hover { background: rgba(252,165,165,0.12); }
 
 /* Dark mode */
 body.dark .tts-error-banner {
