@@ -19,6 +19,44 @@ button {
   border: none;
 }
 
+/* TTS error banner — sticky notification that persists until dismissed */
+.tts-error-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  background: #fef2f2;
+  border-bottom: 1px solid #fecaca;
+  color: #991b1b;
+  font-size: 13px;
+  font-weight: 500;
+  flex-shrink: 0;
+}
+.tts-error-banner .tts-error-icon { font-size: 16px; flex-shrink: 0; }
+.tts-error-banner .tts-error-text { flex: 1; }
+.tts-error-banner .tts-error-close {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: #991b1b;
+  cursor: pointer;
+  font-size: 15px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  line-height: 1;
+}
+.tts-error-banner .tts-error-close:hover { background: #fee2e2; }
+.tts-error-banner.hidden { display: none; }
+
+/* Dark mode */
+body.dark .tts-error-banner {
+  background: #2d1f1f;
+  border-bottom-color: #7f1d1d;
+  color: #fca5a5;
+}
+body.dark .tts-error-banner .tts-error-close { color: #fca5a5; }
+body.dark .tts-error-banner .tts-error-close:hover { background: #3b2828; }
+
 select {
   font-family: inherit;
 }

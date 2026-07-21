@@ -262,7 +262,7 @@ async def api_tts_providers() -> JSONResponse:
             "tier": p.tier,
             "pricing_url": p.pricing_url,
             "approximate_cost_per_1m_chars": p.approximate_cost_per_1m_chars,
-            "has_api_key": bool(get_tts_api_key(p.id)),
+            "has_api_key": bool(get_tts_api_key(p.id)) or (p.id == "soniox" and bool(get_api_key())),
         }
         for p in providers
     ]
@@ -320,6 +320,11 @@ async def api_test_tts_provider(provider_id: str, payload: dict = Body(...)) -> 
     if ok:
         if key:
             set_tts_api_key(provider_id, key)
+            if provider_id == "soniox":
+                cfg = load_config()
+                cfg["soniox_api_key"] = key
+                save_config(cfg)
+                set_api_key(key)
         set_tts_provider(provider_id)
     return JSONResponse({"ok": ok, "message": message})
 

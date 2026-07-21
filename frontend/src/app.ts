@@ -1213,9 +1213,10 @@ function openWebSocket(extraParams: Record<string, string> = {}): Promise<void> 
       }
 
       if (data.tts_error) {
-        setStatus(`TTS không phát được: ${data.tts_error.message}`);
-        return;
-      }
+              // Old-style tts_error from external_tts (provider_id + message).
+              setStatus(`TTS không phát được: ${data.tts_error.message}`);
+              return;
+            }
 
       if (data.tts_usage) {
         ttsSessionUsage = addTtsUsage(ttsSessionUsage, data.tts_usage);
@@ -1235,11 +1236,21 @@ function openWebSocket(extraParams: Record<string, string> = {}): Promise<void> 
       }
 
       if (data.type === "line_ready") {
-        handleLineReady(data);
-        return;
-      }
+              handleLineReady(data);
+              return;
+            }
 
-      if (data.error_code || data.error_message) {
+            if (data.type === "tts_error") {
+              // Streaming TTS error from pipe_tts_to_browser (deadlock-safe).
+              // The line was already marked done with 0 bytes — this is just
+              // the user-facing notification. Keep it sticky so it's not lost.
+              showTtsErrorBanner(
+                data.error_message || "TTS lỗi API key — kiểm tra lại ở Cài đặt > Text-to-Speech"
+              );
+              return;
+            }
+
+            if (data.error_code || data.error_message) {
         if (isRetryableSttError(data)) {
           console.warn("Retryable STT error:", data.error_type, data.error_code);
           setConnectionStatus("reconnecting");
@@ -1936,6 +1947,23 @@ function setMode(m: AppMode): void {
 function setStatus(msg: string): void {
   $status.textContent = msg;
   updateDelayStatusIndicator();
+}
+
+/* ─── TTS error banner (sticky, must be dismissed) ─── */
+const $ttsErrorBanner = document.getElementById("tts-error-banner") as HTMLDivElement | null;
+const $ttsErrorText = document.querySelector<HTMLSpanElement>(".tts-error-text");
+const $ttsErrorClose = document.querySelector<HTMLButtonElement>(".tts-error-close");
+
+function showTtsErrorBanner(message: string): void {
+  if (!$ttsErrorBanner || !$ttsErrorText) return;
+  $ttsErrorText.textContent = message;
+  $ttsErrorBanner.classList.remove("hidden");
+}
+
+if ($ttsErrorClose) {
+  $ttsErrorClose.addEventListener("click", () => {
+    $ttsErrorBanner?.classList.add("hidden");
+  });
 }
 
 function updateDelayStatusIndicator(): void {

@@ -47,7 +47,7 @@ class SonioxProvider(TTSProviderBase):
             id="soniox",
             name="Soniox Built-in",
             description="12 built-in voices, included in Soniox API. No extra key needed.",
-            requires_api_key=False,
+            requires_api_key=True,
             supports_streaming=True,
             tier="cheap",
             pricing_url="https://soniox.com/pricing",

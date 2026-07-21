@@ -337,12 +337,51 @@ async def pipe_tts_to_browser(
             data = json.loads(message)
 
             if data.get("error_code") is not None:
+                error_stream_id = data.get("stream_id")
                 log.error(
                     "tts_stream_error",
-                    stream_id=data.get("stream_id"),
+                    stream_id=error_stream_id,
                     error_code=data["error_code"],
-                    error_message=data["error_message"],
+                    error_message=data.get("error_message"),
                 )
+
+                # Report error to the frontend so the user knows TTS is broken.
+                stream_meta = tts_state["stream_id_to_direction"].get(error_stream_id, {}) if error_stream_id else {}
+                error_line_id = stream_meta.get("line_id")
+                try:
+                    await browser_ws.send_json({
+                        "type": "tts_error",
+                        "line_id": error_line_id,
+                        "error_code": data["error_code"],
+                        "error_message": data.get("error_message", ""),
+                    })
+                except Exception:
+                    pass
+
+                # Mark the line as "done" with 0 bytes audio so
+                # StrictLineAudioQueue does not block on it forever.
+                if error_stream_id:
+                    # Flush any pending audio for this stream (0 bytes).
+                    pending_audio_by_stream.pop(error_stream_id, None)
+                    if error_line_id is not None:
+                        await send_audio_chunk(
+                            error_stream_id,
+                            b"",
+                            line_audio_end=True,
+                        )
+
+                    # Clean up stream state — same logic as the `terminated` handler.
+                    error_meta = tts_state["stream_id_to_direction"].pop(error_stream_id, None)
+                    direction = error_meta.get("direction") if error_meta is not None else None
+                    if direction is not None:
+                        d = tts_state["directions"].get(direction)
+                        if d is not None:
+                            if d["current_stream_id"] == error_stream_id:
+                                d["current_stream_id"] = None
+                                d["stream_used"] = False
+                            d["idle_event"].set()
+
+                continue
 
             audio_b64 = data.get("audio")
             if audio_b64:
