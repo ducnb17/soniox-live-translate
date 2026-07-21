@@ -29,6 +29,11 @@ async def pipe_browser_to_stt(
     per WebSocket — avoids two consumers racing on receive()."""
     while True:
         msg = await browser_ws.receive()
+        if msg.get("type") == "websocket.disconnect":
+            raise WebSocketDisconnect(
+                code=msg.get("code", 1000),
+                reason=msg.get("reason", ""),
+            )
         if "bytes" in msg and msg["bytes"] is not None:
             await stt_ws.send(msg["bytes"])
         elif "text" in msg and msg["text"] is not None and on_text is not None:

@@ -16,7 +16,7 @@ from app.main import (
     _reconnect_delay,
     _websocket_close_details,
 )
-from app.stt import stt_keepalive
+from app.stt import pipe_browser_to_stt, stt_keepalive
 from app.tts import handle_stt_with_legacy_tts as handle_stt, new_tts_state
 
 
@@ -35,6 +35,29 @@ class RecordingBrowser:
         self.sent: list[dict] = []
 
     async def send_json(self, data: dict) -> None:
+        self.sent.append(data)
+
+
+class DisconnectFrameBrowser:
+    def __init__(self) -> None:
+        self.receive_count = 0
+
+    async def receive(self) -> dict:
+        self.receive_count += 1
+        if self.receive_count == 1:
+            return {
+                "type": "websocket.disconnect",
+                "code": 1000,
+                "reason": "browser closed",
+            }
+        raise AssertionError("Browser receive() was called after disconnect")
+
+
+class RecordingSttSocket:
+    def __init__(self) -> None:
+        self.sent: list[bytes] = []
+
+    async def send(self, data: bytes) -> None:
         self.sent.append(data)
 
 
@@ -110,6 +133,19 @@ async def test_audio_buffer_keeps_newest_bytes_and_reports_overflow():
     assert audio_buffer == b"cdefgh"
     assert dropped == 2
     assert controls == [{"type": "utterances", "utterances": [{"original": "kept"}]}]
+
+
+async def test_stt_ingress_stops_on_browser_disconnect_frame():
+    browser = DisconnectFrameBrowser()
+    stt_socket = RecordingSttSocket()
+
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        await pipe_browser_to_stt(browser, stt_socket)
+
+    assert exc_info.value.code == 1000
+    assert exc_info.value.reason == "browser closed"
+    assert browser.receive_count == 1
+    assert stt_socket.sent == []
 
 
 async def test_stt_keepalive_uses_soniox_stt_control_message(monkeypatch):
@@ -292,6 +328,31 @@ class DisconnectingBrowser:
         pass
 
 
+class DisconnectFrameWebSocket:
+    def __init__(self) -> None:
+        self.receive_count = 0
+        self.sent_json: list[dict] = []
+
+    async def accept(self) -> None:
+        pass
+
+    async def receive(self) -> dict:
+        self.receive_count += 1
+        if self.receive_count == 1:
+            return {
+                "type": "websocket.disconnect",
+                "code": 1000,
+                "reason": "client closed tab",
+            }
+        raise AssertionError("WebSocket receive() was called after disconnect")
+
+    async def send_json(self, data: dict) -> None:
+        self.sent_json.append(data)
+
+    async def close(self, code: int = 1000, reason: str | None = None) -> None:
+        pass
+
+
 class ConfigCapturingSttSocket:
     close_code = None
     close_reason = None
@@ -368,3 +429,24 @@ async def test_unexpected_stt_close_recovers_without_losing_transcript(monkeypat
         if message.get("tokens")
     )
     assert not any(message.get("session_done") for message in browser.sent_json)
+
+
+async def test_browser_disconnect_frame_never_starts_stt_reconnect(monkeypatch):
+    browser = DisconnectFrameWebSocket()
+    socket = ConfigCapturingSttSocket()
+    session = FakeSession()
+    connect = AsyncMock(return_value=socket)
+
+    monkeypatch.setattr(main, "is_configured", lambda: True)
+    monkeypatch.setattr(main, "transcript_store", FakeTranscriptStore(session))
+    monkeypatch.setattr(main.websockets, "connect", connect)
+    monkeypatch.setattr(main, "create_conversation", AsyncMock())
+    monkeypatch.setattr(main, "add_connection_event", AsyncMock())
+    monkeypatch.setattr(main, "update_conversation", AsyncMock())
+    monkeypatch.setattr(main, "add_segments_batch", AsyncMock(return_value=1))
+
+    await main.translation_websocket(browser, target_lang="vi", tts=False)
+
+    assert connect.await_count == 1
+    assert browser.receive_count == 1
+    assert not any(message.get("reconnecting") for message in browser.sent_json)

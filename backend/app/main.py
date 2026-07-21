@@ -1107,8 +1107,13 @@ def _has_browser_disconnect(eg: BaseExceptionGroup) -> bool:
     for e in _iter_leaf_exceptions(eg):
         if isinstance(e, WebSocketDisconnect):
             return True
-        if isinstance(e, RuntimeError) and "close message has been sent" in str(e):
-            return True
+        if isinstance(e, RuntimeError):
+            message = str(e).lower()
+            if (
+                "close message has been sent" in message
+                or "disconnect message has been received" in message
+            ):
+                return True
     return False
 
 
