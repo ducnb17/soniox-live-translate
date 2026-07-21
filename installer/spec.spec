@@ -49,7 +49,7 @@ a = Analysis(
         'app.stt', 'app.tts', 'app.context_builder', 'app.transcript',
         'app.logging_config', 'app.db', 'app.provider_connection', 'app.version',
         'app.stt_provider', 'app.translation_provider',
-        'app.tts_provider', 'app.external_tts',
+        'app.tts_provider', 'app.external_tts', 'app.tts_session',
         'app.stt_providers', 'app.stt_providers.soniox_provider',
         'app.stt_providers.openai_provider', 'app.stt_providers.deepgram_provider',
         'app.stt_providers.google_provider', 'app.stt_providers.assemblyai_provider',

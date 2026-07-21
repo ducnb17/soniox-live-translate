@@ -19,7 +19,6 @@ from .logging_config import get_logger
 from .tts_provider import (
     TTSProviderBase,
     get_provider,
-    supports_session_streaming,
     tts_cache,
 )
 from .tts import synthesize_soniox_text
@@ -105,8 +104,13 @@ class TtsSessionController:
             await self.cancel_all(self.epoch)
             return
 
+        # Every registered provider implements ``synthesize_stream``.  For
+        # providers such as Google/OpenAI the implementation yields a single
+        # complete PCM response rather than true incremental audio, which is
+        # still valid for this session protocol.  ``supports_streaming`` is a
+        # latency/capability hint for the UI, not an admission check.
         provider = self._provider()
-        if not supports_session_streaming(provider):
+        if provider is None:
             self.enabled = False
             await self._send_json({
                 "type": "tts_error",

@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 import pytest
 
 from app.tts_provider import tts_cache
@@ -22,6 +23,12 @@ class RecordingBrowser:
 class ImmediateProvider:
     def __init__(self):
         self.calls = []
+
+    @property
+    def info(self):
+        # REST-backed providers yield one completed audio response.  They are
+        # not true streaming providers, but remain valid /ws/tts providers.
+        return SimpleNamespace(supports_streaming=False)
 
     async def synthesize_stream(self, text, voice_id, lang):
         self.calls.append((text, voice_id, lang))
@@ -101,6 +108,17 @@ async def test_speak_is_deduplicated_and_audio_metadata_carries_epoch():
     assert [m["line_audio_end"] for m in metas] == [True]
     assert {m["epoch"] for m in metas} == {0}
     assert {m["request_id"] for m in metas} == {"session:7"}
+    await controller.close()
+
+
+async def test_non_streaming_provider_is_accepted_by_independent_session():
+    provider = ImmediateProvider()
+    browser, controller = await start_controller(provider)
+
+    assert controller.enabled is True
+    assert browser.json_messages[-1]["type"] == "tts_state"
+    assert browser.json_messages[-1]["state"] == "on"
+    assert not any(m.get("type") == "tts_error" for m in browser.json_messages)
     await controller.close()
 
 

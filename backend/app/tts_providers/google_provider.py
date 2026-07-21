@@ -6,6 +6,7 @@ Pricing should be verified at: https://cloud.google.com/text-to-speech/pricing
 
 import base64
 import json
+import struct
 from typing import AsyncIterator
 
 import httpx
@@ -39,6 +40,23 @@ OTHER_VOICES = [  # Common languages
     "fr-FR-Chirp3-HD-Aoede", "fr-FR-Chirp3-HD-Charon",
     "de-DE-Chirp3-HD-Aoede", "de-DE-Chirp3-HD-Charon",
 ]
+
+
+def _linear16_pcm_payload(audio: bytes) -> bytes:
+    """Return raw PCM from Google's RIFF/WAVE-wrapped LINEAR16 response."""
+    if len(audio) < 12 or audio[:4] != b"RIFF" or audio[8:12] != b"WAVE":
+        return audio
+
+    offset = 12
+    while offset + 8 <= len(audio):
+        chunk_id = audio[offset:offset + 4]
+        chunk_size = struct.unpack_from("<I", audio, offset + 4)[0]
+        chunk_start = offset + 8
+        chunk_end = min(chunk_start + chunk_size, len(audio))
+        if chunk_id == b"data":
+            return audio[chunk_start:chunk_end]
+        offset = chunk_start + chunk_size + (chunk_size % 2)
+    return audio
 
 
 @register_provider
@@ -108,7 +126,7 @@ class GoogleTTSProvider(TTSProviderBase):
             data = resp.json()
             audio_b64 = data.get("audioContent", "")
             if audio_b64:
-                yield base64.b64decode(audio_b64)
+                yield _linear16_pcm_payload(base64.b64decode(audio_b64))
 
     def estimate_cost(self, char_count: int) -> float:
         # Standard voices ~$4/million, WaveNet ~$16/million, Chirp3 HD ~$32/million
