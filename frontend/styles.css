@@ -258,6 +258,34 @@ select:disabled,
   cursor: not-allowed;
 }
 
+/* Secondary action button — STT + TTS (speak translation) */
+.action-btn-tts {
+  flex: 0 0 auto;
+  background: #059669;
+  padding: 12px 14px;
+  font-size: 14px;
+}
+
+.action-btn-tts:hover:not(:disabled) {
+  background: #047857;
+}
+
+.action-btn-tts[data-state="running"] {
+  background: #dc2626;
+}
+
+.action-btn-tts[data-state="running"]:hover {
+  background: #b91c1c;
+}
+
+[data-theme="dark"] .action-btn-tts {
+  background: #10b981;
+}
+
+[data-theme="dark"] .action-btn-tts:hover:not(:disabled) {
+  background: #059669;
+}
+
 .action-btn .icon {
   flex-shrink: 0;
 }

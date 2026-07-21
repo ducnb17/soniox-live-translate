@@ -70,6 +70,7 @@ const $contextJson = $<HTMLTextAreaElement>("context-json");
 const $actionRow = document.querySelector<HTMLDivElement>(".action-row")!;
 const $actionBtn = $<HTMLButtonElement>("action");
 const $actionLabel = $actionBtn.querySelector<HTMLSpanElement>(".btn-label")!;
+const $actionTtsBtn = $<HTMLButtonElement>("action-tts");
 const $modeToggle = $<HTMLButtonElement>("mode-toggle");
 const $audioUrl = $<HTMLInputElement>("audio-url");
 const $transcriptFeed = $<HTMLDivElement>("transcript-feed");
@@ -1036,6 +1037,8 @@ let pendingAudioOverflowed = false;
 let manualStopRequested = false;
 let lastWebSocketParams: Record<string, string> = {};
 let manualRetryInProgress = false;
+// Whether the current/last session was started with TTS spoken output enabled.
+let sessionTtsEnabled = false;
 let resumeTranscriptOnNextSession = false;
 let feedAutoScroll = true;
 
@@ -1123,7 +1126,7 @@ function openWebSocket(extraParams: Record<string, string> = {}): Promise<void> 
     lang_id: String($langId.checked),
     diarize: String($diarization.checked),
     voice: $voice.value,
-    tts: String($tts.checked),
+    tts: String(sessionTtsEnabled),
     ...extraParams,
   });
   const sttDelaySeconds = currentSttDelaySeconds();
@@ -1793,8 +1796,9 @@ async function resetSession(): Promise<void> {
   render();
 }
 
-async function start(): Promise<void> {
-  setState("recording");
+async function start(ttsEnabled = false): Promise<void> {
+  sessionTtsEnabled = ttsEnabled;
+  setState("recording", undefined, ttsEnabled);
   manualStopRequested = false;
 
   try {
@@ -1810,14 +1814,15 @@ async function start(): Promise<void> {
 }
 
 
-async function playFile(): Promise<void> {
+async function playFile(ttsEnabled = false): Promise<void> {
   const url = $audioUrl.value.trim();
   if (!url) {
     setStatus("Enter an audio URL");
     return;
   }
 
-  setState("playing-file");
+  sessionTtsEnabled = ttsEnabled;
+  setState("playing-file", undefined, ttsEnabled);
   fileTtsHeard = false;
 
   try {
@@ -1881,17 +1886,31 @@ function cleanup(): void {
   }
 }
 
-function setState(s: AppState, message?: string): void {
+function setState(s: AppState, message?: string, ttsEnabled = false): void {
   state = s;
   const busy = s !== "idle";
   if (busy) {
-    $actionLabel.textContent = "Stop";
-    $actionBtn.dataset.state = "running";
-    $actionBtn.disabled = false;
+    // Show "Stop" on the button that was clicked; hide the other action button.
+    if (ttsEnabled) {
+      $actionTtsBtn.querySelector<HTMLSpanElement>(".btn-label-tts")!.textContent = "■ Stop";
+      $actionTtsBtn.dataset.state = "running";
+      $actionTtsBtn.disabled = false;
+      $actionBtn.classList.add("hidden");
+    } else {
+      $actionLabel.textContent = "Stop";
+      $actionBtn.dataset.state = "running";
+      $actionBtn.disabled = false;
+      $actionTtsBtn.classList.add("hidden");
+    }
   } else {
+    $actionBtn.classList.remove("hidden");
+    $actionTtsBtn.classList.remove("hidden");
     $actionBtn.dataset.state = "idle";
+    $actionTtsBtn.dataset.state = "idle";
     $actionLabel.textContent = mode === "file" ? "Play audio file" : "Start talking";
+    $actionTtsBtn.querySelector<HTMLSpanElement>(".btn-label-tts")!.textContent = "+ Đọc";
     $actionBtn.disabled = mode === "file" && !$audioUrl.value.trim();
+    $actionTtsBtn.disabled = mode === "file" && !$audioUrl.value.trim();
   }
   $modeToggle.disabled = busy;
   $audioUrl.disabled = busy;
@@ -2063,9 +2082,19 @@ $actionBtn.addEventListener("click", () => {
   if (state !== "idle") {
     stop();
   } else if (mode === "file") {
-    void playFile();
+    void playFile(false);
   } else {
-    void start();
+    void start(false);
+  }
+});
+
+$actionTtsBtn.addEventListener("click", () => {
+  if (state !== "idle") {
+    stop();
+  } else if (mode === "file") {
+    void playFile(true);
+  } else {
+    void start(true);
   }
 });
 
@@ -2075,7 +2104,9 @@ $modeToggle.addEventListener("click", () => {
 
 $audioUrl.addEventListener("input", () => {
   if (state === "idle" && mode === "file") {
-    $actionBtn.disabled = !$audioUrl.value.trim();
+    const hasUrl = Boolean($audioUrl.value.trim());
+    $actionBtn.disabled = !hasUrl;
+    $actionTtsBtn.disabled = !hasUrl;
   }
 });
 
