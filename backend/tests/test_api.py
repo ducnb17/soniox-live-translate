@@ -50,7 +50,7 @@ class TestHealth:
     def test_returns_application_version(self, client):
         response = client.get("/api/version")
         assert response.status_code == 200
-        assert response.json()["version"] == "0.3.2"
+        assert response.json()["version"] == "0.3.3"
 
 
 class TestConfig:

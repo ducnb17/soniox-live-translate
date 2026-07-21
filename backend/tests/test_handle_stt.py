@@ -427,6 +427,81 @@ class TestHandleSttExtraHold:
         ]
 
 
+async def test_tts_subscription_skips_disabled_lines_without_replay():
+    state = new_tts_state(["vi"])
+    state["enabled"] = False
+
+    disabled_browser = FakeBrowserWs()
+    disabled_queue: asyncio.Queue = asyncio.Queue()
+    await handle_stt(
+        stt_ws=FakeSttWs([
+            {
+                "tokens": [
+                    {"text": "câu đã bỏ lỡ", "translation_status": "translation", "is_final": True},
+                    {"text": "<end>"},
+                ]
+            },
+            {"finished": True},
+        ]),
+        browser_ws=disabled_browser,
+        tts_queue=disabled_queue,
+        tts_state=state,
+        mode="one_way",
+        lang_a=None,
+        lang_b=None,
+        target_lang="vi",
+    )
+
+    disabled_items = []
+    while not disabled_queue.empty():
+        disabled_items.append(disabled_queue.get_nowait())
+    assert not any(
+        isinstance(item, tuple) and item[0] == TTS_TEXT
+        for item in disabled_items
+    )
+    assert [
+        item["translated_text"]
+        for item in disabled_browser.sent
+        if item.get("type") == "line_ready"
+    ] == ["câu đã bỏ lỡ"]
+
+    state["enabled"] = True
+    enabled_browser = FakeBrowserWs()
+    enabled_queue: asyncio.Queue = asyncio.Queue()
+    await handle_stt(
+        stt_ws=FakeSttWs([
+            {
+                "tokens": [
+                    {"text": "câu mới", "translation_status": "translation", "is_final": True},
+                    {"text": "<end>"},
+                ]
+            },
+            {"finished": True},
+        ]),
+        browser_ws=enabled_browser,
+        tts_queue=enabled_queue,
+        tts_state=state,
+        mode="one_way",
+        lang_a=None,
+        lang_b=None,
+        target_lang="vi",
+    )
+
+    enabled_items = []
+    while not enabled_queue.empty():
+        enabled_items.append(enabled_queue.get_nowait())
+    spoken = [
+        item[1]
+        for item in enabled_items
+        if isinstance(item, tuple) and item[0] == TTS_TEXT
+    ]
+    assert spoken == ["câu mới"]
+    ready_lines = [
+        item for item in enabled_browser.sent if item.get("type") == "line_ready"
+    ]
+    assert [item["line_id"] for item in ready_lines] == [2]
+
+
 async def test_external_translation_never_queues_original_text():
     messages = [
         {

@@ -1,5 +1,4 @@
 import {
-  TTS_SAMPLE_RATE,
   BARGE_RMS_THRESHOLD,
   BARGE_HOLD_MS,
   BARGE_TTS_START_GRACE_MS,
@@ -26,8 +25,8 @@ import {
   type ConversationSummary,
 } from "./conversation-api";
 import { addTtsUsage, emptyTtsUsage, formatTtsCostHint } from "./tts-usage";
-import { resolveTtsChunkSchedule } from "./tts-playback";
-import { StrictLineAudioQueue } from "./tts-line-queue";
+import { SpeechToText, type SpeechToTextConfig } from "./speech-to-text";
+import { TextToSpeech } from "./text-to-speech";
 
 
 // UTF-8 safe base64 (handles non-ASCII context text).
@@ -63,7 +62,6 @@ const $voiceB = $<HTMLSelectElement>("voice-b");
 const $voiceBBlock = $<HTMLDivElement>("voice-b-block");
 const $diarization = $<HTMLInputElement>("diarization");
 const $langId = $<HTMLInputElement>("lang-id");
-const $tts = $<HTMLInputElement>("tts");
 const $barge = $<HTMLInputElement>("barge");
 const $bargeHint = $<HTMLParagraphElement>("barge-hint");
 const $contextJson = $<HTMLTextAreaElement>("context-json");
@@ -256,11 +254,7 @@ async function refreshDeviceList(): Promise<void> {
     if (resolved.missingOutput) {
       saveDeviceId(OUTPUT_DEVICE_KEY, "default");
       missing.push("speaker");
-      if (audioCtx) {
-        void setAudioOutputDevice(audioCtx, "default").catch((error: unknown) => {
-          console.warn("Could not reroute active audio to System Default", error);
-        });
-      }
+      textToSpeech.updateConfig({ outputDevice: "default" });
     }
 
     if (missing.length) {
@@ -306,6 +300,7 @@ $inputDevice.addEventListener("change", () => {
 
 $outputDevice.addEventListener("change", () => {
   saveDeviceId(OUTPUT_DEVICE_KEY, $outputDevice.value);
+  textToSpeech.updateConfig({ outputDevice: $outputDevice.value });
   setStatus(`Speaker set to ${$outputDevice.selectedOptions[0]?.textContent || "System Default"}`);
 });
 
@@ -509,6 +504,7 @@ function readTtsDelaySeconds(): number {
 function updateTtsDelaySelection(): void {
   $ttsDelayValue.textContent = $ttsDelay.value;
   try { localStorage.setItem(TTS_DELAY_SECONDS_KEY, $ttsDelay.value); } catch { /* storage disabled */ }
+  textToSpeech.updateConfig({ ttsDelaySeconds: currentTtsDelaySeconds() });
   updateDelayStatusIndicator();
 }
 
@@ -536,6 +532,8 @@ function formatTtsPlaybackRate(value: number): string {
 function updateTtsPlaybackRateSelection(): void {
   $ttsPlaybackRateValue.textContent = formatTtsPlaybackRate($ttsPlaybackRate.valueAsNumber);
   try { localStorage.setItem(TTS_PLAYBACK_RATE_KEY, $ttsPlaybackRate.value); } catch { /* storage disabled */ }
+  textToSpeech.updateConfig({ playbackRate: currentTtsPlaybackRate() });
+  updateDelayStatusIndicator();
 }
 
 $sttDelay.value = String(readSttDelaySeconds());
@@ -1019,55 +1017,11 @@ document.getElementById("history-search-form")?.addEventListener("submit", (even
 let mode: AppMode = "file";
 let state: AppState = "idle";
 let mediaRecorder: MediaRecorder | null = null;
-let audioCtx: AudioContext | null = null;
-const FADE_MS = 8;
-let nextPlayTime = 0;
-let pendingChunkLineId: number | null = null;
-let pendingChunkEndsLine = false;
-let currentPlayingLineId: number | null = null;
 let utterances: Utterance[] = [];
 let currentUtt = newUtt();
 let fileAudio: HTMLAudioElement | null = null;
 let fileTtsHeard = false;
-let ws: WebSocket | null = null;
-let sessionId: string | null = null;
-let connectionStatus: ConnectionStatus = "idle";
-let pendingAudioBlobs: Blob[] = [];
-let pendingAudioOverflowed = false;
-let manualStopRequested = false;
-let lastWebSocketParams: Record<string, string> = {};
-let manualRetryInProgress = false;
-// Whether the current/last session was started with TTS spoken output enabled.
-let sessionTtsEnabled = false;
-let resumeTranscriptOnNextSession = false;
 let feedAutoScroll = true;
-
-// Read-mode TTS queue: deliberately unbounded so backlog increases latency,
-// never data loss. A line becomes eligible to start streaming as soon as it
-// is next in sequence — playback of its chunks starts immediately and keeps
-// pace with arrival, instead of waiting for the whole line to be generated.
-const lineAudioQueue = new StrictLineAudioQueue<Uint8Array>();
-let nextLineIdToPlay: number | null = null;
-let activeLineSources: AudioBufferSourceNode[] = [];
-let playbackEpoch = 0;
-let lastRegisteredLineId = 0;
-let minimumAcceptedLineId = 1;
-let backendSessionDone = false;
-let audioLineReadyCount = 0;
-let audioLinePlayedCount = 0;
-let interruptedAudioLineCount = 0;
-let averageLineAudioSeconds = 3;
-// Line ID used purely for Web Audio gap-detection (whether to insert the
-// configured inter-line delay). Decoupled from currentPlayingLineId, which
-// is the "a line is actively streaming" busy flag.
-let lastScheduledLineId: number | null = null;
-// Chunks of the active line that have been scheduled for playback but have
-// not yet finished playing (onEnded not fired).
-let activeLinePendingChunks = 0;
-// True once the final chunk of the active line has been scheduled.
-let activeLineDoneScheduling = false;
-// Running total of the active line's audio duration, for averageLineAudioSeconds.
-let activeLineAudioSeconds = 0;
 
 // Barge-in VAD state
 let bargeAnalyser: AnalyserNode | null = null;
@@ -1076,8 +1030,7 @@ let bargeRaf: number | null = null;
 let bargeHoldSince = 0;
 let bargeArmed = false;
 let micStream: MediaStream | null = null;
-// Timestamp of the most recent empty -> non-empty transition of
-// activeLineSources (i.e. a new TTS line started playing after silence).
+// Timestamp of the most recent silent -> audible TTS transition.
 // Used to suppress barge-in during the initial grace window, since the
 // onset "pop" of TTS audio can be picked up by the mic as echo.
 let bargeTtsStartedAt = 0;
@@ -1096,263 +1049,107 @@ function newUtt(): Utterance {
 }
 
 // ---------------------------------------------------------------------------
-// WebSocket
+// Independent STT and TTS modules
 // ---------------------------------------------------------------------------
-function flushPendingAudio(): void {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    for (const blob of pendingAudioBlobs) {
-      try { ws.send(blob); } catch { break; }
-    }
-  }
-  pendingAudioBlobs = [];
-}
-
-
-function isRetryableSttError(data: SonioxSttResponse): boolean {
-  if (data.error_type === "service_unavailable" || data.error_type === "max_duration_reached") {
-    return true;
-  }
-  const numericCode = Number(data.error_code);
-  return Number.isFinite(numericCode) && numericCode >= 500;
-}
-
-
-function openWebSocket(extraParams: Record<string, string> = {}): Promise<void> {
-  lastWebSocketParams = { ...extraParams };
-  const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  const m = $mode();
-  const params = new URLSearchParams({
-    mode: m,
-    lang_id: String($langId.checked),
-    diarize: String($diarization.checked),
-    voice: $voice.value,
-    tts: String(sessionTtsEnabled),
-    ...extraParams,
-  });
-  const sttDelaySeconds = currentSttDelaySeconds();
-  params.set("stt_delay_ms", String(Math.round(sttDelaySeconds * 1000)));
-
-  if (m === "one_way") {
-    params.set("target_lang", $targetLang.value);
-  } else {
-    params.set("lang_a", $langA.value);
-    params.set("lang_b", $langB.value);
-    params.set("target_lang", $langB.value);
-    params.set("voice_b", $voiceB.value);
-  }
-
-  const ctxText = $contextJson.value.trim();
-  if (ctxText) {
-    try {
-      JSON.parse(ctxText);
-      params.set("context_b64", b64Utf8(ctxText));
-    } catch (e) {
-      setStatus(`Context JSON invalid: ${(e as Error).message}`);
-      return Promise.reject(new Error("invalid context json"));
-    }
-  }
-
-  // Pass device selection to backend
-  params.set("input_device", $inputDevice.value);
-  params.set("output_device", $outputDevice.value);
-  params.set("tts_provider", $ttsProvider.value);
-  params.set("stt_provider", $sttProvider.value || "soniox");
-  params.set("translation_provider", $translationProvider.value || "soniox");
-
-  // Use TTS provider voice for one-way, or fallback to Soniox voices
-  const ttsVoice = $ttsVoice.value || $voice.value;
-  params.set("voice", ttsVoice);
-  params.set("voice_b", currentTtsProvider === "soniox" ? $voiceB.value : ttsVoice);
-
-  const url = `${proto}//${location.host}/ws/translate?${params}`;
-  ws = new WebSocket(url);
-  ws.binaryType = "arraybuffer";
-
-  ws.onmessage = (event: MessageEvent) => {
-    if (typeof event.data === "string") {
-      const data: SonioxSttResponse = JSON.parse(event.data);
-
-      if (data.session_id) {
-        sessionId = data.session_id;
-        showSessionInfo(sessionId);
-        if (resumeTranscriptOnNextSession) {
-          resumeTranscriptOnNextSession = false;
-          sendTranscriptSnapshot();
-        }
-        return;
+const textToSpeech = new TextToSpeech(
+  {
+    onLineStarted: () => {
+      if (state === "playing-file" && fileAudio && !fileTtsHeard) {
+        fileTtsHeard = true;
+        fileAudio.volume = 0.1;
       }
+    },
+    onLineFinished: () => updateDelayStatusIndicator(),
+    onQueueChanged: () => updateDelayStatusIndicator(),
+    onError: (message) => showTtsErrorBanner(message),
+  },
+  {
+    outputDevice: $outputDevice.value || "default",
+    ttsDelaySeconds: currentTtsDelaySeconds(),
+    playbackRate: currentTtsPlaybackRate(),
+  },
+);
 
-      if (data.reconnecting) {
-        setConnectionStatus("reconnecting");
-        setStatus(`Đang kết nối lại… (lần ${data.attempt}/${data.max_attempts})`);
-        return;
-      }
-
-      if (data.reconnected) {
-        setConnectionStatus("connected");
-        setStatus(`Đã kết nối lại sau ${((data.downtime_ms || 0) / 1000).toFixed(1)}s`);
-        // Insert downtime marker in transcript if provided
-        if (data.downtime_text) {
-          currentUtt.originalFinal += data.downtime_text;
-          render();
-        }
-        // Flush any buffered audio
-        flushPendingAudio();
-        return;
-      }
-
-      if (data.reconnect_failed) {
-        setConnectionStatus("failed");
-        setStatus(data.error_message || "Không thể kết nối lại.");
-        return;
-      }
-
-      if (data.tts_fallback) {
-        setStatus(
-          `${data.tts_fallback.from_provider} TTS lỗi/hết quota; ` +
-          `đã chuyển sang ${data.tts_fallback.to_provider}: ${data.tts_fallback.reason}`,
-        );
-        return;
-      }
-
-      if (data.tts_error) {
-              // Old-style tts_error from external_tts (provider_id + message).
-              setStatus(`TTS không phát được: ${data.tts_error.message}`);
-              return;
-            }
-
-      if (data.tts_usage) {
-        ttsSessionUsage = addTtsUsage(ttsSessionUsage, data.tts_usage);
-        updateTtsCostHint();
-        return;
-      }
-
-      if (data.translation_error) {
-        setStatus(`Translation failed: ${data.translation_error.message}`);
-        return;
-      }
-
-      if (data.type === "audio_chunk_meta") {
-        pendingChunkLineId = typeof data.line_id === "number" ? data.line_id : null;
-        pendingChunkEndsLine = data.line_audio_end === true;
-        return;
-      }
-
-      if (data.type === "line_ready") {
-              handleLineReady(data);
-              return;
-            }
-
-            if (data.type === "tts_error") {
-              // Streaming TTS error from pipe_tts_to_browser (deadlock-safe).
-              // The line was already marked done with 0 bytes — this is just
-              // the user-facing notification. Keep it sticky so it's not lost.
-              showTtsErrorBanner(
-                data.error_message || "TTS lỗi API key — kiểm tra lại ở Cài đặt > Text-to-Speech"
-              );
-              return;
-            }
-
-            if (data.error_code || data.error_message) {
-        if (isRetryableSttError(data)) {
-          console.warn("Retryable STT error:", data.error_type, data.error_code);
-          setConnectionStatus("reconnecting");
-          setStatus("Kết nối STT bị gián đoạn, đang chuẩn bị thử lại…");
-          return;
-        }
-        console.error("Server error:", data.error_code, data.error_message);
-        const friendlyMsg = data.error_message
-          ? data.error_message.replace(/code \d+/g, "").replace(/\(.*\)/g, "").trim()
-          : "Lỗi kết nối. Vui lòng thử lại.";
-        setState("idle", friendlyMsg);
-        cleanup();
-        return;
-      }
-      if (data.barge_ack) return;
-      if (data.session_done) {
-        backendSessionDone = true;
-        maybeFinishSessionAfterAudio();
-        return;
-      }
-      handleSttResult(data);
-    } else {
-      const lineId = pendingChunkLineId;
-      const lineAudioEnd = pendingChunkEndsLine;
-      pendingChunkLineId = null;
-      pendingChunkEndsLine = false;
-      if (lineId === null) {
-        console.warn("Received TTS audio without a preceding audio_chunk_meta message");
-        return;
-      }
-      handleTtsAudio(
-        new Uint8Array(event.data as ArrayBuffer),
-        lineId,
-        lineAudioEnd,
-      );
-    }
-  };
-
-  ws.onclose = (event: CloseEvent) => {
-    if (manualStopRequested) {
-      setConnectionStatus("idle");
-      return;
-    }
-    console.log("WebSocket closed", event.code, event.reason);
-    if (event.code === 4000) {
-      setConnectionStatus("failed");
-      setStatus("Không thể kết nối lại. Nhấn “Thử lại” để tiếp tục phiên.");
-    }
-  };
-
-  return new Promise<void>((resolve, reject) => {
-    ws!.onopen = () => resolve();
-    ws!.onerror = () => reject(new Error("WebSocket error"));
-  });
-}
-
-
-function sendTranscriptSnapshot(): void {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  const snapshot = [...utterances, currentUtt].filter(
-    (u) =>
-      u.originalFinal ||
-      u.translationFinal ||
-      u.originalPartial ||
-      u.translationPartial,
-  );
-  if (!snapshot.length) return;
-  try {
-    ws.send(JSON.stringify({ type: "utterances", utterances: snapshot }));
-  } catch { /* socket closed between readyState check and send */ }
-}
-
-
-async function retryConnection(): Promise<void> {
-  if (connectionStatus !== "failed" || manualRetryInProgress) return;
-  manualRetryInProgress = true;
-  manualStopRequested = false;
-  resumeTranscriptOnNextSession = true;
-  setConnectionStatus("reconnecting");
-  setStatus("Đang thử kết nối lại…");
-
-  try {
-    await openWebSocket(lastWebSocketParams);
+const speechToText = new SpeechToText({
+  onTranscript: handleSttResult,
+  onLineReady: handleLineReady,
+  onAudioChunk: (chunk, lineId, isLastChunk) => {
+    textToSpeech.addAudioChunk(chunk, lineId, isLastChunk);
+  },
+  onSessionId: (id, isResume) => {
+    showSessionInfo(id);
+    if (isResume) sendTranscriptSnapshot();
+  },
+  onReconnecting: (attempt, maxAttempts) => {
+    setConnectionStatus("reconnecting");
+    setStatus(`Đang kết nối lại… (lần ${attempt}/${maxAttempts})`);
+  },
+  onReconnected: (downtimeMs, downtimeText) => {
     setConnectionStatus("connected");
-    setStatus("Đã kết nối lại thủ công");
-    if (pendingAudioOverflowed) {
-      currentUtt.originalFinal += "[mất âm thanh trong lúc chờ thử lại; buffer trình duyệt đầy]";
-      pendingAudioOverflowed = false;
+    setStatus(`Đã kết nối lại sau ${(downtimeMs / 1000).toFixed(1)}s`);
+    if (downtimeText) {
+      currentUtt.originalFinal += downtimeText;
       render();
     }
-    flushPendingAudio();
-  } catch (error) {
-    console.error("Manual reconnect failed", error);
-    resumeTranscriptOnNextSession = false;
+  },
+  onReconnectFailed: (message) => {
     setConnectionStatus("failed");
-    setStatus("Thử lại chưa thành công. Vui lòng kiểm tra mạng và thử lại.");
-  } finally {
-    manualRetryInProgress = false;
+    setStatus(message);
+  },
+  onError: (message) => stop(message),
+  onSessionDone: () => stop(),
+  onTranslationError: (message) => setStatus(`Translation failed: ${message}`),
+  onTtsFallback: (fromProvider, toProvider, reason) => {
+    setStatus(
+      `${fromProvider} TTS lỗi/hết quota; đã chuyển sang ${toProvider}: ${reason}`,
+    );
+  },
+  onTtsError: (message) => showTtsErrorBanner(message),
+  onTtsUsage: (usage) => {
+    ttsSessionUsage = addTtsUsage(ttsSessionUsage, usage);
+    updateTtsCostHint();
+  },
+  onStatusUpdate: setStatus,
+});
+
+function buildSpeechToTextConfig(): SpeechToTextConfig {
+  const contextText = $contextJson.value.trim();
+  if (contextText) {
+    try {
+      JSON.parse(contextText);
+    } catch (error) {
+      throw new Error(`Context JSON invalid: ${(error as Error).message}`);
+    }
   }
+
+  const ttsVoice = $ttsVoice.value || $voice.value;
+  return {
+    mode: $mode(),
+    targetLang: $targetLang.value,
+    langA: $langA.value,
+    langB: $langB.value,
+    langId: $langId.checked,
+    diarize: $diarization.checked,
+    voice: ttsVoice,
+    voiceB: currentTtsProvider === "soniox" ? $voiceB.value : ttsVoice,
+    contextB64: contextText ? b64Utf8(contextText) : undefined,
+    inputDevice: $inputDevice.value,
+    outputDevice: $outputDevice.value,
+    ttsProvider: $ttsProvider.value,
+    sttProvider: $sttProvider.value || "soniox",
+    translationProvider: $translationProvider.value || "soniox",
+    sttDelayMs: Math.round(currentSttDelaySeconds() * 1000),
+    isTtsEnabled: textToSpeech.getState().isTtsEnabled,
+  };
+}
+
+function sendTranscriptSnapshot(): void {
+  speechToText.sendTranscriptSnapshot([...utterances, currentUtt]);
+}
+
+async function retryConnection(): Promise<void> {
+  await speechToText.retryConnection();
+  setConnectionStatus(speechToText.getState().connectionStatus);
 }
 
 
@@ -1401,15 +1198,9 @@ function handleLineReady(data: SonioxSttResponse): void {
   const original = data.original_text || "";
   const translated = data.translated_text || "";
   if (!original && !translated) return;
-  if (typeof data.line_id === "number" && translated && $tts.checked) {
-    lineAudioQueue.registerLine(data.line_id);
-    lastRegisteredLineId = Math.max(lastRegisteredLineId, data.line_id);
-    audioLineReadyCount += 1;
-    if (nextLineIdToPlay === null && currentPlayingLineId === null) {
-      nextLineIdToPlay = lineAudioQueue.firstLineId;
-    }
-    logTtsLineProgress();
-    updateDelayStatusIndicator();
+  if (typeof data.line_id === "number" && translated) {
+    // Subscriber boundary: disabled TTS ignores the line without changing STT.
+    textToSpeech.registerLine(data.line_id);
   }
   utterances.push({
     speaker: data.speaker ?? null,
@@ -1466,17 +1257,7 @@ async function startRecorder(): Promise<void> {
 
 
   mediaRecorder.ondataavailable = (e: BlobEvent) => {
-    if (e.data.size > 0) {
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(e.data);
-      } else if (connectionStatus === "reconnecting" || connectionStatus === "failed") {
-        if (pendingAudioBlobs.length >= 100) {
-          pendingAudioBlobs.shift();
-          pendingAudioOverflowed = true;
-        }
-        pendingAudioBlobs.push(e.data);
-      }
-    }
+    if (e.data.size > 0) speechToText.sendAudio(e.data);
   };
 
   mediaRecorder.start(100);
@@ -1485,185 +1266,6 @@ async function startRecorder(): Promise<void> {
   // the "loud" signal we'd be listening to is the source audio itself, not
   // the user's voice, so it would immediately (and repeatedly) self-trigger.
   if ($barge.checked && $audioSource() === "microphone") startBargeVad(micStream);
-}
-
-// ---------------------------------------------------------------------------
-// Audio playback (Web Audio API)
-// ---------------------------------------------------------------------------
-function playPcmChunk(
-  chunk: Uint8Array,
-  lineId: number,
-  onEnded: () => void,
-): AudioBufferSourceNode | null {
-  if (!audioCtx) return null;
-  const evenLen = chunk.byteLength - (chunk.byteLength % 2);
-  const int16 = new Int16Array(chunk.buffer as ArrayBuffer, chunk.byteOffset, evenLen / 2);
-  const float32 = new Float32Array(int16.length);
-  for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
-  const buffer = audioCtx.createBuffer(1, float32.length, TTS_SAMPLE_RATE);
-  buffer.getChannelData(0).set(float32);
-  const source = audioCtx.createBufferSource();
-  source.buffer = buffer;
-  const playbackRate = currentTtsPlaybackRate();
-  // playbackRate thay đổi cả cao độ giọng nói (pitch); muốn giữ nguyên cao độ cần AudioWorklet/time-stretch riêng — chưa làm ở đây.
-  source.playbackRate.value = playbackRate;
-  const gainNode = audioCtx.createGain();
-  source.connect(gainNode);
-  gainNode.connect(audioCtx.destination);
-  // Gap-detection uses lastScheduledLineId (the last line ID actually handed
-  // to Web Audio), which is deliberately decoupled from currentPlayingLineId
-  // (the "a line is actively streaming" busy flag) — the busy flag is set
-  // *before* the first chunk of a line is scheduled, so comparing against it
-  // here would never detect the very first chunk of a new line as new.
-  const schedule = resolveTtsChunkSchedule(
-    audioCtx.currentTime,
-    nextPlayTime,
-    lastScheduledLineId,
-    lineId,
-    currentTtsDelaySeconds(),
-  );
-  if (schedule.isNewLine) lastScheduledLineId = schedule.currentLineId;
-  const startAt = schedule.startAt;
-  const playbackDuration = buffer.duration / playbackRate;
-  const endAt = startAt + playbackDuration;
-  const fadeDuration = Math.min(FADE_MS / 1000, playbackDuration / 2);
-  if (fadeDuration > 0) {
-    gainNode.gain.setValueAtTime(0, startAt);
-    gainNode.gain.linearRampToValueAtTime(1, startAt + fadeDuration);
-    gainNode.gain.setValueAtTime(1, endAt - fadeDuration);
-    gainNode.gain.linearRampToValueAtTime(0, endAt);
-  }
-  source.start(startAt);
-  // Ensure the AudioContext is running. If it was auto-suspended (browser
-  // policy or Electron idle), onended never fires and the queue stalls.
-  if (audioCtx.state === "suspended") {
-    void audioCtx.resume();
-  }
-  nextPlayTime = endAt;
-  activeLineSources.push(source);
-  source.onended = () => {
-    const i = activeLineSources.indexOf(source);
-    if (i !== -1) activeLineSources.splice(i, 1);
-    onEnded();
-  };
-  return source;
-}
-
-function interruptTtsAudio(): void {
-  playbackEpoch += 1;
-  const interruptedIds = lineAudioQueue.lineCount + (currentPlayingLineId === null ? 0 : 1);
-  interruptedAudioLineCount += interruptedIds;
-  lineAudioQueue.clear();
-  for (const s of activeLineSources) {
-    try { s.stop(); } catch { /* already stopped */ }
-  }
-  activeLineSources = [];
-  if (audioCtx) nextPlayTime = audioCtx.currentTime;
-  pendingChunkLineId = null;
-  pendingChunkEndsLine = false;
-  currentPlayingLineId = null;
-  activeLinePendingChunks = 0;
-  activeLineDoneScheduling = false;
-  activeLineAudioSeconds = 0;
-  lastScheduledLineId = null;
-  minimumAcceptedLineId = lastRegisteredLineId + 1;
-  nextLineIdToPlay = minimumAcceptedLineId;
-  updateDelayStatusIndicator();
-}
-
-function handleTtsAudio(
-  chunk: Uint8Array,
-  lineId: number,
-  lineAudioEnd: boolean,
-): void {
-  if (lineId < minimumAcceptedLineId) return;
-  lineAudioQueue.addChunk(lineId, chunk, lineAudioEnd);
-  if (nextLineIdToPlay === null) nextLineIdToPlay = lineAudioQueue.firstLineId;
-  streamActiveLine();
-  updateDelayStatusIndicator();
-  if (state !== "playing-file" || !fileAudio || fileTtsHeard) return;
-  fileTtsHeard = true;
-  fileAudio.volume = 0.1;
-}
-
-/**
- * Activate the next queued line (if none is active) and schedule every
- * chunk that has arrived for the active line so far. Unlike the old
- * batch-and-wait approach, this is safe to call every time a single new
- * chunk arrives — playback of a line starts on its first chunk instead of
- * waiting for the whole line to finish generating.
- */
-function streamActiveLine(): void {
-  if (!audioCtx) return;
-  if (currentPlayingLineId === null) {
-    if (nextLineIdToPlay === null) nextLineIdToPlay = lineAudioQueue.firstLineId;
-    const line = lineAudioQueue.takeReady(nextLineIdToPlay);
-    if (!line) return;
-    currentPlayingLineId = line.lineId;
-    activeLinePendingChunks = 0;
-    activeLineDoneScheduling = false;
-    activeLineAudioSeconds = 0;
-  }
-  const lineId = currentPlayingLineId;
-  const epoch = playbackEpoch;
-  let next = lineAudioQueue.takeNextChunk();
-  while (next !== null) {
-    const { chunk, isLast } = next;
-    activeLinePendingChunks += 1;
-    activeLineAudioSeconds += pcmChunkDurationSeconds(chunk);
-    playPcmChunk(chunk, lineId, () => {
-      if (epoch !== playbackEpoch) return;
-      activeLinePendingChunks -= 1;
-      maybeFinishActiveLine();
-    });
-    if (isLast) activeLineDoneScheduling = true;
-    next = lineAudioQueue.takeNextChunk();
-  }
-  maybeFinishActiveLine();
-}
-
-/** Once the active line's last chunk has finished playing, retire it and start the next. */
-function maybeFinishActiveLine(): void {
-  if (currentPlayingLineId === null) return;
-  if (!activeLineDoneScheduling || activeLinePendingChunks > 0) return;
-  const lineId = currentPlayingLineId;
-  const audioSeconds = activeLineAudioSeconds;
-  if (!lineAudioQueue.finishLine(lineId)) return;
-  audioLinePlayedCount += 1;
-  averageLineAudioSeconds = averageLineAudioSeconds * 0.8 + audioSeconds * 0.2;
-  currentPlayingLineId = null;
-  nextLineIdToPlay = lineAudioQueue.firstLineId ?? lineId + 1;
-  logTtsLineProgress();
-  updateDelayStatusIndicator();
-  streamActiveLine();
-  maybeFinishSessionAfterAudio();
-}
-
-function pcmChunkDurationSeconds(chunk: Uint8Array): number {
-  return chunk.byteLength / 2 / TTS_SAMPLE_RATE / currentTtsPlaybackRate();
-}
-
-function maybeFinishSessionAfterAudio(): void {
-  if (!backendSessionDone) return;
-  if (currentPlayingLineId !== null || lineAudioQueue.lineCount > 0) return;
-  logTtsLineProgress(true);
-  stop();
-}
-
-function logTtsLineProgress(force = false): void {
-  const accounted = audioLinePlayedCount + interruptedAudioLineCount;
-  const reachedMilestone =
-    (audioLineReadyCount > 0 && audioLineReadyCount % 10 === 0) ||
-    (accounted > 0 && accounted % 10 === 0);
-  if (!force && !reachedMilestone) return;
-  const summary =
-    `line_ready(audio)=${audioLineReadyCount}, played=${audioLinePlayedCount}, ` +
-    `interrupted=${interruptedAudioLineCount}, queued=${lineAudioQueue.lineCount}`;
-  if (force && audioLineReadyCount !== accounted) {
-    console.error(`[TTS line audit] MISMATCH: ${summary}`);
-  } else {
-    console.log(`[TTS line audit] ${summary}`);
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1699,10 +1301,11 @@ function tickBarge(): void {
   $bargeBar.style.width = `${pct}%`;
 
   const now = performance.now();
-  // activeLineSources includes sources scheduled to start in the future, so
-  // barge-in remains available during the configured playback delay.
+  // Scheduled sources count as audible so barge-in remains available during
+  // the configured playback delay.
   const ttsAudible =
-    activeLineSources.length > 0 || (state === "playing-file" && fileAudio != null && !fileAudio.paused);
+    textToSpeech.isAudible() ||
+    (state === "playing-file" && fileAudio != null && !fileAudio.paused);
 
   // A new TTS chunk just started playing after silence: remember when, so we
   // can suppress barge-in for a short grace window (the onset "pop" of TTS
@@ -1731,12 +1334,8 @@ function tickBarge(): void {
 }
 
 function triggerBargeIn(): void {
-  interruptTtsAudio();
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    try {
-      ws.send(JSON.stringify({ type: "barge" }));
-    } catch { /* ws closed */ }
-  }
+  textToSpeech.cancelAllAudio();
+  speechToText.sendBargeIn();
   setStatus("Barge-in: interrupted TTS");
 }
 
@@ -1754,40 +1353,13 @@ function stopBargeVad(): void {
 // ---------------------------------------------------------------------------
 // Session lifecycle
 // ---------------------------------------------------------------------------
-async function resetSession(): Promise<void> {
-  if (audioCtx && audioCtx.state !== "closed") {
-    await audioCtx.close().catch(() => undefined);
-  }
-  const nextAudioCtx = new AudioContext({ sampleRate: TTS_SAMPLE_RATE });
-  audioCtx = nextAudioCtx;
-  const devId = $outputDevice.value;
-  try {
-    await setAudioOutputDevice(nextAudioCtx, devId);
-  } catch (error) {
-    $outputDevice.value = "default";
-    saveDeviceId(OUTPUT_DEVICE_KEY, "default");
-    await setAudioOutputDevice(nextAudioCtx, "default").catch(() => undefined);
-    setStatus(`Selected speaker unavailable; switched to System Default (${(error as Error).message})`);
-  }
-  nextPlayTime = 0;
-  pendingChunkLineId = null;
-  pendingChunkEndsLine = false;
-  currentPlayingLineId = null;
-  activeLinePendingChunks = 0;
-  activeLineDoneScheduling = false;
-  activeLineAudioSeconds = 0;
-  lastScheduledLineId = null;
-  lineAudioQueue.clear();
-  nextLineIdToPlay = null;
-  activeLineSources = [];
-  playbackEpoch += 1;
-  lastRegisteredLineId = 0;
-  minimumAcceptedLineId = 1;
-  backendSessionDone = false;
-  audioLineReadyCount = 0;
-  audioLinePlayedCount = 0;
-  interruptedAudioLineCount = 0;
-  averageLineAudioSeconds = 3;
+function resetSession(): void {
+  textToSpeech.updateConfig({
+    outputDevice: $outputDevice.value,
+    ttsDelaySeconds: currentTtsDelaySeconds(),
+    playbackRate: currentTtsPlaybackRate(),
+  });
+  textToSpeech.resetSession();
   utterances = [];
   currentUtt = newUtt();
   feedAutoScroll = true;
@@ -1796,77 +1368,78 @@ async function resetSession(): Promise<void> {
   render();
 }
 
-async function start(ttsEnabled = false): Promise<void> {
-  sessionTtsEnabled = ttsEnabled;
-  setState("recording", undefined, ttsEnabled);
-  manualStopRequested = false;
+async function start(): Promise<void> {
+  setState("recording");
 
   try {
-    await resetSession();
+    resetSession();
+    await speechToText.start(buildSpeechToTextConfig());
     setConnectionStatus("connected");
-    await openWebSocket();
     await startRecorder();
-  } catch (err) {
-    console.error(err);
-    setState("idle", `Failed to start: ${(err as Error).message}`);
-    cleanup();
+  } catch (error) {
+    console.error(error);
+    stop(`Failed to start: ${(error as Error).message}`);
   }
 }
 
-
-async function playFile(ttsEnabled = false): Promise<void> {
+async function playFile(): Promise<void> {
   const url = $audioUrl.value.trim();
   if (!url) {
     setStatus("Enter an audio URL");
     return;
   }
 
-  sessionTtsEnabled = ttsEnabled;
-  setState("playing-file", undefined, ttsEnabled);
+  setState("playing-file");
   fileTtsHeard = false;
 
   try {
-    await resetSession();
+    resetSession();
     fileAudio = new Audio(url);
-    fileAudio.volume = 1.0;
+    fileAudio.volume = 1;
     await new Promise<void>((resolve, reject) => {
       fileAudio!.addEventListener("loadedmetadata", () => resolve(), { once: true });
-      fileAudio!.addEventListener("error", () => reject(new Error("audio load failed")), { once: true });
+      fileAudio!.addEventListener("error", () => reject(new Error("audio load failed")), {
+        once: true,
+      });
     });
-
-    await openWebSocket({
+    await speechToText.start(buildSpeechToTextConfig(), {
       audio_url: url,
       audio_duration: String(fileAudio.duration),
     });
-
+    setConnectionStatus("connected");
     await fileAudio.play();
-  } catch (err) {
-    console.error(err);
-    setState("idle", `Failed to play file: ${(err as Error).message}`);
-    cleanup();
+  } catch (error) {
+    console.error(error);
+    stop(`Failed to play file: ${(error as Error).message}`);
   }
 }
 
-
-function stop(): void {
-  manualStopRequested = true;
-  setState("idle");
+function stop(message?: string): void {
+  if (speechToText.getState().isListening) sendTranscriptSnapshot();
+  speechToText.stop();
+  cleanupSttInput();
+  // The source has ended, so discard outstanding playback. TTS enablement is
+  // intentionally preserved for the next session.
+  textToSpeech.cancelAllAudio();
+  setState("idle", message);
   setConnectionStatus("idle");
-  cleanup();
+
+  if ($historyPanel.classList.contains("open")) {
+    window.setTimeout(() => { void loadHistory(true); }, 300);
+  }
 }
 
-function cleanup(): void {
-  pendingAudioBlobs = [];
-  pendingAudioOverflowed = false;
-
-  sendTranscriptSnapshot();
-
+function cleanupSttInput(): void {
   stopBargeVad();
   if (mediaRecorder) {
     if (mediaRecorder.state !== "inactive") {
-      try { mediaRecorder.stop(); } catch { /* already stopped */ }
+      try {
+        mediaRecorder.stop();
+      } catch {
+        // Already stopped.
+      }
     }
-    mediaRecorder.stream?.getTracks().forEach((t) => t.stop());
+    mediaRecorder.stream?.getTracks().forEach((track) => track.stop());
   }
   mediaRecorder = null;
   micStream = null;
@@ -1874,44 +1447,32 @@ function cleanup(): void {
     fileAudio.pause();
     fileAudio = null;
   }
-  interruptTtsAudio();
-  if (ws) {
-    try { ws.close(); } catch { /* already closed */ }
-    ws = null;
-  }
-  if ($historyPanel.classList.contains("open")) {
-    // The backend flushes its final segment batch as the WebSocket session
-    // closes. A short delay avoids racing that transaction.
-    window.setTimeout(() => { void loadHistory(true); }, 300);
-  }
 }
 
-function setState(s: AppState, message?: string, ttsEnabled = false): void {
-  state = s;
-  const busy = s !== "idle";
-  if (busy) {
-    // Show "Stop" on the button that was clicked; hide the other action button.
-    if (ttsEnabled) {
-      $actionTtsBtn.querySelector<HTMLSpanElement>(".btn-label-tts")!.textContent = "■ Stop";
-      $actionTtsBtn.dataset.state = "running";
-      $actionTtsBtn.disabled = false;
-      $actionBtn.classList.add("hidden");
-    } else {
-      $actionLabel.textContent = "Stop";
-      $actionBtn.dataset.state = "running";
-      $actionBtn.disabled = false;
-      $actionTtsBtn.classList.add("hidden");
-    }
-  } else {
-    $actionBtn.classList.remove("hidden");
-    $actionTtsBtn.classList.remove("hidden");
-    $actionBtn.dataset.state = "idle";
-    $actionTtsBtn.dataset.state = "idle";
-    $actionLabel.textContent = mode === "file" ? "Play audio file" : "Start talking";
-    $actionTtsBtn.querySelector<HTMLSpanElement>(".btn-label-tts")!.textContent = "+ Đọc";
-    $actionBtn.disabled = mode === "file" && !$audioUrl.value.trim();
-    $actionTtsBtn.disabled = mode === "file" && !$audioUrl.value.trim();
-  }
+function renderTtsButton(): void {
+  const enabled = textToSpeech.getState().isTtsEnabled;
+  $actionTtsBtn.dataset.state = enabled ? "enabled" : "disabled";
+  $actionTtsBtn.setAttribute("aria-pressed", String(enabled));
+  $actionTtsBtn.querySelector<HTMLSpanElement>(".btn-label-tts")!.textContent =
+    enabled ? "TTS: Bật" : "TTS: Tắt";
+  $actionTtsBtn.title = enabled
+    ? "Tắt đọc bản dịch (STT vẫn tiếp tục)"
+    : "Bật đọc các bản dịch mới";
+}
+
+function setState(nextState: AppState, message?: string): void {
+  state = nextState;
+  const busy = nextState !== "idle";
+  $actionBtn.dataset.state = busy ? "running" : "idle";
+  $actionLabel.textContent = busy
+    ? "STT: Stop"
+    : mode === "file"
+      ? "STT: Play file"
+      : "STT: Start";
+  $actionBtn.disabled = !busy && mode === "file" && !$audioUrl.value.trim();
+
+  // Session configuration stays fixed while STT is active. The independent
+  // TTS button is deliberately excluded and remains clickable.
   $modeToggle.disabled = busy;
   $audioUrl.disabled = busy;
   $targetLang.disabled = busy;
@@ -1921,19 +1482,22 @@ function setState(s: AppState, message?: string, ttsEnabled = false): void {
   $voiceB.disabled = busy;
   $diarization.disabled = busy;
   $langId.disabled = busy;
-  $tts.disabled = busy;
   $inputDevice.disabled = busy;
   $outputDevice.disabled = busy;
   $btnTestInput.disabled = busy;
   $btnTestOutput.disabled = busy;
-  document.querySelectorAll<HTMLInputElement>("input[name=mode]").forEach((r) => (r.disabled = busy));
-  document.querySelectorAll<HTMLInputElement>("input[name=audio-source]").forEach((r) => (r.disabled = busy));
+  document.querySelectorAll<HTMLInputElement>("input[name=mode]").forEach(
+    (radio) => (radio.disabled = busy),
+  );
+  document.querySelectorAll<HTMLInputElement>("input[name=audio-source]").forEach(
+    (radio) => (radio.disabled = busy),
+  );
   syncBargeAvailability();
+  renderTtsButton();
+
   if (message !== undefined) setStatus(message);
-
-
-  else if (s === "recording") setStatus("Listening…");
-  else if (s === "playing-file") setStatus("Playing audio…");
+  else if (nextState === "recording") setStatus("Listening…");
+  else if (nextState === "playing-file") setStatus("Playing audio…");
   else setStatus("Ready");
 }
 
@@ -1991,14 +1555,9 @@ if ($ttsErrorClose) {
 }
 
 function updateDelayStatusIndicator(): void {
-  const scheduledPlaybackSeconds = audioCtx
-    ? Math.max(0, nextPlayTime - audioCtx.currentTime)
-    : 0;
-  const queuedAudioSeconds = lineAudioQueue.estimatedAudioSeconds(
-    pcmChunkDurationSeconds,
-    averageLineAudioSeconds,
-  );
-  const queuedLineDelaySeconds = lineAudioQueue.lineCount * currentTtsDelaySeconds();
+  const scheduledPlaybackSeconds = textToSpeech.getScheduledPlaybackSeconds();
+  const queuedAudioSeconds = textToSpeech.getQueuedAudioSeconds();
+  const queuedLineDelaySeconds = textToSpeech.getQueuedLineDelaySeconds();
   const totalDelaySeconds =
     currentSttDelaySeconds() +
     scheduledPlaybackSeconds +
@@ -2013,7 +1572,6 @@ function updateDelayStatusIndicator(): void {
 }
 
 function setConnectionStatus(s: ConnectionStatus): void {
-  connectionStatus = s;
   $connectionDot.classList.toggle("hidden", s === "idle");
   $connectionDot.classList.toggle("green", s === "connected");
   $connectionDot.classList.toggle("yellow", s === "reconnecting");
@@ -2082,20 +1640,43 @@ $actionBtn.addEventListener("click", () => {
   if (state !== "idle") {
     stop();
   } else if (mode === "file") {
-    void playFile(false);
+    void playFile();
   } else {
-    void start(false);
+    void start();
   }
 });
 
-$actionTtsBtn.addEventListener("click", () => {
-  if (state !== "idle") {
-    stop();
-  } else if (mode === "file") {
-    void playFile(true);
+async function toggleTextToSpeech(): Promise<void> {
+  if (textToSpeech.getState().isTtsEnabled) {
+    textToSpeech.disable();
+    speechToText.setTtsEnabled(false);
+    setStatus(
+      speechToText.getState().isListening
+        ? "TTS đã tắt; STT vẫn đang nghe"
+        : "TTS đã tắt",
+    );
   } else {
-    void start(true);
+    try {
+      await textToSpeech.enable({
+        outputDevice: $outputDevice.value,
+        ttsDelaySeconds: currentTtsDelaySeconds(),
+        playbackRate: currentTtsPlaybackRate(),
+      });
+      speechToText.setTtsEnabled(true);
+      setStatus(
+        speechToText.getState().isListening
+          ? "TTS đã bật cho các câu dịch mới"
+          : "TTS đã bật",
+      );
+    } catch {
+      // TextToSpeech already surfaced a user-facing error.
+    }
   }
+  renderTtsButton();
+}
+
+$actionTtsBtn.addEventListener("click", () => {
+  void toggleTextToSpeech();
 });
 
 $modeToggle.addEventListener("click", () => {
@@ -2106,11 +1687,16 @@ $audioUrl.addEventListener("input", () => {
   if (state === "idle" && mode === "file") {
     const hasUrl = Boolean($audioUrl.value.trim());
     $actionBtn.disabled = !hasUrl;
-    $actionTtsBtn.disabled = !hasUrl;
   }
 });
 
 setMode("file");
+renderTtsButton();
+
+window.addEventListener("beforeunload", () => {
+  speechToText.stop();
+  void textToSpeech.cleanup();
+});
 
 // ---------------------------------------------------------------------------
 // Transcript download (client-side, no PII sent back)
@@ -2145,7 +1731,7 @@ function downloadTranscriptJson(): void {
     return;
   }
   const payload = {
-    session_id: sessionId,
+    session_id: speechToText.getState().sessionId,
     mode: $mode(),
     saved_at: new Date().toISOString(),
     utterances: items.map((u) => ({

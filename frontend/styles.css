@@ -258,7 +258,7 @@ select:disabled,
   cursor: not-allowed;
 }
 
-/* Secondary action button — STT + TTS (speak translation) */
+/* Independent TTS subscriber toggle. */
 .action-btn-tts {
   flex: 0 0 auto;
   background: #059669;
@@ -270,15 +270,23 @@ select:disabled,
   background: #047857;
 }
 
-.action-btn-tts[data-state="running"] {
-  background: #dc2626;
+.action-btn-tts[data-state="enabled"] {
+  background: #059669;
 }
 
-.action-btn-tts[data-state="running"]:hover {
-  background: #b91c1c;
+.action-btn-tts[data-state="disabled"] {
+  background: #64748b;
+}
+
+.action-btn-tts[data-state="disabled"]:hover {
+  background: #475569;
 }
 
 [data-theme="dark"] .action-btn-tts {
+  background: #64748b;
+}
+
+[data-theme="dark"] .action-btn-tts[data-state="enabled"] {
   background: #10b981;
 }
 

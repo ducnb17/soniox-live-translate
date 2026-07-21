@@ -11,7 +11,7 @@ import random
 import sys
 import time
 from collections.abc import Awaitable, Callable, Iterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 import websockets
@@ -444,6 +444,7 @@ async def translation_websocket(
     voice: str = "Maya",
     voice_b: str | None = None,
     tts: bool = True,
+    tts_enabled: bool | None = None,
     context_b64: str | None = None,
     audio_url: str | None = None,
     audio_duration: float | None = None,
@@ -554,8 +555,12 @@ async def translation_websocket(
             pending_segments.clear()
             await add_segments_batch(batch)
 
+    # Transport availability and subscriber state are intentionally distinct.
+    # Existing clients can still opt out of the transport with `tts=false`;
+    # the frontend keeps it available and toggles `tts_enabled` dynamically.
     tts_queue: asyncio.Queue | None = asyncio.Queue() if tts else None
     tts_state: dict = new_tts_state(directions)
+    tts_state["enabled"] = tts and (tts if tts_enabled is None else tts_enabled)
     use_external_tts = tts and tts_provider != "soniox"
     external_tts_task: asyncio.Task | None = None
     if use_external_tts and tts_queue is not None:
@@ -587,21 +592,47 @@ async def translation_websocket(
         elif data.get("type") == "barge":
             if tts_queue is not None:
                 await trigger_barge(tts_queue, tts_state)
-                try:
-                    await browser_ws.send_json({"barge_ack": True})
-                except Exception:
-                    pass
+            try:
+                await browser_ws.send_json({"barge_ack": True})
+            except Exception:
+                pass
+        elif data.get("type") == "tts_control":
+            enabled = bool(data.get("enabled"))
+            was_enabled = bool(tts_state.get("enabled"))
+            tts_state["enabled"] = enabled and tts_queue is not None
+            if was_enabled and not enabled and tts_queue is not None:
+                # Cancel queued/in-flight synthesis, but leave STT untouched.
+                await trigger_barge(tts_queue, tts_state)
+            try:
+                await browser_ws.send_json({
+                    "type": "tts_control_ack",
+                    "enabled": tts_state["enabled"],
+                })
+            except Exception:
+                pass
 
     _on_text["fn"] = on_text
 
     async def do_browser_to_stt(stt_ws):
         if audio_url and audio_duration:
-            await stream_url_to_stt(
-                audio_url=audio_url,
-                duration=audio_duration,
-                browser_ws=browser_ws,
-                stt_ws=stt_ws,
+            control_task = asyncio.create_task(
+                pipe_browser_to_stt(
+                    browser_ws=browser_ws,
+                    stt_ws=stt_ws,
+                    on_text=_on_text["fn"],
+                )
             )
+            try:
+                await stream_url_to_stt(
+                    audio_url=audio_url,
+                    duration=audio_duration,
+                    browser_ws=browser_ws,
+                    stt_ws=stt_ws,
+                )
+            finally:
+                control_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await control_task
             return
         await pipe_browser_to_stt(
             browser_ws=browser_ws, stt_ws=stt_ws, on_text=_on_text["fn"]
@@ -682,8 +713,10 @@ async def translation_websocket(
                 # Streams belong to the previous TTS WebSocket and cannot be
                 # reused after reconnecting.
                 previous_line_counter = tts_state.get("line_counter", 0)
+                previous_tts_enabled = bool(tts_state.get("enabled"))
                 tts_state = new_tts_state(directions)
                 tts_state["line_counter"] = previous_line_counter
+                tts_state["enabled"] = previous_tts_enabled
 
             if tts and not use_external_tts and tts_ws is None:
                 tts_ws = await websockets.connect(

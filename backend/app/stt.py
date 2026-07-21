@@ -158,11 +158,11 @@ async def handle_stt(
     ) -> None:
         for chunk, chunk_direction, line_payload in tts_chunks:
             await browser_ws.send_json(line_payload)
-            if tts_queue is not None and chunk:
+            if tts_queue is not None and tts_state.get("enabled", True) and chunk:
                 await tts_queue.put(
                     (TTS_TEXT, chunk, chunk_direction, line_payload["line_id"])
                 )
-        if tts_queue is not None:
+        if tts_queue is not None and tts_state.get("enabled", True):
             await tts_queue.put((TTS_END, direction))
         if on_endpoint is not None:
             await on_endpoint()
@@ -317,9 +317,10 @@ async def handle_stt(
                                     pending_tts_chunks.append((chunk, target, line_payload))
                                 else:
                                     await browser_ws.send_json(line_payload)
-                                    await tts_queue.put(
-                                        (TTS_TEXT, chunk, target, line_payload["line_id"])
-                                    )
+                                    if tts_state.get("enabled", True):
+                                        await tts_queue.put(
+                                            (TTS_TEXT, chunk, target, line_payload["line_id"])
+                                        )
                     text_pushed = True
                 else:
                     if token.get("is_final"):

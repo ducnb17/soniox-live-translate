@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*.*.*"
+      - "electron-v*.*.*"
 
 permissions:
   contents: write
@@ -138,13 +139,12 @@ jobs:
             ## Soniox Live Translate ${{ github.ref_name }}
 
             ### Có gì mới
-            - Sửa lỗi audio TTS đến trễ bị nhận nhầm là câu mới và chèn delay giữa câu
-            - Gắn `line_id` thật xuyên suốt từ transcript đến từng binary PCM
-            - Chia bản dịch thành dòng ngắn tối đa 80 ký tự, ưu tiên dấu câu, dấu phẩy rồi từ hoàn chỉnh
-            - Hàng đợi Read mode phát tuần tự tuyệt đối từng dòng và không tự động drop khi backlog lớn
-            - Chỉ chuyển sang dòng tiếp theo sau khi toàn bộ audio dòng hiện tại phát xong
-            - Chỉ báo “Đang xử lý” phản ánh backlog audio thực tế; thêm audit số dòng nhận/phát
-            - Giữ `line_id` tăng liên tục qua reconnect và hỗ trợ đầy đủ các TTS provider ngoài Soniox
+            - Tách hoàn toàn state và lifecycle của STT và TTS
+            - Thêm hai nút STT/TTS độc lập; TTS luôn có thể bật/tắt khi STT đang nghe
+            - Tắt TTS chỉ hủy audio/synthesis, không đóng WebSocket hoặc xóa transcript
+            - Bật lại TTS chỉ đọc các câu dịch mới, không restart STT và không phát lại câu cũ
+            - Thêm giao thức subscription TTS động cho cả microphone và audio file
+            - Bổ sung kiểm thử hồi quy cho toggle độc lập và luồng dữ liệu một chiều
 
             ### Cài đặt trên Windows
             1. Tải file `.exe` bên dưới

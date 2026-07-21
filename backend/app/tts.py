@@ -28,6 +28,7 @@ State
         },
         "line_counter": 0,
         "stt_done": False,
+        "enabled": True,
         "barge_epoch": 0,
     }
 
