@@ -27,7 +27,7 @@ import {
 } from "./conversation-api";
 import { addTtsUsage, emptyTtsUsage, formatTtsCostHint } from "./tts-usage";
 import { resolveTtsChunkSchedule } from "./tts-playback";
-import { StrictLineAudioQueue, type BufferedAudioLine } from "./tts-line-queue";
+import { StrictLineAudioQueue } from "./tts-line-queue";
 
 
 // UTF-8 safe base64 (handles non-ASCII context text).
@@ -501,8 +501,8 @@ function currentSttDelaySeconds(): number {
 function readTtsDelaySeconds(): number {
   let saved: string | null = null;
   try { saved = localStorage.getItem(TTS_DELAY_SECONDS_KEY); } catch { /* storage disabled */ }
-  const value = Number(saved ?? "1");
-  return Number.isFinite(value) && value >= 0 && value <= 10 ? value : 1;
+  const value = Number(saved ?? "0");
+  return Number.isFinite(value) && value >= 0 && value <= 10 ? value : 0;
 }
 
 function updateTtsDelaySelection(): void {
@@ -513,7 +513,7 @@ function updateTtsDelaySelection(): void {
 
 function currentTtsDelaySeconds(): number {
   const value = $ttsDelay.valueAsNumber;
-  return Number.isFinite(value) && value >= 0 && value <= 10 ? value : 1;
+  return Number.isFinite(value) && value >= 0 && value <= 10 ? value : 0;
 }
 
 function readTtsPlaybackRate(): number {
@@ -1040,7 +1040,9 @@ let resumeTranscriptOnNextSession = false;
 let feedAutoScroll = true;
 
 // Read-mode TTS queue: deliberately unbounded so backlog increases latency,
-// never data loss. A line becomes playable only after its final chunk arrives.
+// never data loss. A line becomes eligible to start streaming as soon as it
+// is next in sequence — playback of its chunks starts immediately and keeps
+// pace with arrival, instead of waiting for the whole line to be generated.
 const lineAudioQueue = new StrictLineAudioQueue<Uint8Array>();
 let nextLineIdToPlay: number | null = null;
 let activeLineSources: AudioBufferSourceNode[] = [];
@@ -1052,6 +1054,17 @@ let audioLineReadyCount = 0;
 let audioLinePlayedCount = 0;
 let interruptedAudioLineCount = 0;
 let averageLineAudioSeconds = 3;
+// Line ID used purely for Web Audio gap-detection (whether to insert the
+// configured inter-line delay). Decoupled from currentPlayingLineId, which
+// is the "a line is actively streaming" busy flag.
+let lastScheduledLineId: number | null = null;
+// Chunks of the active line that have been scheduled for playback but have
+// not yet finished playing (onEnded not fired).
+let activeLinePendingChunks = 0;
+// True once the final chunk of the active line has been scheduled.
+let activeLineDoneScheduling = false;
+// Running total of the active line's audio duration, for averageLineAudioSeconds.
+let activeLineAudioSeconds = 0;
 
 // Barge-in VAD state
 let bargeAnalyser: AnalyserNode | null = null;
@@ -1483,14 +1496,19 @@ function playPcmChunk(
   const gainNode = audioCtx.createGain();
   source.connect(gainNode);
   gainNode.connect(audioCtx.destination);
+  // Gap-detection uses lastScheduledLineId (the last line ID actually handed
+  // to Web Audio), which is deliberately decoupled from currentPlayingLineId
+  // (the "a line is actively streaming" busy flag) — the busy flag is set
+  // *before* the first chunk of a line is scheduled, so comparing against it
+  // here would never detect the very first chunk of a new line as new.
   const schedule = resolveTtsChunkSchedule(
     audioCtx.currentTime,
     nextPlayTime,
-    currentPlayingLineId,
+    lastScheduledLineId,
     lineId,
     currentTtsDelaySeconds(),
   );
-  if (schedule.isNewLine) currentPlayingLineId = schedule.currentLineId;
+  if (schedule.isNewLine) lastScheduledLineId = schedule.currentLineId;
   const startAt = schedule.startAt;
   const playbackDuration = buffer.duration / playbackRate;
   const endAt = startAt + playbackDuration;
@@ -1525,6 +1543,10 @@ function interruptTtsAudio(): void {
   pendingChunkLineId = null;
   pendingChunkEndsLine = false;
   currentPlayingLineId = null;
+  activeLinePendingChunks = 0;
+  activeLineDoneScheduling = false;
+  activeLineAudioSeconds = 0;
+  lastScheduledLineId = null;
   minimumAcceptedLineId = lastRegisteredLineId + 1;
   nextLineIdToPlay = minimumAcceptedLineId;
   updateDelayStatusIndicator();
@@ -1538,41 +1560,55 @@ function handleTtsAudio(
   if (lineId < minimumAcceptedLineId) return;
   lineAudioQueue.addChunk(lineId, chunk, lineAudioEnd);
   if (nextLineIdToPlay === null) nextLineIdToPlay = lineAudioQueue.firstLineId;
-  tryPlayNextLine();
+  streamActiveLine();
   updateDelayStatusIndicator();
   if (state !== "playing-file" || !fileAudio || fileTtsHeard) return;
   fileTtsHeard = true;
   fileAudio.volume = 0.1;
 }
 
-function tryPlayNextLine(): void {
-  if (!audioCtx || currentPlayingLineId !== null) return;
-  if (nextLineIdToPlay === null) nextLineIdToPlay = lineAudioQueue.firstLineId;
-  const line = lineAudioQueue.takeReady(nextLineIdToPlay);
-  if (!line) return;
-  playBufferedLine(line);
-}
-
-function playBufferedLine(line: BufferedAudioLine<Uint8Array>): void {
-  const epoch = playbackEpoch;
-  let remainingChunks = line.chunks.length;
-  const lineAudioSeconds = line.chunks.reduce(
-    (total, chunk) => total + pcmChunkDurationSeconds(chunk),
-    0,
-  );
-  currentPlayingLineId = null;
-  for (const chunk of line.chunks) {
-    playPcmChunk(chunk, line.lineId, () => {
-      if (epoch !== playbackEpoch) return;
-      remainingChunks -= 1;
-      if (remainingChunks === 0) finishPlayingLine(line.lineId, lineAudioSeconds);
-    });
+/**
+ * Activate the next queued line (if none is active) and schedule every
+ * chunk that has arrived for the active line so far. Unlike the old
+ * batch-and-wait approach, this is safe to call every time a single new
+ * chunk arrives — playback of a line starts on its first chunk instead of
+ * waiting for the whole line to finish generating.
+ */
+function streamActiveLine(): void {
+  if (!audioCtx) return;
+  if (currentPlayingLineId === null) {
+    if (nextLineIdToPlay === null) nextLineIdToPlay = lineAudioQueue.firstLineId;
+    const line = lineAudioQueue.takeReady(nextLineIdToPlay);
+    if (!line) return;
+    currentPlayingLineId = line.lineId;
+    activeLinePendingChunks = 0;
+    activeLineDoneScheduling = false;
+    activeLineAudioSeconds = 0;
   }
-  if (remainingChunks === 0) finishPlayingLine(line.lineId, lineAudioSeconds);
-  updateDelayStatusIndicator();
+  const lineId = currentPlayingLineId;
+  const epoch = playbackEpoch;
+  let next = lineAudioQueue.takeNextChunk();
+  while (next !== null) {
+    const { chunk, isLast } = next;
+    activeLinePendingChunks += 1;
+    activeLineAudioSeconds += pcmChunkDurationSeconds(chunk);
+    playPcmChunk(chunk, lineId, () => {
+      if (epoch !== playbackEpoch) return;
+      activeLinePendingChunks -= 1;
+      maybeFinishActiveLine();
+    });
+    if (isLast) activeLineDoneScheduling = true;
+    next = lineAudioQueue.takeNextChunk();
+  }
+  maybeFinishActiveLine();
 }
 
-function finishPlayingLine(lineId: number, audioSeconds: number): void {
+/** Once the active line's last chunk has finished playing, retire it and start the next. */
+function maybeFinishActiveLine(): void {
+  if (currentPlayingLineId === null) return;
+  if (!activeLineDoneScheduling || activeLinePendingChunks > 0) return;
+  const lineId = currentPlayingLineId;
+  const audioSeconds = activeLineAudioSeconds;
   if (!lineAudioQueue.finishLine(lineId)) return;
   audioLinePlayedCount += 1;
   averageLineAudioSeconds = averageLineAudioSeconds * 0.8 + audioSeconds * 0.2;
@@ -1580,7 +1616,7 @@ function finishPlayingLine(lineId: number, audioSeconds: number): void {
   nextLineIdToPlay = lineAudioQueue.firstLineId ?? lineId + 1;
   logTtsLineProgress();
   updateDelayStatusIndicator();
-  tryPlayNextLine();
+  streamActiveLine();
   maybeFinishSessionAfterAudio();
 }
 
@@ -1718,6 +1754,10 @@ async function resetSession(): Promise<void> {
   pendingChunkLineId = null;
   pendingChunkEndsLine = false;
   currentPlayingLineId = null;
+  activeLinePendingChunks = 0;
+  activeLineDoneScheduling = false;
+  activeLineAudioSeconds = 0;
+  lastScheduledLineId = null;
   lineAudioQueue.clear();
   nextLineIdToPlay = null;
   activeLineSources = [];

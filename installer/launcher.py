@@ -209,6 +209,12 @@ def main() -> None:
 
     log.info("server ready  port=%d  url=%s", PORT, start_url)
 
+    # Electron owns the window and tray; this process only hosts the server.
+    if os.environ.get("ELECTRON_HOST"):
+        stop.wait()
+        log.info("launcher exit (electron mode)")
+        return
+
     import webview
     window = webview.create_window(
         "Soniox Live Translate",

@@ -1,0 +1,141 @@
+name: Release Electron Desktop App
+
+on:
+  push:
+    tags:
+      - "electron-v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────
+      - uses: actions/checkout@v4
+
+      # ── 2. Node 20 + pnpm ────────────────────────────────────────────────
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install pnpm
+        shell: pwsh
+        run: npm install -g pnpm@9.12.0
+
+      - name: Install frontend deps
+        shell: pwsh
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frontend
+        shell: pwsh
+        working-directory: frontend
+        run: pnpm run build
+
+      - name: Verify frontend dist
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "frontend\dist\index.html")) {
+            throw "Frontend build failed — dist/index.html not found"
+          }
+          Write-Host "Frontend OK"
+
+      # ── 3. Python + PyInstaller ───────────────────────────────────────────
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Python deps
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r backend/requirements.txt
+          python -m pip install packaging pyinstaller pystray pillow pywebview
+
+      - name: Copy backend/app to root
+        shell: pwsh
+        run: Copy-Item -Recurse -Force backend\app app
+
+      - name: Build with PyInstaller
+        shell: pwsh
+        run: |
+          $env:PYTHONPATH = "$pwd"
+          python -m PyInstaller `
+            installer\spec.spec `
+            --distpath dist_win `
+            --workpath build_win `
+            --noconfirm `
+            --log-level WARN
+
+      - name: Verify exe
+        shell: pwsh
+        run: |
+          $exe = "dist_win\SonioxLiveTranslate\SonioxLiveTranslate.exe"
+          if (-not (Test-Path $exe)) { throw "Backend exe not found" }
+          $mb = [math]::Round((Get-Item $exe).Length / 1MB, 1)
+          Write-Host "SonioxLiveTranslate.exe ($mb MB)"
+
+      # ── 4. Copy backend into Electron resources ───────────────────────────
+      - name: Copy backend build to electron/resources/backend
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path electron\resources | Out-Null
+          Copy-Item -Recurse -Force "dist_win\SonioxLiveTranslate" "electron\resources\backend"
+          Write-Host "Backend copied to electron/resources/backend"
+
+      # ── 5. Electron: install deps, icons, package ─────────────────────────
+      - name: Install Electron deps
+        shell: pwsh
+        working-directory: electron
+        run: npm install
+
+      - name: Build icons
+        shell: pwsh
+        working-directory: electron
+        run: npm run build:icons
+
+      - name: Build Electron installer (NSIS)
+        shell: pwsh
+        working-directory: electron
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: npx electron-builder --win
+
+      - name: Verify Electron installer
+        shell: pwsh
+        run: |
+          $f = Get-ChildItem electron\dist -Filter "*.exe" -ErrorAction SilentlyContinue |
+               Select-Object -First 1
+          if (-not $f) { throw "No Electron installer .exe produced" }
+          $mb = [math]::Round($f.Length / 1MB, 1)
+          Write-Host "Electron installer: $($f.Name) ($mb MB)"
+
+      # ── 6. GitHub Release ─────────────────────────────────────────────────
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          files: electron/dist/*.exe
+          generate_release_notes: true
+          body: |
+            ## Soniox Live Translate (Desktop / Electron) ${{ github.ref_name }}
+
+            Bản cài đặt **desktop app độc lập** — cửa sổ riêng, icon riêng trên
+            Desktop/Start Menu/Taskbar, không mở tab trình duyệt.
+
+            ### Cài đặt trên Windows
+            1. Tải file `.exe` bên dưới
+            2. Chạy installer → cài vào `Program Files`
+            3. Mở app từ Desktop / Start Menu
+            4. Lần đầu: nhập API key trong trang Setup → **Save**
+
+            ### Yêu cầu
+            - Windows 10/11 (64-bit)
+            - Không cần cài Chrome/Edge/Python/Node — app chạy độc lập
+
+            > Bản cài đặt "cổ điển" (pywebview) vẫn được phát hành riêng
+            > qua tag `v*.*.*` và không bị ảnh hưởng.
