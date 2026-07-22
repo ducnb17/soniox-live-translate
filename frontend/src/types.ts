@@ -10,6 +10,10 @@ export interface SonioxToken {
 export interface SonioxSttResponse {
   type?: string;
   line_id?: number;
+  utterance_id?: number;
+  sequence?: number;
+  text?: string;
+  is_final?: boolean;
   request_id?: string;
   epoch?: number;
   byte_length?: number;

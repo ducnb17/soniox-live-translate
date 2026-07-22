@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import json
 from types import SimpleNamespace
 import pytest
 
@@ -12,12 +14,30 @@ class RecordingBrowser:
     def __init__(self):
         self.json_messages = []
         self.audio = []
+        self.audio_event = asyncio.Event()
 
     async def send_json(self, payload):
         self.json_messages.append(payload)
 
     async def send_bytes(self, payload):
         self.audio.append(payload)
+        self.audio_event.set()
+
+
+class FakeSonioxSocket:
+    def __init__(self):
+        self.sent = []
+        self.responses = asyncio.Queue()
+        self.closed = False
+
+    async def send(self, payload):
+        self.sent.append(json.loads(payload))
+
+    async def recv(self):
+        return await self.responses.get()
+
+    async def close(self):
+        self.closed = True
 
 
 class ImmediateProvider:
@@ -192,4 +212,114 @@ async def test_soniox_builtin_uses_cancellable_websocket_synthesizer():
     assert calls == [("hello", "Maya", "en")]
     assert browser.audio == [b"soniox-pcm"]
     assert any(m.get("type") == "line_audio_complete" for m in browser.json_messages)
+    await controller.close()
+
+
+async def test_soniox_realtime_stream_forwards_text_and_audio_incrementally():
+    tts_cache.clear()
+    browser = RecordingBrowser()
+    soniox = FakeSonioxSocket()
+
+    async def connect(*_args, **_kwargs):
+        return soniox
+
+    controller = TtsSessionController(
+        browser,
+        provider_factory=lambda _pid, _key: ImmediateProvider(),
+        realtime_connector=connect,
+    )
+    controller._worker = asyncio.create_task(controller._worker_loop())
+    await controller.handle_command({
+        "type": "configure",
+        "enabled": True,
+        "provider": "soniox",
+        "voice": "Maya",
+        "mode": "one_way",
+        "target_lang": "vi",
+        "realtime_streaming": True,
+        "epoch": 0,
+    })
+    stream_id = soniox.sent[0]["stream_id"]
+    assert soniox.sent[0]["model"] == "tts-rt-v1"
+    assert soniox.sent[0]["audio_format"] == "pcm_s16le"
+    assert soniox.sent[0]["sample_rate"] == 24000
+
+    first = {
+        "type": "stream_text", "request_id": "s:rt:1", "line_id": 1,
+        "text": "xin ", "direction": "vi", "voice": "Maya",
+        "sequence": 1, "epoch": 0,
+    }
+    await controller.handle_command(first)
+    await controller.handle_command(first)  # duplicate sequence is ignored
+    await controller.handle_command({
+        **first, "text": "chào", "sequence": 2,
+    })
+    await controller.handle_command({
+        "type": "stream_end", "request_id": "s:rt:1", "epoch": 0,
+    })
+
+    text_frames = [message for message in soniox.sent if "text" in message]
+    assert [(m["text"], m["text_end"]) for m in text_frames] == [
+        ("xin ", False), ("chào", False), ("", True),
+    ]
+    await soniox.responses.put(json.dumps({
+        "stream_id": stream_id,
+        "audio": base64.b64encode(b"first").decode(),
+        "audio_end": False,
+    }))
+    await soniox.responses.put(json.dumps({
+        "stream_id": stream_id,
+        "audio": base64.b64encode(b"last").decode(),
+        "audio_end": True,
+    }))
+    await soniox.responses.put(json.dumps({"stream_id": stream_id, "terminated": True}))
+
+    await asyncio.wait_for(browser.audio_event.wait(), 1)
+    for _ in range(20):
+        if len(browser.audio) == 2 and any(
+            m.get("type") == "line_audio_complete" for m in browser.json_messages
+        ):
+            break
+        await asyncio.sleep(0)
+    assert browser.audio == [b"first", b"last"]
+    metas = [m for m in browser.json_messages if m.get("type") == "audio_chunk_meta"]
+    assert [m["line_audio_end"] for m in metas] == [False, True]
+    usage = next(m for m in browser.json_messages if m.get("type") == "tts_usage")
+    assert usage["characters"] == len("xin chào")
+    await controller.close()
+
+
+async def test_soniox_prewarm_error_sets_retryable_error_state():
+    browser = RecordingBrowser()
+    soniox = FakeSonioxSocket()
+
+    async def connect(*_args, **_kwargs):
+        return soniox
+
+    controller = TtsSessionController(
+        browser,
+        provider_factory=lambda _pid, _key: ImmediateProvider(),
+        realtime_connector=connect,
+    )
+    controller._worker = asyncio.create_task(controller._worker_loop())
+    await controller.handle_command({
+        "type": "configure", "enabled": True, "provider": "soniox",
+        "voice": "Maya", "target_lang": "vi",
+        "realtime_streaming": True, "epoch": 0,
+    })
+    await soniox.responses.put(json.dumps({
+        "stream_id": soniox.sent[0]["stream_id"],
+        "error_code": 401,
+        "error_message": "invalid api key",
+    }))
+    for _ in range(20):
+        if any(m.get("state") == "error" for m in browser.json_messages):
+            break
+        await asyncio.sleep(0)
+
+    assert controller.enabled is False
+    assert soniox.closed is True
+    error = next(m for m in browser.json_messages if m.get("type") == "tts_error")
+    assert "invalid api key" in error["message"]
+    assert browser.json_messages[-1]["state"] == "error"
     await controller.close()

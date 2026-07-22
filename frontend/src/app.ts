@@ -478,15 +478,17 @@ interface ProviderInfo {
 let ttsProviders: TtsProviderInfo[] = [];
 let currentTtsProvider = "soniox";
 let ttsSessionUsage = emptyTtsUsage();
-const STT_DELAY_SECONDS_KEY = "sttDelaySeconds";
+// Versioned so beta.5 migrates the former 1.5 s default to Soniox's
+// low-latency 500 ms endpoint recommendation without touching other settings.
+const STT_DELAY_SECONDS_KEY = "sttDelaySecondsRtV1";
 const TTS_DELAY_SECONDS_KEY = "ttsDelaySeconds";
 const TTS_PLAYBACK_RATE_KEY = "ttsPlaybackRate";
 
 function readSttDelaySeconds(): number {
   let saved: string | null = null;
   try { saved = localStorage.getItem(STT_DELAY_SECONDS_KEY); } catch { /* storage disabled */ }
-  const value = Number(saved ?? "1.5");
-  return Number.isFinite(value) && value >= 0 && value <= 10 ? value : 1.5;
+  const value = Number(saved ?? "0.5");
+  return Number.isFinite(value) && value >= 0.5 && value <= 10 ? value : 0.5;
 }
 
 function updateSttDelaySelection(): void {
@@ -497,7 +499,7 @@ function updateSttDelaySelection(): void {
 
 function currentSttDelaySeconds(): number {
   const value = $sttDelay.valueAsNumber;
-  return Number.isFinite(value) && value >= 0 && value <= 10 ? value : 1.5;
+  return Number.isFinite(value) && value >= 0.5 && value <= 10 ? value : 0.5;
 }
 
 function readTtsDelaySeconds(): number {
@@ -1063,6 +1065,7 @@ let activeLinePendingChunks = 0;
 let activeLineDoneScheduling = false;
 // Running total of the active line's audio duration, for averageLineAudioSeconds.
 let activeLineAudioSeconds = 0;
+const skippedRealtimeUtterances = new Set<number>();
 
 // Barge-in VAD state
 let bargeAnalyser: AnalyserNode | null = null;
@@ -1243,6 +1246,16 @@ function handleSttWebSocketMessage(event: MessageEvent): void {
         return;
       }
 
+      if (data.type === "translation_chunk") {
+        handleTranslationChunk(data);
+        return;
+      }
+
+      if (data.type === "translation_end") {
+        handleTranslationEnd(data);
+        return;
+      }
+
       if (data.type === "stt_state") return;
 
             if (data.error_code || data.error_message) {
@@ -1361,26 +1374,18 @@ function handleLineReady(data: SonioxSttResponse): void {
   const translated = data.translated_text || "";
   if (!original && !translated) return;
   const lineId = data.line_id;
-  const sentToTts = typeof lineId === "number" && Boolean(translated) && ttsSession.speak({
+  const sentToTts = !usesRealtimeSonioxPipeline()
+    && typeof lineId === "number"
+    && Boolean(translated)
+    && ttsSession.speak({
     requestId: `${sessionId || "session"}:${lineId}`,
     lineId,
     text: translated,
     direction: data.target_lang || data.direction || data.lang || $targetLang.value,
-    voice: (
-      currentTtsProvider === "soniox" && $mode() === "two_way" && data.direction === $langA.value
-        ? $voiceB.value
-        : ($ttsVoice.value || $voice.value)
-    ),
+    voice: ttsVoiceForDirection(data.direction || data.target_lang || undefined),
   });
   if (typeof lineId === "number" && sentToTts) {
-    lineAudioQueue.registerLine(lineId);
-    lastRegisteredLineId = Math.max(lastRegisteredLineId, lineId);
-    audioLineReadyCount += 1;
-    if (nextLineIdToPlay === null && currentPlayingLineId === null) {
-      nextLineIdToPlay = lineAudioQueue.firstLineId;
-    }
-    logTtsLineProgress();
-    updateDelayStatusIndicator();
+    registerTtsAudioLine(lineId);
   }
   utterances.push({
     speaker: data.speaker ?? null,
@@ -1392,6 +1397,72 @@ function handleLineReady(data: SonioxSttResponse): void {
   });
   if (!data.is_endpoint) currentUtt = newUtt();
   render();
+}
+
+function usesRealtimeSonioxPipeline(): boolean {
+  return currentTtsProvider === "soniox" && $translationProvider.value === "soniox";
+}
+
+function ttsVoiceForDirection(direction?: string): string {
+  return currentTtsProvider === "soniox"
+    && $mode() === "two_way"
+    && direction === $langA.value
+    ? $voiceB.value
+    : ($ttsVoice.value || $voice.value);
+}
+
+function realtimeRequestId(utteranceId: number): string {
+  return `${sessionId || "session"}:rt:${utteranceId}`;
+}
+
+function handleTranslationChunk(data: SonioxSttResponse): void {
+  if (!usesRealtimeSonioxPipeline()) return;
+  const utteranceId = data.utterance_id ?? data.line_id;
+  const sequence = data.sequence;
+  const text = data.text || "";
+  const direction = data.direction || data.target_lang || $targetLang.value;
+  if (
+    typeof utteranceId !== "number"
+    || typeof sequence !== "number"
+    || !text
+    || !direction
+  ) return;
+  if (skippedRealtimeUtterances.has(utteranceId)) return;
+  const result = ttsSession.streamText({
+    requestId: realtimeRequestId(utteranceId),
+    lineId: utteranceId,
+    text,
+    direction,
+    voice: ttsVoiceForDirection(direction),
+    sequence,
+  });
+  // If the first token arrives before the TTS configure ACK, do not begin
+  // speaking halfway through that utterance.  Resume cleanly at the next one.
+  if (!result && sequence === 1) {
+    skippedRealtimeUtterances.add(utteranceId);
+    return;
+  }
+  if (result === "started") registerTtsAudioLine(utteranceId);
+}
+
+function handleTranslationEnd(data: SonioxSttResponse): void {
+  const utteranceId = data.utterance_id ?? data.line_id;
+  if (typeof utteranceId !== "number") return;
+  if (!skippedRealtimeUtterances.has(utteranceId) && usesRealtimeSonioxPipeline()) {
+    ttsSession.endStream(realtimeRequestId(utteranceId));
+  }
+  skippedRealtimeUtterances.delete(utteranceId);
+}
+
+function registerTtsAudioLine(lineId: number): void {
+  lineAudioQueue.registerLine(lineId);
+  lastRegisteredLineId = Math.max(lastRegisteredLineId, lineId);
+  audioLineReadyCount += 1;
+  if (nextLineIdToPlay === null && currentPlayingLineId === null) {
+    nextLineIdToPlay = lineAudioQueue.firstLineId;
+  }
+  logTtsLineProgress();
+  updateDelayStatusIndicator();
 }
 
 // ---------------------------------------------------------------------------
@@ -1575,6 +1646,14 @@ function streamActiveLine(): void {
   let next = lineAudioQueue.takeNextChunk();
   while (next !== null) {
     const { chunk, isLast } = next;
+    // A terminated Soniox stream can carry no final PCM payload.  The
+    // backend sends a zero-byte end marker so FIFO state still advances;
+    // do not hand that marker to Web Audio (zero-frame buffers are invalid).
+    if (chunk.byteLength === 0) {
+      if (isLast) activeLineDoneScheduling = true;
+      next = lineAudioQueue.takeNextChunk();
+      continue;
+    }
     activeLinePendingChunks += 1;
     activeLineAudioSeconds += pcmChunkDurationSeconds(chunk);
     playPcmChunk(chunk, lineId, () => {
@@ -1736,6 +1815,9 @@ async function toggleTts(): Promise<void> {
         voiceB: $voiceB.value,
         mode: $mode(),
         targetLang: $mode() === "one_way" ? $targetLang.value : $langB.value,
+        langA: $langA.value,
+        langB: $langB.value,
+        realtimeStreaming: usesRealtimeSonioxPipeline(),
       },
       state !== "idle" && sttSession.isOpen(),
     );
@@ -1870,6 +1952,7 @@ function stop(): void {
 function cleanup(): void {
   pendingAudioBlobs = [];
   pendingAudioOverflowed = false;
+  skippedRealtimeUtterances.clear();
 
   sendTranscriptSnapshot();
 

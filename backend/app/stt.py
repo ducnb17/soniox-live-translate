@@ -119,6 +119,10 @@ async def handle_stt(
     current_lang = None
     line_original_offset = 0
     line_counter = int(session_state.get("line_counter", 0))
+    tts_utterance_counter = int(session_state.get("tts_utterance_counter", 0))
+    active_tts_utterance_id: int | None = None
+    active_tts_direction: str | None = None
+    active_tts_sequence = 0
     utterance_start_ms: int | None = None
     stream_finished = False
     pending_line_chunks: list[tuple[str, str | None, dict[str, Any]]] = []
@@ -223,6 +227,14 @@ async def handle_stt(
                         if mode == "one_way"
                         else _direction(token, mode, lang_a, lang_b)
                     )
+                    if active_tts_utterance_id is not None:
+                        await browser_ws.send_json({
+                            "type": "translation_end",
+                            "utterance_id": active_tts_utterance_id,
+                            "line_id": active_tts_utterance_id,
+                            "direction": active_tts_direction or direction,
+                            "sequence": active_tts_sequence,
+                        })
                     line_chunks = pending_line_chunks
                     pending_line_chunks = []
                     if translate_text is not None and current_original:
@@ -286,6 +298,9 @@ async def handle_stt(
                     current_lang = None
                     line_original_offset = 0
                     utterance_start_ms = None
+                    active_tts_utterance_id = None
+                    active_tts_direction = None
+                    active_tts_sequence = 0
                 elif token.get("translation_status") == "translation":
                     if token.get("is_final"):
                         current_translation += text
@@ -293,6 +308,26 @@ async def handle_stt(
                         target = _resolve_translation_target(
                             token, mode, lang_a, lang_b, target_lang
                         )
+                        # Soniox final translation tokens are stable and may be
+                        # spoken immediately.  Emit them separately from the
+                        # completed display line so an independent TTS socket
+                        # can stream audio before the speaker finishes.
+                        if target:
+                            if active_tts_utterance_id is None:
+                                tts_utterance_counter += 1
+                                session_state["tts_utterance_counter"] = tts_utterance_counter
+                                active_tts_utterance_id = tts_utterance_counter
+                                active_tts_direction = target
+                            active_tts_sequence += 1
+                            await browser_ws.send_json({
+                                "type": "translation_chunk",
+                                "utterance_id": active_tts_utterance_id,
+                                "line_id": active_tts_utterance_id,
+                                "sequence": active_tts_sequence,
+                                "text": text,
+                                "direction": target,
+                                "is_final": True,
+                            })
                         while (
                             not message_has_end
                             and len(current_translation) > LINE_MAX_CHARS

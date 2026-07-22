@@ -109,6 +109,41 @@ test("TTS can wait for STT, deduplicates lines, and turns off alone", async () =
   assert.ok(states.includes("on"));
 });
 
+test("Soniox TTS forwards stable translation chunks in one utterance stream", async () => {
+  const sockets = [];
+  const controller = new TtsSessionController(
+    { onAudio() {} },
+    (url) => {
+      const socket = new FakeWebSocket(url);
+      sockets.push(socket);
+      return socket;
+    },
+  );
+  const enabling = controller.enable("ws://local/ws/tts", {
+    provider: "soniox", voice: "Maya", targetLang: "vi", realtimeStreaming: true,
+  }, true);
+  sockets[0].open();
+  await enabling;
+  sockets[0].message(JSON.stringify({ type: "tts_state", state: "on", epoch: 0 }));
+
+  const first = {
+    requestId: "s:rt:1", lineId: 1, text: "xin ", direction: "vi", sequence: 1,
+  };
+  assert.equal(controller.streamText(first), "started");
+  assert.equal(controller.streamText(first), false);
+  assert.equal(controller.streamText({ ...first, text: "chào", sequence: 2 }), "continued");
+  assert.equal(controller.endStream("s:rt:1"), true);
+
+  const commands = sockets[0].sent.map((item) => JSON.parse(item));
+  assert.deepEqual(commands.map(({ type }) => type), [
+    "configure", "stream_text", "stream_text", "stream_end",
+  ]);
+  assert.deepEqual(commands.slice(1, 3).map(({ text, sequence }) => [text, sequence]), [
+    ["xin ", 1], ["chào", 2],
+  ]);
+  controller.disable();
+});
+
 test("stale TTS epochs and audio without metadata are discarded", async () => {
   const sockets = [];
   const received = [];

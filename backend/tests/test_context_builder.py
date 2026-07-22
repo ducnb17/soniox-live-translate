@@ -1,10 +1,19 @@
 """Tests for context_builder.build_stt_config + _normalize_context."""
 import pytest
 
+from app.config import set_api_key
 from app.context_builder import build_stt_config, _normalize_context
 
 
 class TestBuildSttConfig:
+    def test_runtime_key_update_is_used_without_restart(self):
+        set_api_key("runtime-key")
+        cfg = build_stt_config(
+            mode="one_way", target_lang="vi", lang_a=None, lang_b=None,
+            lang_id=True, diarize=False, context=None,
+        )
+        assert cfg["api_key"] == "runtime-key"
+
     def test_one_way_basic(self):
         cfg = build_stt_config(
             mode="one_way",
@@ -18,7 +27,7 @@ class TestBuildSttConfig:
         assert cfg["model"] == "stt-rt-v5"
         assert cfg["audio_format"] == "auto"
         assert cfg["enable_endpoint_detection"] is True
-        assert cfg["max_endpoint_delay_ms"] == 1500
+        assert cfg["max_endpoint_delay_ms"] == 500
         assert cfg["enable_speaker_diarization"] is True
         assert cfg["enable_language_identification"] is True
         assert cfg["translation"] == {"type": "one_way", "target_language": "vi"}

@@ -12,6 +12,9 @@ export interface TtsConfigure {
   voiceB?: string;
   mode?: "one_way" | "two_way";
   targetLang?: string;
+  langA?: string;
+  langB?: string;
+  realtimeStreaming?: boolean;
 }
 
 export interface TtsSpeakRequest {
@@ -20,6 +23,10 @@ export interface TtsSpeakRequest {
   text: string;
   direction: string;
   voice?: string;
+}
+
+export interface TtsStreamTextRequest extends TtsSpeakRequest {
+  sequence: number;
 }
 
 export interface TtsAudioMeta {
@@ -49,6 +56,8 @@ export class TtsSessionController {
   private config: TtsConfigure = { provider: "soniox", voice: "Maya" };
   private pendingMeta: TtsAudioMeta | null = null;
   private readonly sentLines = new Set<string>();
+  private readonly sentChunks = new Set<string>();
+  private readonly startedStreams = new Set<string>();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingConnectReject: ((reason?: unknown) => void) | null = null;
   private manuallyClosed = false;
@@ -105,11 +114,44 @@ export class TtsSessionController {
     return true;
   }
 
-  cancelAll(): void {
+  streamText(request: TtsStreamTextRequest): "started" | "continued" | false {
+    if (this.state !== "on" || !this.isOpen()) return false;
+    const streamKey = `${this.epoch}:${request.requestId}`;
+    const chunkKey = `${streamKey}:${request.sequence}`;
+    if (this.sentChunks.has(chunkKey)) return false;
+    this.sentChunks.add(chunkKey);
+    const started = !this.startedStreams.has(streamKey);
+    this.startedStreams.add(streamKey);
+    this.send({
+      type: "stream_text",
+      request_id: request.requestId,
+      line_id: request.lineId,
+      text: request.text,
+      direction: request.direction,
+      voice: request.voice,
+      sequence: request.sequence,
+      epoch: this.epoch,
+    });
+    return started ? "started" : "continued";
+  }
+
+  endStream(requestId: string): boolean {
+    if (this.state !== "on" || !this.isOpen()) return false;
+    const streamKey = `${this.epoch}:${requestId}`;
+    if (!this.startedStreams.has(streamKey)) return false;
+    this.send({ type: "stream_end", request_id: requestId, epoch: this.epoch });
+    return true;
+  }
+
+  cancelAll(restartRealtime = true): void {
     this.epoch += 1;
     this.sentLines.clear();
+    this.sentChunks.clear();
+    this.startedStreams.clear();
     this.pendingMeta = null;
-    if (this.isOpen()) this.send({ type: "cancel_all", epoch: this.epoch });
+    if (this.isOpen()) {
+      this.send({ type: "cancel_all", epoch: this.epoch, restart: restartRealtime });
+    }
   }
 
   isOpen(): boolean {
@@ -135,6 +177,8 @@ export class TtsSessionController {
       if (!this.manuallyClosed && this.desiredEnabled && this.sttActive) {
         this.epoch += 1;
         this.sentLines.clear();
+        this.sentChunks.clear();
+        this.startedStreams.clear();
         this.pendingMeta = null;
         this.callbacks.onReset?.(this.epoch);
         this.setState("connecting");
@@ -161,6 +205,9 @@ export class TtsSessionController {
           voice_b: this.config.voiceB,
           mode: this.config.mode,
           target_lang: this.config.targetLang,
+          lang_a: this.config.langA,
+          lang_b: this.config.langB,
+          realtime_streaming: this.config.realtimeStreaming,
           epoch: this.epoch,
         });
         resolve();
@@ -202,7 +249,7 @@ export class TtsSessionController {
 
   private cancelAndClose(preserveDesired: boolean): void {
     this.setState("stopping");
-    this.cancelAll();
+    this.cancelAll(false);
     this.manuallyClosed = true;
     this.closeSocket();
     this.setState(preserveDesired && this.desiredEnabled ? "waiting_for_stt" : "off");

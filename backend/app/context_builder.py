@@ -6,7 +6,8 @@ keys — see https://soniox.com/docs/stt/concepts/context.
 
 from typing import Any
 
-from .config import MAX_ENDPOINT_DELAY_MS, SONIOX_API_KEY, STT_MODEL
+from . import config as runtime_config
+from .config import MAX_ENDPOINT_DELAY_MS, STT_MODEL
 
 
 def build_stt_config(
@@ -22,7 +23,7 @@ def build_stt_config(
     enable_translation: bool = True,
 ) -> dict[str, Any]:
     config: dict[str, Any] = {
-        "api_key": SONIOX_API_KEY,
+        "api_key": runtime_config.SONIOX_API_KEY,
         "model": STT_MODEL,
         "audio_format": "auto",
         "enable_endpoint_detection": True,

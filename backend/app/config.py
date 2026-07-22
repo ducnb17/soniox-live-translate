@@ -28,7 +28,7 @@ STT_KEEPALIVE_INTERVAL = 15
 
 # Endpointing: fires the <end> token when the speaker pauses, letting us
 # finalize the current TTS utterance stream quickly.
-MAX_ENDPOINT_DELAY_MS = 1500
+MAX_ENDPOINT_DELAY_MS = 500
 
 def _user_data_dir() -> Path:
     """Per-user, always-writable data directory (mirrors config_store.py).

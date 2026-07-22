@@ -74,9 +74,16 @@ class TestHandleSttOneWay:
             target_lang="vi",
         )
 
-        # All STT JSON was forwarded to browser
-        assert len(browser_ws.sent) == 4
-        assert browser_ws.sent[2] == {
+        # Raw STT JSON is preserved, while stable translation fragments are
+        # also exposed immediately for the independent real-time TTS bridge.
+        assert len([m for m in browser_ws.sent if m.get("type") == "transcript_partial"]) == 3
+        assert [
+            (m["text"], m["sequence"], m["direction"])
+            for m in browser_ws.sent if m.get("type") == "translation_chunk"
+        ] == [("hel", 1, "vi"), ("lo", 2, "vi")]
+        assert [m["utterance_id"] for m in browser_ws.sent if m.get("type") == "translation_end"] == [1]
+        line_ready = next(m for m in browser_ws.sent if m.get("type") == "line_ready")
+        assert line_ready == {
             "type": "line_ready",
             "line_id": 1,
             "speaker": None,
@@ -414,7 +421,9 @@ class TestHandleSttExtraHold:
         while not tts_queue.empty():
             items.append(tts_queue.get_nowait())
 
-        assert len(browser_ws.sent) == 6
+        assert len([m for m in browser_ws.sent if m.get("type") == "transcript_partial"]) == 4
+        assert [m["text"] for m in browser_ws.sent if m.get("type") == "translation_chunk"] == ["A", "B"]
+        assert len([m for m in browser_ws.sent if m.get("type") == "translation_end"]) == 2
         assert [message["translated_text"] for message in browser_ws.sent if message.get("type") == "line_ready"] == ["A", "B"]
         assert committed_translations == ["A", "B"]
         assert sleep_delays == [
