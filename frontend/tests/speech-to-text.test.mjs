@@ -71,6 +71,7 @@ function config(isTtsEnabled) {
     ttsProvider: "soniox",
     sttProvider: "soniox",
     translationProvider: "soniox",
+    translationStyle: "natural",
     sttDelayMs: 1500,
     isTtsEnabled,
   };
@@ -91,6 +92,7 @@ test("TTS toggle sends a subscription command without restarting STT", async () 
     assert.equal(FakeWebSocket.instances.length, 1);
     assert.match(socket.url, /tts=true/);
     assert.match(socket.url, /tts_enabled=false/);
+    assert.match(socket.url, /translation_style=natural/);
     assert.equal(stt.getState().isListening, true);
 
     stt.setTtsEnabled(true);

@@ -12,6 +12,7 @@ import sys
 import time
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager, suppress
+from functools import partial
 from pathlib import Path
 
 import websockets
@@ -59,6 +60,8 @@ from .config_store import (
     set_translation_api_key,
     get_translation_provider,
     set_translation_provider,
+    get_translation_style,
+    set_translation_style,
     get_tts_api_key,
     set_tts_api_key,
     remove_tts_api_key,
@@ -81,6 +84,7 @@ from .translation_provider import (
     get_provider as get_translation_provider_instance,
     get_available_providers as get_available_translation_providers,
 )
+from .translation_styles import TRANSLATION_STYLES, normalize_translation_style
 from .external_tts import external_tts_sender
 from .version import APP_VERSION
 from .db import (
@@ -352,10 +356,28 @@ async def api_save_config(payload: dict = Body(...)) -> JSONResponse:
     tts_voice = str(payload.get("tts_voice") or "")
     stt_provider = str(payload.get("stt_provider") or "")
     translation_provider = str(payload.get("translation_provider") or "")
+    translation_style = str(payload.get("translation_style") or "")
 
     tts_api_key = str(payload.get("tts_api_key") or "").strip()
     stt_api_key = str(payload.get("stt_api_key") or "").strip()
     translation_api_key = str(payload.get("translation_api_key") or "").strip()
+
+    style_id: str | None = None
+    if translation_style:
+        try:
+            style_id = normalize_translation_style(translation_style)
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+        provider_id = translation_provider or get_translation_provider()
+        provider = get_translation_provider_instance(provider_id)
+        if provider is None or style_id not in provider.info.supported_styles:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "message": f"Translation style {style_id!r} is not supported by {provider_id!r}",
+                },
+                status_code=400,
+            )
 
     # Save TTS
     if tts_provider:
@@ -376,6 +398,8 @@ async def api_save_config(payload: dict = Body(...)) -> JSONResponse:
         set_translation_provider(translation_provider)
         if translation_api_key:
             set_translation_api_key(translation_provider, translation_api_key)
+    if style_id:
+        set_translation_style(style_id)
 
     return JSONResponse({"ok": True})
 
@@ -463,6 +487,7 @@ async def api_translation_providers() -> JSONResponse:
             "tier": p.tier,
             "pricing_url": p.pricing_url,
             "signup_url": p.signup_url,
+            "supported_styles": list(p.supported_styles),
             "has_api_key": bool(get_translation_api_key(p.id)) or (p.id == "soniox" and bool(get_api_key())),
         }
         for p in get_available_translation_providers()
@@ -485,20 +510,39 @@ async def api_test_translation_provider(provider_id: str, payload: dict = Body(.
                 save_config(cfg)
                 set_api_key(key)
         set_translation_provider(provider_id)
+        if get_translation_style() not in provider.info.supported_styles:
+            set_translation_style("natural")
     return JSONResponse({"ok": ok, "message": message})
 
 
 @app.get("/api/translation/config")
 async def api_get_translation_config() -> JSONResponse:
-    return JSONResponse({"current_provider": get_translation_provider()})
+    return JSONResponse({
+        "current_provider": get_translation_provider(),
+        "current_style": get_translation_style(),
+        "styles": [{"id": style.id, "name": style.name} for style in TRANSLATION_STYLES],
+    })
 
 
 @app.post("/api/translation/config")
 async def api_set_translation_config(payload: dict = Body(...)) -> JSONResponse:
     provider_id = str(payload.get("provider_id") or "")
-    if get_translation_provider_instance(provider_id) is None:
+    provider = get_translation_provider_instance(provider_id)
+    if provider is None:
         return JSONResponse({"ok": False, "message": f"Unknown provider: {provider_id}"}, status_code=404)
+    try:
+        style_id = normalize_translation_style(
+            str(payload.get("translation_style") or get_translation_style())
+        )
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+    if style_id not in provider.info.supported_styles:
+        return JSONResponse(
+            {"ok": False, "message": f"Translation style {style_id!r} is not supported by {provider_id!r}"},
+            status_code=400,
+        )
     set_translation_provider(provider_id)
+    set_translation_style(style_id)
     return JSONResponse({"ok": True})
 
 
@@ -523,6 +567,7 @@ async def translation_websocket(
     tts_provider: str = "soniox",
     stt_provider: str = "soniox",
     translation_provider: str = "soniox",
+    translation_style: str = "natural",
     stt_delay_ms: int = MAX_ENDPOINT_DELAY_MS,
 ) -> None:
     await browser_ws.accept()
@@ -586,7 +631,31 @@ async def translation_websocket(
         await browser_ws.close()
         return
 
-    translate_text = None if translation_provider == "soniox" else translation_engine.translate
+    try:
+        translation_style = normalize_translation_style(translation_style)
+    except ValueError as exc:
+        await browser_ws.send_json({
+            "error_code": "bad_translation_style",
+            "error_message": str(exc),
+        })
+        await browser_ws.close()
+        return
+    if translation_style not in translation_engine.info.supported_styles:
+        await browser_ws.send_json({
+            "error_code": "unsupported_translation_style",
+            "error_message": (
+                f"Translation style {translation_style!r} is not supported by "
+                f"{translation_provider!r}"
+            ),
+        })
+        await browser_ws.close()
+        return
+
+    translate_text = (
+        None
+        if translation_provider == "soniox"
+        else partial(translation_engine.translate, style=translation_style)
+    )
 
     context = _parse_context(context_b64)
     # Honor the frontend's endpointing choice within a safe window. Earlier

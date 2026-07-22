@@ -127,6 +127,8 @@ const $translationTestStatus = $<HTMLSpanElement>("translation-test-status");
 const $translationTierBadge = $<HTMLSpanElement>("translation-tier-badge");
 const $translationProviderDescription = $<HTMLSpanElement>("translation-provider-description");
 const $translationKeyLink = $<HTMLAnchorElement>("translation-key-link");
+const $translationStyle = $<HTMLSelectElement>("translation-style-select");
+const $translationStyleHint = $<HTMLParagraphElement>("translation-style-hint");
 const $saveConfigBtn = $<HTMLButtonElement>("save-config-btn");
 const $saveConfigStatus = $<HTMLSpanElement>("save-config-status");
 const $historyPanel = $<HTMLDivElement>("history-panel");
@@ -472,6 +474,7 @@ interface ProviderInfo {
   tier: "free" | "cheap" | "premium";
   pricing_url: string;
   signup_url?: string;
+  supported_styles?: string[];
   has_api_key: boolean;
 }
 
@@ -693,6 +696,22 @@ $btnSaveTtsKey.addEventListener("click", async () => {
 let sttProviders: ProviderInfo[] = [];
 let translationProviders: ProviderInfo[] = [];
 
+function updateTranslationStyleAvailability(): void {
+  const provider = translationProviders.find((item) => item.id === $translationProvider.value);
+  const supported = new Set(provider?.supported_styles || ["natural"]);
+  for (const option of Array.from($translationStyle.options)) {
+    option.disabled = !supported.has(option.value);
+  }
+  if (!supported.has($translationStyle.value)) $translationStyle.value = "natural";
+  $translationStyle.disabled = supported.size <= 1;
+  const supportedNames = Array.from($translationStyle.options)
+    .filter((option) => supported.has(option.value))
+    .map((option) => option.textContent?.replace(/^\d+\.\s*/, "") || option.value);
+  $translationStyleHint.textContent = supported.size <= 1
+    ? `${provider?.name || "This engine"} currently supports Natural style only.`
+    : `Supported by ${provider?.name || "this engine"}: ${supportedNames.join(", ")}.`;
+}
+
 function populateProviderSelect(select: HTMLSelectElement, providers: ProviderInfo[]): void {
   select.innerHTML = "";
   for (const provider of providers) {
@@ -787,9 +806,15 @@ async function loadSpeechProviders(): Promise<void> {
       $translationProvider, translationProviders, $translationApiKeyRow,
       $translationTierBadge, $translationProviderDescription, $translationKeyLink,
     );
+    const styleResponse = await fetch("/api/translation/config");
+    if (styleResponse.ok) {
+      const styleConfig = await styleResponse.json() as { current_style?: string };
+      $translationStyle.value = styleConfig.current_style || "natural";
+    }
     // Auto-detect saved provider keys and disable inputs accordingly.
     updateKeyInputState($sttProvider, sttProviders, $sttApiKey, $sttTestStatus);
     updateKeyInputState($translationProvider, translationProviders, $translationApiKey, $translationTestStatus);
+    updateTranslationStyleAvailability();
   } catch {
     window.setTimeout(() => { void loadSpeechProviders(); }, 3000);
   }
@@ -807,6 +832,7 @@ $translationProvider.addEventListener("change", () => {
     $translationTierBadge, $translationProviderDescription, $translationKeyLink,
   );
   updateKeyInputState($translationProvider, translationProviders, $translationApiKey, $translationTestStatus);
+  updateTranslationStyleAvailability();
 });
 $btnTestSttKey.addEventListener("click", () => {
   void testDomainProvider("stt", $sttProvider, $sttApiKey, $sttTestStatus);
@@ -832,6 +858,7 @@ $saveConfigBtn.addEventListener("click", async () => {
       tts_voice: $ttsVoice.value,
       stt_provider: $sttProvider.value,
       translation_provider: $translationProvider.value,
+      translation_style: $translationStyle.value,
     };
     if (ttsKeyInput) payload["tts_api_key"] = ttsKeyInput;
     if (sttKeyInput) payload["stt_api_key"] = sttKeyInput;
@@ -1242,6 +1269,7 @@ function buildSpeechToTextConfig(): SpeechToTextConfig {
     ttsProvider: $ttsProvider.value,
     sttProvider: $sttProvider.value || "soniox",
     translationProvider: $translationProvider.value || "soniox",
+    translationStyle: $translationStyle.value || "natural",
     sttDelayMs: Math.round(currentSttDelaySeconds() * 1000),
     isTtsEnabled: textToSpeech.getState().isTtsEnabled,
   };

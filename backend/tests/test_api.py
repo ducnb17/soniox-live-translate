@@ -157,6 +157,8 @@ class TestTtsProviderApi:
 
 
 class SuccessfulConnectionProvider:
+    info = Mock(supported_styles=("natural", "literal", "professional", "casual", "subtitle_game", "technical"))
+
     async def test_connection(self):
         return True, "OK"
 
@@ -200,6 +202,7 @@ class TestUnifiedConfigSave:
         stt_key = Mock()
         translation_provider = Mock()
         translation_key = Mock()
+        translation_style = Mock()
 
         monkeypatch.setattr(main, "set_tts_provider", tts_provider)
         monkeypatch.setattr(main, "set_tts_api_key", tts_key)
@@ -208,12 +211,14 @@ class TestUnifiedConfigSave:
         monkeypatch.setattr(main, "set_stt_api_key", stt_key)
         monkeypatch.setattr(main, "set_translation_provider", translation_provider)
         monkeypatch.setattr(main, "set_translation_api_key", translation_key)
+        monkeypatch.setattr(main, "set_translation_style", translation_style)
 
         payload = {
             "tts_provider": "elevenlabs",
             "tts_voice": "Adam",
             "stt_provider": "soniox",
-            "translation_provider": "google",
+            "translation_provider": "openai",
+            "translation_style": "technical",
             "tts_api_key": "tk-abc",
             "stt_api_key": "sk-xyz",
             "translation_api_key": "tk-trans",
@@ -228,8 +233,22 @@ class TestUnifiedConfigSave:
         tts_voice.assert_called_once_with("elevenlabs", "Adam")
         stt_provider.assert_called_once_with("soniox")
         stt_key.assert_called_once_with("soniox", "sk-xyz")
-        translation_provider.assert_called_once_with("google")
-        translation_key.assert_called_once_with("google", "tk-trans")
+        translation_provider.assert_called_once_with("openai")
+        translation_key.assert_called_once_with("openai", "tk-trans")
+        translation_style.assert_called_once_with("technical")
+
+    def test_rejects_unknown_translation_style_before_saving(self, client, monkeypatch):
+        tts_provider = Mock()
+        monkeypatch.setattr(main, "set_tts_provider", tts_provider)
+
+        r = client.post(
+            "/api/config/save",
+            json={"tts_provider": "soniox", "translation_provider": "openai", "translation_style": "pirate"},
+        )
+
+        assert r.status_code == 400
+        assert r.json()["ok"] is False
+        tts_provider.assert_not_called()
 
     def test_empty_keys_dont_overwrite(self, client, monkeypatch):
         """Empty or missing key fields should not call the key setter."""
@@ -273,6 +292,32 @@ class TestUnifiedConfigSave:
         r = client.post("/api/config/save", json={"tts_voice": "Maya"})
         assert r.status_code == 200
         assert r.json() == {"ok": True}
+
+
+class TestTranslationStyleConfig:
+    def test_returns_saved_style_and_available_styles(self, client, monkeypatch):
+        monkeypatch.setattr(main, "get_translation_provider", lambda: "openai")
+        monkeypatch.setattr(main, "get_translation_style", lambda: "technical")
+
+        r = client.get("/api/translation/config")
+
+        assert r.status_code == 200
+        data = r.json()
+        assert data["current_provider"] == "openai"
+        assert data["current_style"] == "technical"
+        assert [style["id"] for style in data["styles"]] == [
+            "natural", "literal", "professional", "casual", "subtitle_game", "technical",
+        ]
+
+    def test_provider_capabilities_expose_supported_styles(self, client):
+        r = client.get("/api/translation/providers")
+
+        assert r.status_code == 200
+        providers = {provider["id"]: provider for provider in r.json()}
+        assert providers["openai"]["supported_styles"] == [
+            "natural", "literal", "professional", "casual", "subtitle_game", "technical",
+        ]
+        assert providers["soniox"]["supported_styles"] == ["natural"]
 
 
 class TestTtsConfigApi:

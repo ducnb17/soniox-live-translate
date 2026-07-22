@@ -256,3 +256,13 @@ def set_translation_provider(provider_id: str) -> None:
     cfg = load_config()
     cfg["translation_provider"] = provider_id
     save_config(cfg)
+
+
+def get_translation_style() -> str:
+    return str(load_config().get("translation_style", "natural"))
+
+
+def set_translation_style(style_id: str) -> None:
+    cfg = load_config()
+    cfg["translation_style"] = style_id
+    save_config(cfg)

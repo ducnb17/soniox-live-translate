@@ -18,6 +18,7 @@ class TranslationProviderInfo:
     pricing_url: str
     signup_url: str
     provider_class: str = ""
+    supported_styles: tuple[str, ...] = ("natural",)
 
     def __post_init__(self) -> None:
         if self.tier not in VALID_PROVIDER_TIERS:
@@ -32,6 +33,7 @@ class TranslationProviderBase(ABC):
         text: str,
         source_lang: str | None,
         target_lang: str,
+        style: str = "natural",
     ) -> str:
         ...
 

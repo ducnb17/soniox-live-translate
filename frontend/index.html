@@ -88,6 +88,18 @@
               <select id="translation-provider-select"></select>
               <div class="provider-meta"><span id="translation-tier-badge" class="tier-badge"></span><span
                   id="translation-provider-description"></span></div>
+              <div class="device-row translation-style-row">
+                <label for="translation-style-select">Translation Style</label>
+                <select id="translation-style-select">
+                  <option value="natural">1. Natural</option>
+                  <option value="literal">2. Literal</option>
+                  <option value="professional">3. Professional</option>
+                  <option value="casual">4. Casual</option>
+                  <option value="subtitle_game">5. Subtitle / Game</option>
+                  <option value="technical">6. Technical</option>
+                </select>
+                <p id="translation-style-hint" class="hint">Available styles depend on the selected engine.</p>
+              </div>
               <div class="device-row" id="translation-api-key-row">
                 <label for="translation-api-key">API Key</label>
                 <div class="secret-input-row">

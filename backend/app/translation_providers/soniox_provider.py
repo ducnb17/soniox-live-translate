@@ -12,7 +12,13 @@ class SonioxTranslationProvider(TranslationProviderBase):
     def __init__(self, api_key: str | None = None) -> None:
         self._api_key = api_key
 
-    async def translate(self, text: str, source_lang: str | None, target_lang: str) -> str:
+    async def translate(
+        self,
+        text: str,
+        source_lang: str | None,
+        target_lang: str,
+        style: str = "natural",
+    ) -> str:
         raise NotImplementedError("Soniox translation runs inside the existing STT stream")
 
     async def test_connection(self) -> tuple[bool, str]:
