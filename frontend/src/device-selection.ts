@@ -13,6 +13,13 @@ export interface ResolvedAudioDevices {
   readonly missingOutput: boolean;
 }
 
+const VIRTUAL_LOOPBACK_LABEL_RE = /CABLE|VB-Audio|VoiceMeeter|Stereo Mix|loopback/i;
+
+export function isLikelyVirtualLoopbackDevice(device: Pick<AudioDeviceLike, "label"> | null | undefined): boolean {
+  const label = device?.label?.trim() || "";
+  return label.length > 0 && VIRTUAL_LOOPBACK_LABEL_RE.test(label);
+}
+
 function uniqueDevices(devices: readonly AudioDeviceLike[], kind: string): AudioDeviceLike[] {
   const seen = new Set<string>();
   return devices.filter((device) => {

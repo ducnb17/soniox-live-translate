@@ -13,7 +13,11 @@ import {
   type AudioSource,
   type ConnectionStatus,
 } from "./types";
-import { resolveAudioDevices, type AudioDeviceLike } from "./device-selection";
+import {
+  isLikelyVirtualLoopbackDevice,
+  resolveAudioDevices,
+  type AudioDeviceLike,
+} from "./device-selection";
 import {
   cleanupConversations,
   deleteConversation,
@@ -1173,7 +1177,8 @@ function handleSttResult(data: SonioxSttResponse): void {
     if (!t.text) continue;
 
     if (t.text === "<end>") {
-      currentUtt = newUtt();
+      currentUtt.originalPartial = "";
+      currentUtt.translationPartial = "";
       continue;
     }
 
@@ -1183,7 +1188,7 @@ function handleSttResult(data: SonioxSttResponse): void {
     const spokenLang = isTranslation ? t.source_language : t.language;
     if (spokenLang) currentUtt.language = spokenLang;
 
-    const side = isTranslation ? "translation" : "original" as const;
+    const side: "translation" | "original" = isTranslation ? "translation" : "original";
     if (t.is_final) {
       currentUtt[`${side}Final`] += t.text;
     } else {
@@ -1202,15 +1207,41 @@ function handleLineReady(data: SonioxSttResponse): void {
     // Subscriber boundary: disabled TTS ignores the line without changing STT.
     textToSpeech.registerLine(data.line_id);
   }
-  utterances.push({
-    speaker: data.speaker ?? null,
-    language: data.lang || null,
-    originalFinal: original,
-    originalPartial: "",
-    translationFinal: translated,
-    translationPartial: "",
-  });
-  if (!data.is_endpoint) currentUtt = newUtt();
+
+  const nextSpeaker = data.speaker ?? null;
+  const nextLanguage = data.lang || null;
+  const previous = utterances[utterances.length - 1];
+  const shouldAppendToPrevious =
+    !data.is_endpoint &&
+    previous != null &&
+    previous.speaker === nextSpeaker;
+
+  if (shouldAppendToPrevious) {
+    previous.originalFinal += original;
+    previous.translationFinal += translated;
+    if (nextLanguage) previous.language = nextLanguage;
+  } else {
+    utterances.push({
+      speaker: nextSpeaker,
+      language: nextLanguage,
+      originalFinal: original,
+      originalPartial: "",
+      translationFinal: translated,
+      translationPartial: "",
+    });
+  }
+
+  if (data.is_endpoint) {
+    currentUtt = newUtt();
+  } else {
+    currentUtt.originalFinal = original;
+    currentUtt.translationFinal = translated;
+    currentUtt.originalPartial = "";
+    currentUtt.translationPartial = "";
+    currentUtt.speaker = nextSpeaker;
+    currentUtt.language = nextLanguage;
+  }
+
   render();
 }
 
@@ -1239,28 +1270,92 @@ async function acquireInputStream(): Promise<MediaStream> {
     };
     return stream;
   }
-  // Explicit echo cancellation / noise suppression / auto gain control:
-  // without this, the mic can pick up the speaker's own TTS playback as
-  // echo, which the barge-in VAD then misreads as the user talking over
-  // the TTS.
-  return getSelectedInputStream({
-    echoCancellation: true,
-    noiseSuppression: true,
-    autoGainControl: true,
-  });
 
+  const selectedInputId = $inputDevice.value || "default";
+  const selectedOption = $inputDevice.selectedOptions[0];
+  const selectedLabel = selectedOption?.textContent?.trim() || "";
+  const isVirtualLoopback =
+    $audioSource() !== "tab" &&
+    selectedInputId !== "default" &&
+    isLikelyVirtualLoopbackDevice({ label: selectedLabel });
+
+  // Keep browser DSP enabled for real microphones to reduce speaker echo.
+  // Virtual/loopback devices already carry clean app audio, so WebRTC DSP can
+  // suppress or gate them incorrectly.
+  const constraints = isVirtualLoopback
+    ? {
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false,
+    }
+    : {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    };
+
+  console.info(
+    `[audio-input] acquiring ${isVirtualLoopback ? "virtual/loopback" : "microphone"} input`,
+    {
+      deviceId: selectedInputId,
+      label: selectedLabel,
+      constraints,
+      audioSource: $audioSource(),
+    },
+  );
+
+  return getSelectedInputStream(constraints);
 }
 
 async function startRecorder(): Promise<void> {
   micStream = await acquireInputStream();
   mediaRecorder = new MediaRecorder(micStream);
 
+  let recorderChunks = 0;
+  let recorderBytes = 0;
+  let recorderEmptyEvents = 0;
+  let warnedNoRecorderData = false;
+  const recorderStartedAt = performance.now();
 
   mediaRecorder.ondataavailable = (e: BlobEvent) => {
-    if (e.data.size > 0) speechToText.sendAudio(e.data);
+    if (e.data.size > 0) {
+      recorderChunks += 1;
+      recorderBytes += e.data.size;
+      speechToText.sendAudio(e.data);
+      return;
+    }
+
+    recorderEmptyEvents += 1;
+    console.warn("[audio-input] MediaRecorder produced empty chunk", {
+      emptyEvents: recorderEmptyEvents,
+      elapsedMs: Math.round(performance.now() - recorderStartedAt),
+      audioSource: $audioSource(),
+      inputDevice: $inputDevice.value || "default",
+      inputLabel: $inputDevice.selectedOptions[0]?.textContent?.trim() || "",
+      recorderState: mediaRecorder?.state || "inactive",
+    });
   };
 
   mediaRecorder.start(100);
+
+  window.setTimeout(() => {
+    if (!mediaRecorder || mediaRecorder.state === "inactive" || warnedNoRecorderData || recorderChunks > 0) return;
+    warnedNoRecorderData = true;
+    const message =
+      $audioSource() === "tab"
+        ? "Chưa nhận được audio từ tab/system share. Hãy kiểm tra đã bật share audio trong hộp chọn capture."
+        : "Chưa nhận được audio từ thiết bị input. Nếu đây là VB-Cable/loopback, hãy kiểm tra ứng dụng đang phát ra đúng thiết bị đó.";
+    console.error("[audio-input] MediaRecorder started but no audio data has arrived", {
+      elapsedMs: Math.round(performance.now() - recorderStartedAt),
+      emptyEvents: recorderEmptyEvents,
+      totalBytes: recorderBytes,
+      audioSource: $audioSource(),
+      inputDevice: $inputDevice.value || "default",
+      inputLabel: $inputDevice.selectedOptions[0]?.textContent?.trim() || "",
+      recorderState: mediaRecorder?.state || "inactive",
+    });
+    setStatus(message);
+  }, 1500);
 
   // Barge-in only makes sense for microphone input: with tab/system audio,
   // the "loud" signal we'd be listening to is the source audio itself, not

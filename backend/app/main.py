@@ -498,7 +498,7 @@ async def translation_websocket(
     translate_text = None if translation_provider == "soniox" else translation_engine.translate
 
     context = _parse_context(context_b64)
-    endpoint_delay_ms = max(500, min(3000, stt_delay_ms))
+    endpoint_delay_ms = max(MAX_ENDPOINT_DELAY_MS, min(3000, stt_delay_ms))
     extra_hold_ms = max(0, stt_delay_ms - 3000)
     stt_config = build_stt_config(
         mode=mode,

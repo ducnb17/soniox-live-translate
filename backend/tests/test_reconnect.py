@@ -312,7 +312,7 @@ class ConfigCapturingSttSocket:
 
 @pytest.mark.parametrize(
     ("requested_delay_ms", "expected_delay_ms"),
-    [(100, 500), (2500, 2500), (5000, 3000)],
+    [(100, 3000), (2500, 3000), (5000, 3000)],
 )
 async def test_translation_websocket_clamps_endpoint_delay(
     monkeypatch, requested_delay_ms, expected_delay_ms
