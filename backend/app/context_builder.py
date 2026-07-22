@@ -24,7 +24,9 @@ def build_stt_config(
     config: dict[str, Any] = {
         "api_key": SONIOX_API_KEY,
         "model": STT_MODEL,
-        "audio_format": "auto",
+        "audio_format": "pcm_s16le",
+        "sample_rate": 16000,
+        "num_channels": 1,
         "enable_endpoint_detection": True,
         "max_endpoint_delay_ms": max_endpoint_delay_ms,
         "enable_speaker_diarization": diarize,

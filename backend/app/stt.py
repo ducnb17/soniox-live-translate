@@ -22,7 +22,7 @@ log = get_logger("stt")
 TTS_TEXT = "text"
 TTS_END = "end"
 TTS_NONE = None
-LINE_MAX_CHARS = 80
+LINE_MAX_CHARS = 50
 
 
 async def pipe_browser_to_stt(

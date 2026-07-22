@@ -121,6 +121,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           files: electron/dist/*.exe
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-beta.') }}
           body: |
             ## Soniox Live Translate (Desktop / Electron) ${{ github.ref_name }}
 

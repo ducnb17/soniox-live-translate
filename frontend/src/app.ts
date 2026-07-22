@@ -1020,12 +1020,20 @@ document.getElementById("history-search-form")?.addEventListener("submit", (even
 // ---------------------------------------------------------------------------
 let mode: AppMode = "file";
 let state: AppState = "idle";
-let mediaRecorder: MediaRecorder | null = null;
 let utterances: Utterance[] = [];
 let currentUtt = newUtt();
 let fileAudio: HTMLAudioElement | null = null;
 let fileTtsHeard = false;
 let feedAutoScroll = true;
+
+// AudioWorklet PCM capture state (replaces MediaRecorder for lower latency)
+let captureCtx: AudioContext | null = null;
+let captureWorklet: AudioWorkletNode | null = null;
+let micStream: MediaStream | null = null;
+// When true, the worklet sends silence instead of real audio (anti TTS self-hear).
+let captureMuted = false;
+// Interval that checks whether TTS is audible and mutes/unmutes capture in tab mode.
+let ttsMuteCheckInterval: ReturnType<typeof setInterval> | null = null;
 
 // Barge-in VAD state
 let bargeAnalyser: AnalyserNode | null = null;
@@ -1033,7 +1041,6 @@ let bargeArray: Uint8Array<ArrayBuffer> | null = null;
 let bargeRaf: number | null = null;
 let bargeHoldSince = 0;
 let bargeArmed = false;
-let micStream: MediaStream | null = null;
 // Timestamp of the most recent silent -> audible TTS transition.
 // Used to suppress barge-in during the initial grace window, since the
 // onset "pop" of TTS audio can be picked up by the mic as echo.
@@ -1309,58 +1316,93 @@ async function acquireInputStream(): Promise<MediaStream> {
 
 async function startRecorder(): Promise<void> {
   micStream = await acquireInputStream();
-  mediaRecorder = new MediaRecorder(micStream);
 
-  let recorderChunks = 0;
-  let recorderBytes = 0;
-  let recorderEmptyEvents = 0;
-  let warnedNoRecorderData = false;
-  const recorderStartedAt = performance.now();
+  // --- AudioWorklet PCM capture (replaces MediaRecorder for lower latency) ---
+  captureCtx = new AudioContext({ sampleRate: 48000 });
+  try {
+    await captureCtx.audioWorklet.addModule("/pcm-capture-processor.js");
+  } catch (err) {
+    // Fallback: try with relative path for dev server
+    await captureCtx.audioWorklet.addModule("./pcm-capture-processor.js");
+  }
 
-  mediaRecorder.ondataavailable = (e: BlobEvent) => {
-    if (e.data.size > 0) {
-      recorderChunks += 1;
-      recorderBytes += e.data.size;
-      speechToText.sendAudio(e.data);
-      return;
+  const source = captureCtx.createMediaStreamSource(micStream);
+  captureWorklet = new AudioWorkletNode(captureCtx, "pcm-capture-processor");
+  source.connect(captureWorklet);
+  // Don't connect to destination — we don't want to hear the mic locally.
+  // The worklet still processes audio in the background.
+
+  let pcmChunks = 0;
+  let pcmBytes = 0;
+  let warnedNoData = false;
+  const startedAt = performance.now();
+
+  captureWorklet.port.onmessage = (event: MessageEvent) => {
+    const pcmBuffer = event.data as ArrayBuffer;
+    if (pcmBuffer.byteLength > 0) {
+      pcmChunks += 1;
+      pcmBytes += pcmBuffer.byteLength;
+      speechToText.sendAudio(new Blob([pcmBuffer]));
     }
-
-    recorderEmptyEvents += 1;
-    console.warn("[audio-input] MediaRecorder produced empty chunk", {
-      emptyEvents: recorderEmptyEvents,
-      elapsedMs: Math.round(performance.now() - recorderStartedAt),
-      audioSource: $audioSource(),
-      inputDevice: $inputDevice.value || "default",
-      inputLabel: $inputDevice.selectedOptions[0]?.textContent?.trim() || "",
-      recorderState: mediaRecorder?.state || "inactive",
-    });
   };
 
-  mediaRecorder.start(100);
-
   window.setTimeout(() => {
-    if (!mediaRecorder || mediaRecorder.state === "inactive" || warnedNoRecorderData || recorderChunks > 0) return;
-    warnedNoRecorderData = true;
+    if (!captureWorklet || warnedNoData || pcmChunks > 0) return;
+    warnedNoData = true;
     const message =
       $audioSource() === "tab"
         ? "Chưa nhận được audio từ tab/system share. Hãy kiểm tra đã bật share audio trong hộp chọn capture."
         : "Chưa nhận được audio từ thiết bị input. Nếu đây là VB-Cable/loopback, hãy kiểm tra ứng dụng đang phát ra đúng thiết bị đó.";
-    console.error("[audio-input] MediaRecorder started but no audio data has arrived", {
-      elapsedMs: Math.round(performance.now() - recorderStartedAt),
-      emptyEvents: recorderEmptyEvents,
-      totalBytes: recorderBytes,
+    console.error("[audio-input] AudioWorklet started but no audio data", {
+      elapsedMs: Math.round(performance.now() - startedAt),
+      totalBytes: pcmBytes,
       audioSource: $audioSource(),
       inputDevice: $inputDevice.value || "default",
       inputLabel: $inputDevice.selectedOptions[0]?.textContent?.trim() || "",
-      recorderState: mediaRecorder?.state || "inactive",
     });
     setStatus(message);
   }, 1500);
 
-  // Barge-in only makes sense for microphone input: with tab/system audio,
-  // the "loud" signal we'd be listening to is the source audio itself, not
-  // the user's voice, so it would immediately (and repeatedly) self-trigger.
+  // --- TTS self-hearing prevention for tab/system audio mode ---
+  // When capturing system audio, our own TTS output is part of the capture.
+  // Mute the capture while TTS is audible to prevent the self-hearing loop.
+  if ($audioSource() === "tab") {
+    startTtsMuteCheck();
+  }
+
+  // Barge-in only makes sense for microphone input.
   if ($barge.checked && $audioSource() === "microphone") startBargeVad(micStream);
+}
+
+/**
+ * Periodically check if TTS is audible and mute/unmute the AudioWorklet
+ * capture accordingly. Only active in tab/system audio mode.
+ */
+function startTtsMuteCheck(): void {
+  stopTtsMuteCheck();
+  ttsMuteCheckInterval = setInterval(() => {
+    const shouldMute = textToSpeech.isAudible() || textToSpeech.hasPendingAudio();
+    if (shouldMute !== captureMuted) {
+      captureMuted = shouldMute;
+      captureWorklet?.port.postMessage({ type: "mute", value: shouldMute });
+      if (shouldMute) {
+        console.log("[audio-input] TTS audible → muting capture to prevent self-hearing");
+      } else {
+        console.log("[audio-input] TTS silent → resuming capture");
+      }
+    }
+  }, 50);
+}
+
+function stopTtsMuteCheck(): void {
+  if (ttsMuteCheckInterval !== null) {
+    clearInterval(ttsMuteCheckInterval);
+    ttsMuteCheckInterval = null;
+  }
+  if (captureMuted) {
+    captureMuted = false;
+    captureWorklet?.port.postMessage({ type: "mute", value: false });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1458,6 +1500,8 @@ function resetSession(): void {
   utterances = [];
   currentUtt = newUtt();
   feedAutoScroll = true;
+  renderedLineCount = 0;
+  $transcriptFeed.innerHTML = "";
   ttsSessionUsage = emptyTtsUsage();
   updateTtsCostHint();
   render();
@@ -1526,17 +1570,22 @@ function stop(message?: string): void {
 
 function cleanupSttInput(): void {
   stopBargeVad();
-  if (mediaRecorder) {
-    if (mediaRecorder.state !== "inactive") {
-      try {
-        mediaRecorder.stop();
-      } catch {
-        // Already stopped.
-      }
+  stopTtsMuteCheck();
+  if (captureWorklet) {
+    try {
+      captureWorklet.disconnect();
+    } catch {
+      // Already disconnected.
     }
-    mediaRecorder.stream?.getTracks().forEach((track) => track.stop());
+    captureWorklet = null;
   }
-  mediaRecorder = null;
+  if (captureCtx) {
+    captureCtx.close().catch(() => undefined);
+    captureCtx = null;
+  }
+  if (micStream) {
+    micStream.getTracks().forEach((track) => track.stop());
+  }
   micStream = null;
   if (fileAudio) {
     fileAudio.pause();
@@ -1708,12 +1757,33 @@ function renderFeedLine(u: Utterance, interim = false): void {
   $transcriptFeed.appendChild(line);
 }
 
+/** Cached count of fully-rendered (non-interim) lines in the feed. */
+let renderedLineCount = 0;
+
+/**
+ * Incremental render: only update/append the lines that actually changed.
+ * Previously this cleared `.innerHTML` and rebuilt every line on each token,
+ * which caused visible lag when many utterances accumulated.
+ */
 function render(): void {
-  const previousScrollTop = $transcriptFeed.scrollTop;
   const shouldScroll = feedAutoScroll;
-  $transcriptFeed.innerHTML = "";
-  for (const utterance of utterances) renderFeedLine(utterance);
+  const previousScrollTop = $transcriptFeed.scrollTop;
+
+  // Remove the old interim line (always the last child if it exists).
+  const lastChild = $transcriptFeed.lastElementChild;
+  if (lastChild?.classList.contains("interim")) {
+    lastChild.remove();
+  }
+
+  // Append any new finalized utterances that haven't been rendered yet.
+  while (renderedLineCount < utterances.length) {
+    renderFeedLine(utterances[renderedLineCount]);
+    renderedLineCount += 1;
+  }
+
+  // Append the current interim utterance.
   renderFeedLine(currentUtt, true);
+
   if (shouldScroll) {
     $transcriptFeed.scrollTop = $transcriptFeed.scrollHeight;
   } else {

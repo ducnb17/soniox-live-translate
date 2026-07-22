@@ -16,7 +16,9 @@ class TestBuildSttConfig:
             context=None,
         )
         assert cfg["model"] == "stt-rt-v5"
-        assert cfg["audio_format"] == "auto"
+        assert cfg["audio_format"] == "pcm_s16le"
+        assert cfg["sample_rate"] == 16000
+        assert cfg["num_channels"] == 1
         assert cfg["enable_endpoint_detection"] is True
         assert cfg["max_endpoint_delay_ms"] == 3000
         assert cfg["enable_speaker_diarization"] is True
