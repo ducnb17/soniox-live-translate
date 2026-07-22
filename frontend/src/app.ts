@@ -941,6 +941,8 @@ async function viewConversation(id: string): Promise<void> {
       });
     currentUtt = newUtt();
     displayUtteranceOpen = false;
+    // A history selection replaces the entire model, not merely appends to it.
+    renderedFinalCount = Number.POSITIVE_INFINITY;
     render();
     setStatus(`Đã mở hội thoại ${id} (${utterances.length} câu)`);
   } catch (error) {
@@ -1030,6 +1032,10 @@ let displayUtteranceOpen = false;
 let fileAudio: HTMLAudioElement | null = null;
 let fileTtsHeard = false;
 let feedAutoScroll = true;
+// Transcript DOM cache. Final lines are append-only except for the active
+// endpoint's final line, which can receive an early TTS buffering chunk.
+let renderedFinalCount = 0;
+let interimFeedLine: HTMLDivElement | null = null;
 
 // AudioWorklet PCM capture state (replaces MediaRecorder for lower latency)
 let captureCtx: AudioContext | null = null;
@@ -1503,6 +1509,8 @@ function resetSession(): void {
   currentUtt = newUtt();
   displayUtteranceOpen = false;
   feedAutoScroll = true;
+  renderedFinalCount = 0;
+  interimFeedLine = null;
   $transcriptFeed.innerHTML = "";
   ttsSessionUsage = emptyTtsUsage();
   updateTtsCostHint();
@@ -1732,41 +1740,86 @@ function hasUtteranceText(u: Utterance): boolean {
   return Boolean(u.originalFinal || u.originalPartial || u.translationFinal || u.translationPartial);
 }
 
-function renderFeedLine(u: Utterance, interim = false): void {
-  if (!hasUtteranceText(u)) return;
-  const speaker = u.speaker ?? 0;
+function createFeedLine(interim = false): HTMLDivElement {
   const line = document.createElement("div");
-  line.className = `feed-line speaker-${Math.abs(speaker) % 5}${interim ? " interim" : ""}`;
-
   const label = document.createElement("div");
   label.className = "speaker-label";
-  label.append(`Speaker ${u.speaker ?? "—"}: `);
   const language = document.createElement("span");
   language.className = "lang-tag";
-  language.textContent = u.language || "auto";
   label.appendChild(language);
   line.appendChild(label);
 
-  const original = document.createElement("div");
-  original.className = "original-text";
-  original.textContent = `${u.originalFinal}${u.originalPartial}`;
-  line.appendChild(original);
+  for (const className of ["original-text", "translated-text"]) {
+    const text = document.createElement("div");
+    text.className = className;
+    line.appendChild(text);
+  }
 
-  const translated = document.createElement("div");
-  translated.className = "translated-text";
-  translated.textContent = `${u.translationFinal}${u.translationPartial}`;
-  line.appendChild(translated);
+  if (interim) line.classList.add("interim");
+  return line;
+}
+
+function updateFeedLine(line: HTMLDivElement, u: Utterance, interim = false): void {
+  const speaker = u.speaker ?? 0;
+  line.className = `feed-line speaker-${Math.abs(speaker) % 5}${interim ? " interim" : ""}`;
+  const label = line.querySelector<HTMLDivElement>(".speaker-label")!;
+  label.firstChild!.textContent = `Speaker ${u.speaker ?? "—"}: `;
+  line.querySelector<HTMLSpanElement>(".lang-tag")!.textContent = u.language || "auto";
+  line.querySelector<HTMLDivElement>(".original-text")!.textContent =
+    `${u.originalFinal}${u.originalPartial}`;
+  line.querySelector<HTMLDivElement>(".translated-text")!.textContent =
+    `${u.translationFinal}${u.translationPartial}`;
+}
+
+function appendFinalFeedLine(u: Utterance): void {
+  const line = createFeedLine();
+  updateFeedLine(line, u);
   $transcriptFeed.appendChild(line);
 }
 
 function render(): void {
   const shouldScroll = feedAutoScroll;
   const previousScrollTop = $transcriptFeed.scrollTop;
-  // A technical TTS chunk mutates the currently displayed utterance in place.
-  // Rebuild so its existing DOM block reflects the appended text immediately.
-  $transcriptFeed.innerHTML = "";
-  for (const utterance of utterances) renderFeedLine(utterance);
-  renderFeedLine(currentUtt, true);
+
+  // Full reconciliation is needed only after a history view/restart replaces
+  // the model. Live STT normally reaches the fast path below.
+  if (renderedFinalCount > utterances.length) {
+    $transcriptFeed.innerHTML = "";
+    renderedFinalCount = 0;
+    interimFeedLine = null;
+  }
+
+  // Keep the temporary STT preview after all committed lines. Removing and
+  // recreating this one node is still constant work, unlike rebuilding the
+  // whole transcript.
+  if (interimFeedLine && renderedFinalCount < utterances.length) {
+    interimFeedLine.remove();
+    interimFeedLine = null;
+  }
+
+  while (renderedFinalCount < utterances.length) {
+    appendFinalFeedLine(utterances[renderedFinalCount]);
+    renderedFinalCount += 1;
+  }
+
+  // A non-endpoint `line_ready` appends a short TTS chunk to the most recent
+  // final utterance. Update only that existing DOM node rather than rebuilding
+  // every transcript line for each incoming token.
+  if (renderedFinalCount > 0) {
+    const finalLine = $transcriptFeed.children[renderedFinalCount - 1] as HTMLDivElement | undefined;
+    if (finalLine) updateFeedLine(finalLine, utterances[renderedFinalCount - 1]);
+  }
+
+  if (hasUtteranceText(currentUtt)) {
+    if (!interimFeedLine) {
+      interimFeedLine = createFeedLine(true);
+      $transcriptFeed.appendChild(interimFeedLine);
+    }
+    updateFeedLine(interimFeedLine, currentUtt, true);
+  } else if (interimFeedLine) {
+    interimFeedLine.remove();
+    interimFeedLine = null;
+  }
 
   if (shouldScroll) {
     $transcriptFeed.scrollTop = $transcriptFeed.scrollHeight;
