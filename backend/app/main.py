@@ -23,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from .config import (
     LANGUAGES,
     MAX_ENDPOINT_DELAY_MS,
+    MIN_ENDPOINT_DELAY_MS,
     SONIOX_API_KEY,
     STT_URL,
     TTS_URL,
@@ -112,6 +113,15 @@ RECONNECT_MAX_DELAY_SECONDS = 10.0
 RECONNECT_JITTER_RATIO = 0.2
 RECONNECT_EXHAUSTED_CLOSE_CODE = 4000
 MAX_RECONNECT_AUDIO_BUFFER_BYTES = 500 * 1024
+
+
+def _mask_key(key: str) -> str:
+    """Return a masked version of an API key for safe display in UI."""
+    if not key:
+        return ""
+    if len(key) > 8:
+        return key[:4] + "****" + key[-4:]
+    return "****"
 
 
 @asynccontextmanager
@@ -297,17 +307,72 @@ async def api_tts_config(payload: dict = Body(...)) -> JSONResponse:
 
 @app.get("/api/tts/config")
 async def api_get_tts_config() -> JSONResponse:
+    """Return TTS and STT config so the frontend knows the current provider
+    and whether a key is already stored for each."""
     providers = get_available_tts_providers()
-    provider_keys = {}
+    tts_provider_keys = {}
     for p in providers:
         key = get_tts_api_key(p.id)
         if key:
-            provider_keys[p.id] = key[:4] + "****" + key[-4:] if len(key) > 8 else "****"
+            tts_provider_keys[p.id] = _mask_key(key)
+
+    current_stt = get_stt_provider()
+    stt_key = get_stt_api_key(current_stt)
+    stt_api_key_present = bool(stt_key)
+
+    current_translation = get_translation_provider()
+    translation_key = get_translation_api_key(current_translation)
+    translation_api_key_present = bool(translation_key)
+
     return JSONResponse({
         "current_provider": get_tts_provider(),
         "current_voice": get_tts_voice(get_tts_provider()),
-        "configured_providers": provider_keys,
+        "configured_providers": tts_provider_keys,
+        "selected_stt_provider": current_stt,
+        "stt_api_key_present": stt_api_key_present,
+        "stt_api_key_masked": _mask_key(stt_key) if stt_key else "",
+        "selected_translation_provider": current_translation,
+        "translation_api_key_present": translation_api_key_present,
+        "translation_api_key_masked": _mask_key(translation_key) if translation_key else "",
     })
+
+
+@app.post("/api/config/save")
+async def api_save_config(payload: dict = Body(...)) -> JSONResponse:
+    """Unified save endpoint: writes provider selections and API keys in one call.
+
+    Any key field that is empty/missing keeps the existing stored value.
+    """
+    tts_provider = str(payload.get("tts_provider") or "")
+    tts_voice = str(payload.get("tts_voice") or "")
+    stt_provider = str(payload.get("stt_provider") or "")
+    translation_provider = str(payload.get("translation_provider") or "")
+
+    tts_api_key = str(payload.get("tts_api_key") or "").strip()
+    stt_api_key = str(payload.get("stt_api_key") or "").strip()
+    translation_api_key = str(payload.get("translation_api_key") or "").strip()
+
+    # Save TTS
+    if tts_provider:
+        set_tts_provider(tts_provider)
+        if tts_api_key:
+            set_tts_api_key(tts_provider, tts_api_key)
+        if tts_voice:
+            set_tts_voice(tts_provider, tts_voice)
+
+    # Save STT
+    if stt_provider:
+        set_stt_provider(stt_provider)
+        if stt_api_key:
+            set_stt_api_key(stt_provider, stt_api_key)
+
+    # Save Translation
+    if translation_provider:
+        set_translation_provider(translation_provider)
+        if translation_api_key:
+            set_translation_api_key(translation_provider, translation_api_key)
+
+    return JSONResponse({"ok": True})
 
 
 @app.post("/api/tts/providers/{provider_id}/test")
@@ -498,8 +563,21 @@ async def translation_websocket(
     translate_text = None if translation_provider == "soniox" else translation_engine.translate
 
     context = _parse_context(context_b64)
-    endpoint_delay_ms = max(MAX_ENDPOINT_DELAY_MS, min(3000, stt_delay_ms))
+    # Honor the frontend's endpointing choice within a safe window. Earlier
+    # versions floored at MAX_ENDPOINT_DELAY_MS (3000 ms), which forced every
+    # session into a slow <end> and inflated end-to-end latency. Now we cap
+    # at 3000 ms (upper bound to avoid cutting off long pauses) and floor at
+    # MIN_ENDPOINT_DELAY_MS (lower bound so we don't get spurious endpoints).
+    endpoint_delay_ms = max(MIN_ENDPOINT_DELAY_MS, min(3000, stt_delay_ms if stt_delay_ms else MAX_ENDPOINT_DELAY_MS))
     extra_hold_ms = max(0, stt_delay_ms - 3000)
+    language_hints: list[str] = []
+    if mode == "two_way":
+        if lang_a:
+            language_hints.append(lang_a)
+        if lang_b:
+            language_hints.append(lang_b)
+    elif target_lang:
+        language_hints.append(target_lang)
     stt_config = build_stt_config(
         mode=mode,
         target_lang=target_lang,
@@ -510,6 +588,7 @@ async def translation_websocket(
         context=context,
         max_endpoint_delay_ms=endpoint_delay_ms,
         enable_translation=translation_provider == "soniox",
+        language_hints=language_hints or None,
     )
 
     if mode == "two_way":
@@ -1000,104 +1079,54 @@ def _reconnect_delay(attempt: int, random_value: float | None = None) -> float:
         RECONNECT_BASE_DELAY_SECONDS * (2 ** (normalized_attempt - 1)),
         RECONNECT_MAX_DELAY_SECONDS,
     )
-    sample = random.random() if random_value is None else min(max(random_value, 0.0), 1.0)
-    return min(
-        exponential * (1 + RECONNECT_JITTER_RATIO * sample),
-        RECONNECT_MAX_DELAY_SECONDS,
-    )
-
-
-def _iter_leaf_exceptions(error: BaseException) -> Iterator[BaseException]:
-    if isinstance(error, BaseExceptionGroup):
-        for nested in error.exceptions:
-            yield from _iter_leaf_exceptions(nested)
-        return
-    yield error
-
-
-def _close_frame_details(source) -> tuple[int | None, str | None]:
-    code = getattr(source, "code", None)
-    reason = getattr(source, "reason", None)
-    if code is None:
-        for frame_name in ("rcvd", "sent"):
-            frame = getattr(source, frame_name, None)
-            if frame is not None:
-                code = getattr(frame, "code", None)
-                reason = getattr(frame, "reason", None)
-                if code is not None:
-                    break
-    try:
-        normalized_code = int(code) if code is not None else None
-    except (TypeError, ValueError):
-        normalized_code = None
-    return normalized_code, str(reason) if reason else None
-
-
-def _connection_close_details(error: BaseException) -> tuple[int, str]:
-    """Extract the actual WebSocket close code/reason from an exception tree."""
-    fallback_reason = ""
-    for leaf in _iter_leaf_exceptions(error):
-        code, reason = _close_frame_details(leaf)
-        if not fallback_reason and str(leaf):
-            fallback_reason = str(leaf)
-        if code is not None:
-            return code, reason or fallback_reason or type(leaf).__name__
-    return 1006, fallback_reason or type(error).__name__
-
-
-def _websocket_close_details(stt_ws) -> tuple[int, str]:
-    if stt_ws is not None:
-        code = getattr(stt_ws, "close_code", None)
-        reason = getattr(stt_ws, "close_reason", None)
-        if code is None:
-            code, reason = _close_frame_details(stt_ws)
-        else:
-            try:
-                code = int(code)
-            except (TypeError, ValueError):
-                code = None
-        if code is not None:
-            return code, str(reason) if reason else "STT WebSocket closed"
-    return 1006, "STT WebSocket closed without a close frame"
-
-
-def _has_browser_disconnect(eg: BaseExceptionGroup) -> bool:
-    """Check if any exception in the group is a browser WebSocket disconnect."""
-    for e in _iter_leaf_exceptions(eg):
-        if isinstance(e, WebSocketDisconnect):
-            return True
-        if isinstance(e, RuntimeError) and "close message has been sent" in str(e):
-            return True
-    return False
+    r = random_value if random_value is not None else random.random()
+    jitter = exponential * RECONNECT_JITTER_RATIO
+    return exponential + r * jitter
 
 
 def _parse_context(context_b64: str | None) -> dict | None:
     if not context_b64:
         return None
     try:
-        raw = base64.urlsafe_b64decode(context_b64.encode("ascii")).decode("utf-8")
-        return json.loads(raw)
-    except Exception as e:
-        log.warning("context_parse_failed", error=str(e))
-        return None
+        return json.loads(base64.b64decode(context_b64).decode("utf-8"))
+    except Exception:
+        return {}
 
 
-# Serve the frontend as static files at /.
-# When packaged by PyInstaller, `__file__` points into the app's PYZ and is
-# not a real filesystem path relative to the bundle root — the frontend
-# assets live at `<_MEIPASS>/frontend/dist` (see installer/spec.spec `datas`),
-# so that path must be resolved from `sys._MEIPASS` directly instead of via
-# `__file__` when frozen.
-if getattr(sys, "frozen", False):
-    _static_dir = str(Path(sys._MEIPASS) / "frontend" / "dist")  # type: ignore[attr-defined]
-else:
-    # Prefer the Vite build output (frontend/dist/) if it exists; fall back
-    # to the source frontend/ for dev and the no-build-step vanilla fallback.
-    _frontend_dir = os.path.join(os.path.dirname(__file__), "..", "..", "frontend")
-    _dist_dir = os.path.join(_frontend_dir, "dist")
-    _static_dir = _dist_dir if os.path.isdir(_dist_dir) else _frontend_dir
-app.mount(
-    "/",
-    StaticFiles(directory=_static_dir, html=True),
-    name="static",
-)
+def _has_browser_disconnect(eg: ExceptionGroup | BaseExceptionGroup) -> bool:
+    for exc in eg.exceptions:
+        if isinstance(exc, WebSocketDisconnect):
+            return True
+        if isinstance(exc, BaseExceptionGroup):
+            if _has_browser_disconnect(exc):
+                return True
+    return False
+
+
+def _connection_close_details(eg: ExceptionGroup | BaseExceptionGroup) -> tuple[int | None, str | None]:
+    for exc in eg.exceptions:
+        if isinstance(exc, BaseExceptionGroup):
+            code, reason = _connection_close_details(exc)
+            if code is not None:
+                return code, reason
+        if isinstance(exc, websockets.exceptions.ConnectionClosed):
+            return exc.code, exc.reason
+        if isinstance(exc, ConnectionError):
+            return 1006, str(exc)
+    return None, None
+
+
+def _websocket_close_details(ws) -> tuple[int | None, str | None]:
+    if ws is None:
+        return 1006, "websocket was None (unexpected connection state)"
+    try:
+        close_code = ws.close_code
+        close_reason = ws.close_reason
+    except Exception:
+        return None, None
+    return close_code, close_reason
+
+
+_static_dir = os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist")
+if os.path.isdir(_static_dir):
+    app.mount("/", StaticFiles(directory=_static_dir, html=True), name="static")

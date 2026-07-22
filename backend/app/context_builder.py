@@ -20,7 +20,16 @@ def build_stt_config(
     context: dict[str, Any] | None,
     max_endpoint_delay_ms: int = MAX_ENDPOINT_DELAY_MS,
     enable_translation: bool = True,
+    language_hints: list[str] | None = None,
 ) -> dict[str, Any]:
+    """Build the real-time STT+translation session config.
+
+    See ``https://soniox.com/docs/translation/stt-translation/rt-translation``
+    for the official configuration shape. ``language_hints`` lets the model
+    bias recognition toward expected languages, and a low
+    ``max_endpoint_delay_ms`` (Soniox STS example uses 500 ms) keeps the
+    real-time speech-to-speech pipeline's end-to-end latency minimal.
+    """
     config: dict[str, Any] = {
         "api_key": SONIOX_API_KEY,
         "model": STT_MODEL,
@@ -32,6 +41,26 @@ def build_stt_config(
         "enable_speaker_diarization": diarize,
         "enable_language_identification": lang_id,
     }
+
+    # Soniox strongly recommends setting language_hints when known — it
+    # "significantly improves accuracy" per the real-time STT docs.
+    # Push default hints from the conversation pair when the caller
+    # didn't supply explicit ones.
+    if language_hints is None and lang_id:
+        if mode == "two_way":
+            language_hints = [l for l in (lang_a, lang_b) if l]
+        elif mode == "one_way" and target_lang:
+            language_hints = [target_lang]
+    if language_hints:
+        # Deduplicate while preserving order.
+        seen: set[str] = set()
+        unique_hints: list[str] = []
+        for hint in language_hints:
+            if hint and hint not in seen:
+                seen.add(hint)
+                unique_hints.append(hint)
+        if unique_hints:
+            config["language_hints"] = unique_hints
 
     if context:
         config["context"] = _normalize_context(context)

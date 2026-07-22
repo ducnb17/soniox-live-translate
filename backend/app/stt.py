@@ -225,7 +225,7 @@ async def handle_stt(
                     direction = (
                         target_lang
                         if mode == "one_way"
-                        else _direction(token, mode, lang_a, lang_b)
+                        else _direction(token, mode, lang_a, lang_b, source_lang=current_lang)
                     )
                     tts_chunks = pending_tts_chunks
                     pending_tts_chunks = []
@@ -382,10 +382,24 @@ def _resolve_tts_target(
     lang_b: str | None,
     target_lang: str | None,
 ) -> str | None:
-    """Target language for this translation token's TTS stream."""
+    """Target language for this translation token's TTS stream.
+
+    Per the Soniox STS guide ("pick which to play based on the translation
+    token's language field"), we prefer the explicit ``language`` field that
+    Soniox sets on translation tokens when language identification is on.
+    That field holds the language the translation is in (i.e. the TTS
+    direction to play). We fall back to ``source_language`` and then to
+    the per-utterance ``current_lang`` tracked upstream for older token
+    shapes that lack both fields.
+    """
     if mode == "one_way":
         return target_lang
-    # two_way: translate to the *other* language in the pair.
+    # Preferred: the language field on the translation token, when present
+    # and inside the two-way conversation pair.
+    tgt = token.get("language")
+    if tgt and tgt in (lang_a, lang_b):
+        return tgt
+    # Fallback A: a legacy source_language field on the token.
     src = token.get("source_language")
     if src == lang_a:
         return lang_b
@@ -554,14 +568,27 @@ def _split_including_separators(text: str, pattern: re.Pattern[str]) -> list[str
     return parts
 
 
-def _direction(token: dict, mode: str, lang_a: str | None, lang_b: str | None) -> str | None:
+def _direction(
+    token: dict,
+    mode: str,
+    lang_a: str | None,
+    lang_b: str | None,
+    source_lang: str | None = None,
+) -> str | None:
     """A key identifying which TTS direction an <end> belongs to.
 
     Returns the target language for two_way (the speaker's *other* language),
-    or None for one_way (single direction)."""
+    or None for one_way (single direction). When the <end> token carries a
+    ``language`` field we use it directly; otherwise we fall back to
+    ``source_language`` and finally to the per-utterance ``current_lang``
+    tracked by the caller (the language the speaker used to start this
+    utterance)."""
     if mode != "two_way":
         return None
-    src = token.get("source_language")
+    tgt = token.get("language")
+    if tgt and tgt in (lang_a, lang_b):
+        return tgt
+    src = token.get("source_language") or source_lang
     if src == lang_a:
         return lang_b
     if src == lang_b:

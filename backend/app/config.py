@@ -27,8 +27,12 @@ TTS_KEEPALIVE_INTERVAL = 20
 STT_KEEPALIVE_INTERVAL = 15
 
 # Endpointing: fires the <end> token when the speaker pauses, letting us
-# finalize the current TTS utterance stream quickly.
-MAX_ENDPOINT_DELAY_MS = 3000
+# finalize the current TTS utterance stream quickly. Soniox STS example uses
+# 500 ms for minimum end-to-end latency (see
+# https://soniox.com/docs/translation/sts-translation). The frontend can
+# override this per session via the `stt_delay_ms` query parameter.
+MAX_ENDPOINT_DELAY_MS = 500
+MIN_ENDPOINT_DELAY_MS = 200
 
 def _user_data_dir() -> Path:
     """Per-user, always-writable data directory (mirrors config_store.py).
