@@ -168,6 +168,134 @@ def test_successful_provider_test_saves_key_and_selects_provider(
     provider_setter.assert_called_once_with("example")
 
 
+class TestUnifiedConfigSave:
+    """Tests for POST /api/config/save."""
+
+    def test_saves_all_fields_when_provided(self, client, monkeypatch):
+        tts_provider = Mock()
+        tts_key = Mock()
+        tts_voice = Mock()
+        stt_provider = Mock()
+        stt_key = Mock()
+        translation_provider = Mock()
+        translation_key = Mock()
+
+        monkeypatch.setattr(main, "set_tts_provider", tts_provider)
+        monkeypatch.setattr(main, "set_tts_api_key", tts_key)
+        monkeypatch.setattr(main, "set_tts_voice", tts_voice)
+        monkeypatch.setattr(main, "set_stt_provider", stt_provider)
+        monkeypatch.setattr(main, "set_stt_api_key", stt_key)
+        monkeypatch.setattr(main, "set_translation_provider", translation_provider)
+        monkeypatch.setattr(main, "set_translation_api_key", translation_key)
+
+        payload = {
+            "tts_provider": "elevenlabs",
+            "tts_voice": "Adam",
+            "stt_provider": "soniox",
+            "translation_provider": "google",
+            "tts_api_key": "tk-abc",
+            "stt_api_key": "sk-xyz",
+            "translation_api_key": "tk-trans",
+        }
+
+        r = client.post("/api/config/save", json=payload)
+        assert r.status_code == 200
+        assert r.json() == {"ok": True}
+
+        tts_provider.assert_called_once_with("elevenlabs")
+        tts_key.assert_called_once_with("elevenlabs", "tk-abc")
+        tts_voice.assert_called_once_with("elevenlabs", "Adam")
+        stt_provider.assert_called_once_with("soniox")
+        stt_key.assert_called_once_with("soniox", "sk-xyz")
+        translation_provider.assert_called_once_with("google")
+        translation_key.assert_called_once_with("google", "tk-trans")
+
+    def test_empty_keys_dont_overwrite(self, client, monkeypatch):
+        """Empty or missing key fields should not call the key setter."""
+        tts_key = Mock()
+        stt_key = Mock()
+        translation_key = Mock()
+
+        monkeypatch.setattr(main, "set_tts_provider", Mock())
+        monkeypatch.setattr(main, "set_tts_api_key", tts_key)
+        monkeypatch.setattr(main, "set_tts_voice", Mock())
+        monkeypatch.setattr(main, "set_stt_provider", Mock())
+        monkeypatch.setattr(main, "set_stt_api_key", stt_key)
+        monkeypatch.setattr(main, "set_translation_provider", Mock())
+        monkeypatch.setattr(main, "set_translation_api_key", translation_key)
+
+        payload = {
+            "tts_provider": "soniox",
+            "tts_voice": "Maya",
+            "stt_provider": "deepgram",
+            "translation_provider": "soniox",
+            # all keys omitted
+        }
+
+        r = client.post("/api/config/save", json=payload)
+        assert r.status_code == 200
+        assert r.json() == {"ok": True}
+
+        tts_key.assert_not_called()
+        stt_key.assert_not_called()
+        translation_key.assert_not_called()
+
+    def test_saves_with_missing_providers(self, client, monkeypatch):
+        """Should not crash when some provider fields are missing."""
+        monkeypatch.setattr(main, "set_tts_provider", Mock())
+        monkeypatch.setattr(main, "set_tts_api_key", Mock())
+        monkeypatch.setattr(main, "set_stt_provider", Mock())
+        monkeypatch.setattr(main, "set_stt_api_key", Mock())
+        monkeypatch.setattr(main, "set_translation_provider", Mock())
+        monkeypatch.setattr(main, "set_translation_api_key", Mock())
+
+        r = client.post("/api/config/save", json={"tts_voice": "Maya"})
+        assert r.status_code == 200
+        assert r.json() == {"ok": True}
+
+
+class TestTtsConfigApi:
+    """Tests for GET /api/tts/config — returns TTS, STT, and translation config."""
+
+    def test_returns_all_provider_config_fields(self, client, monkeypatch):
+        monkeypatch.setattr(main, "get_tts_provider", lambda: "elevenlabs")
+        monkeypatch.setattr(main, "get_tts_voice", lambda pid: "Adam")
+        monkeypatch.setattr(main, "get_stt_provider", lambda: "google_v2")
+        monkeypatch.setattr(main, "get_stt_api_key", lambda pid: "sk-long-key-abcde" if pid == "google_v2" else None)
+        monkeypatch.setattr(main, "get_translation_provider", lambda: "soniox")
+        monkeypatch.setattr(main, "get_translation_api_key", lambda pid: None if pid == "soniox" else None)
+
+        r = client.get("/api/tts/config")
+        assert r.status_code == 200
+        data = r.json()
+
+        assert data["current_provider"] == "elevenlabs"
+        assert data["current_voice"] == "Adam"
+        assert "configured_providers" in data
+        assert data["selected_stt_provider"] == "google_v2"
+        assert data["stt_api_key_present"] is True
+        assert data["stt_api_key_masked"] == "sk-l****bcde"
+        assert data["selected_translation_provider"] == "soniox"
+        assert data["translation_api_key_present"] is False
+        assert data["translation_api_key_masked"] == ""
+
+    def test_no_keys_returns_false_and_empty_mask(self, client, monkeypatch):
+        monkeypatch.setattr(main, "get_tts_provider", lambda: "soniox")
+        monkeypatch.setattr(main, "get_tts_voice", lambda pid: "Maya")
+        monkeypatch.setattr(main, "get_stt_provider", lambda: "soniox")
+        monkeypatch.setattr(main, "get_stt_api_key", lambda pid: None)
+        monkeypatch.setattr(main, "get_translation_provider", lambda: "soniox")
+        monkeypatch.setattr(main, "get_translation_api_key", lambda pid: None)
+
+        r = client.get("/api/tts/config")
+        data = r.json()
+
+        assert data["stt_api_key_present"] is False
+        assert data["stt_api_key_masked"] == ""
+        assert data["translation_api_key_present"] is False
+        assert data["translation_api_key_masked"] == ""
+
+
 class TestConversationApi:
     def test_list_and_search_forward_pagination(self, client, monkeypatch):
         list_mock = AsyncMock(return_value=[{"id": "listed"}])

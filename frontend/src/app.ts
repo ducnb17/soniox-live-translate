@@ -127,6 +127,8 @@ const $translationTestStatus = $<HTMLSpanElement>("translation-test-status");
 const $translationTierBadge = $<HTMLSpanElement>("translation-tier-badge");
 const $translationProviderDescription = $<HTMLSpanElement>("translation-provider-description");
 const $translationKeyLink = $<HTMLAnchorElement>("translation-key-link");
+const $saveConfigBtn = $<HTMLButtonElement>("save-config-btn");
+const $saveConfigStatus = $<HTMLSpanElement>("save-config-status");
 const $historyPanel = $<HTMLDivElement>("history-panel");
 const $historyList = $<HTMLDivElement>("history-list");
 const $historySearch = $<HTMLInputElement>("history-search");
@@ -601,6 +603,16 @@ async function onTtsProviderChange(savedVoice = ""): Promise<void> {
   $ttsProviderDescription.textContent = provider?.description || "";
   $ttsKeyLink.href = provider?.pricing_url || "#";
 
+  // Auto-detect saved TTS key — disable input if key already stored.
+  const ttsHasKey = provider?.has_api_key ?? false;
+  if (ttsHasKey) {
+    $ttsApiKey.disabled = true;
+    $ttsApiKey.placeholder = `✓ Đã lưu key cho ${provider?.name ?? pid} — không cần nhập lại`;
+  } else {
+    $ttsApiKey.disabled = false;
+    $ttsApiKey.placeholder = "Enter API key...";
+  }
+
   updateTtsCostHint();
 
   // Load voices
@@ -748,6 +760,24 @@ async function testDomainProvider(
   }
 }
 
+function updateKeyInputState(
+  select: HTMLSelectElement,
+  providers: ProviderInfo[],
+  input: HTMLInputElement,
+  status: HTMLSpanElement,
+): void {
+  const provider = providers.find((p) => p.id === select.value);
+  const hasKey = provider?.has_api_key ?? false;
+  if (hasKey) {
+    input.disabled = true;
+    input.placeholder = `✓ Đã lưu key cho ${provider?.name ?? select.value} — không cần nhập lại`;
+    status.textContent = "";
+  } else {
+    input.disabled = false;
+    input.placeholder = "Enter API key...";
+  }
+}
+
 async function loadSpeechProviders(): Promise<void> {
   try {
     sttProviders = await loadDomainProviders("stt", $sttProvider);
@@ -757,6 +787,9 @@ async function loadSpeechProviders(): Promise<void> {
       $translationProvider, translationProviders, $translationApiKeyRow,
       $translationTierBadge, $translationProviderDescription, $translationKeyLink,
     );
+    // Auto-detect saved provider keys and disable inputs accordingly.
+    updateKeyInputState($sttProvider, sttProviders, $sttApiKey, $sttTestStatus);
+    updateKeyInputState($translationProvider, translationProviders, $translationApiKey, $translationTestStatus);
   } catch {
     window.setTimeout(() => { void loadSpeechProviders(); }, 3000);
   }
@@ -765,6 +798,7 @@ async function loadSpeechProviders(): Promise<void> {
 $sttProvider.addEventListener("change", () => {
   $sttTestStatus.textContent = "";
   showProviderMeta($sttProvider, sttProviders, $sttApiKeyRow, $sttTierBadge, $sttProviderDescription, $sttKeyLink);
+  updateKeyInputState($sttProvider, sttProviders, $sttApiKey, $sttTestStatus);
 });
 $translationProvider.addEventListener("change", () => {
   $translationTestStatus.textContent = "";
@@ -772,6 +806,7 @@ $translationProvider.addEventListener("change", () => {
     $translationProvider, translationProviders, $translationApiKeyRow,
     $translationTierBadge, $translationProviderDescription, $translationKeyLink,
   );
+  updateKeyInputState($translationProvider, translationProviders, $translationApiKey, $translationTestStatus);
 });
 $btnTestSttKey.addEventListener("click", () => {
   void testDomainProvider("stt", $sttProvider, $sttApiKey, $sttTestStatus);
@@ -780,6 +815,53 @@ $btnTestTranslationKey.addEventListener("click", () => {
   void testDomainProvider(
     "translation", $translationProvider, $translationApiKey, $translationTestStatus,
   );
+});
+
+// ── Save configuration button ──
+$saveConfigBtn.addEventListener("click", async () => {
+  $saveConfigStatus.classList.remove("hidden");
+  $saveConfigStatus.textContent = "Đang lưu…";
+  try {
+    const ttsKeyInput = $ttsApiKey.value.trim();
+    const sttKeyInput = $sttApiKey.value.trim();
+    const translationKeyInput = $translationApiKey.value.trim();
+
+    // Only send non-empty keys so we don't overwrite stored keys with blanks.
+    const payload: Record<string, string> = {
+      tts_provider: $ttsProvider.value,
+      tts_voice: $ttsVoice.value,
+      stt_provider: $sttProvider.value,
+      translation_provider: $translationProvider.value,
+    };
+    if (ttsKeyInput) payload["tts_api_key"] = ttsKeyInput;
+    if (sttKeyInput) payload["stt_api_key"] = sttKeyInput;
+    if (translationKeyInput) payload["translation_api_key"] = translationKeyInput;
+
+    const r = await fetch("/api/config/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await r.json() as { ok: boolean };
+    if (data.ok) {
+      $saveConfigStatus.textContent = "✅ Đã lưu cấu hình";
+      // Reload providers so [key] badges and has_api_key flags update.
+      await loadTtsProviders();
+      await loadSpeechProviders();
+      // Clear key inputs after successful save.
+      $ttsApiKey.value = "";
+      $sttApiKey.value = "";
+      $translationApiKey.value = "";
+    } else {
+      $saveConfigStatus.textContent = "❌ Lỗi khi lưu";
+    }
+  } catch (error) {
+    $saveConfigStatus.textContent = `❌ ${(error as Error).message}`;
+  }
+  window.setTimeout(() => {
+    $saveConfigStatus.textContent = "";
+    $saveConfigStatus.classList.add("hidden");
+  }, 4000);
 });
 
 void loadSpeechProviders();

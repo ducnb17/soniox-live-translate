@@ -33,3 +33,21 @@ test("STT and TTS expose independent controls and state", () => {
   assert.match(app, /textToSpeech\.getState\(\)\.isTtsEnabled/);
   assert.match(app, /textToSpeech\.disable\(\);\s*speechToText\.setTtsEnabled\(false\)/);
 });
+
+test("save config button is present and wired to /api/config/save", () => {
+  assert.match(html, /id="save-config-btn"/);
+  assert.match(app, /\/api\/config\/save/);
+  assert.match(app, /saveConfigBtn\.addEventListener/);
+});
+
+test("changing provider auto-detects saved key and disables input", () => {
+  assert.match(app, /updateKeyInputState/);
+  assert.match(app, /\.disabled\s*=\s*true/);
+  assert.match(app, /Đã lưu key cho/);
+  // Both STT and translation provider changes call updateKeyInputState.
+  assert.match(app, /updateKeyInputState\(\$sttProvider,\s*sttProviders/);
+  assert.match(app, /updateKeyInputState\(\$translationProvider,\s*translationProviders/);
+  // TTS provider change also checks has_api_key.
+  assert.match(app, /ttsHasKey/);
+  assert.match(app, /\$ttsApiKey\.disabled\s*=\s*true/);
+});
