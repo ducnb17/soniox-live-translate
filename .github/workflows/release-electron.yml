@@ -125,10 +125,16 @@ jobs:
           files: electron/dist/*.exe
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-beta.') }}
+          make_latest: ${{ !contains(github.ref_name, '-beta.') }}
           body: |
             ## Soniox Live Translate (Desktop / Electron) ${{ github.ref_name }}
 
             This Electron build uses a server-only FastAPI backend and does not bundle or launch pywebview.
+
+            ### Stable release highlights
+            - Real-time speech-to-speech translation with FIFO audio playback
+            - Translation Style: Natural, Literal, Professional, Casual, Subtitle / Game, Technical
+            - OpenAI supports all six styles; DeepL supports Natural, Professional and Casual
 
             Bản cài đặt **desktop app độc lập** — cửa sổ riêng, icon riêng trên
             Desktop/Start Menu/Taskbar, không mở tab trình duyệt.
