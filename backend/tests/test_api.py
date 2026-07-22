@@ -86,6 +86,16 @@ class TestSetupPage:
         assert r.status_code == 200
         assert "text/html" in r.headers.get("content-type", "")
 
+    def test_falls_back_to_source_when_frontend_dist_is_absent(
+        self, client, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(main, "_static_dir", str(tmp_path / "missing-dist"))
+
+        r = client.get("/setup")
+
+        assert r.status_code == 200
+        assert "text/html" in r.headers.get("content-type", "")
+
 
 class TestSetupPost:
     def test_rejects_empty_key(self, client):

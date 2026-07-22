@@ -166,6 +166,11 @@ async def setup_status() -> JSONResponse:
 @app.get("/setup", include_in_schema=False)
 async def setup_page() -> FileResponse:
     setup_html = os.path.join(_static_dir, "setup.html")
+    if not os.path.isfile(setup_html):
+        # CI runs backend tests before the independent frontend build job has
+        # created dist/. Development checkouts still contain the source setup
+        # page, while packaged builds always take the compiled dist asset.
+        setup_html = os.path.join(_frontend_source_dir, "setup.html")
     return FileResponse(setup_html, media_type="text/html")
 
 
@@ -1160,6 +1165,9 @@ def _websocket_close_details(ws) -> tuple[int | None, str | None]:
     return close_code, close_reason
 
 
-_static_dir = os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist")
+_frontend_source_dir = os.path.join(
+    os.path.dirname(__file__), "..", "..", "frontend"
+)
+_static_dir = os.path.join(_frontend_source_dir, "dist")
 if os.path.isdir(_static_dir):
     app.mount("/", StaticFiles(directory=_static_dir, html=True), name="static")
