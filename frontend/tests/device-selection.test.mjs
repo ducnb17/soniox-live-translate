@@ -10,7 +10,7 @@ const { outputText } = ts.transpileModule(source, {
 });
 const compiledModule = { exports: {} };
 new Function("exports", "module", outputText)(compiledModule.exports, compiledModule);
-const { resolveAudioDevices } = compiledModule.exports;
+const { isLikelyVirtualLoopbackDevice, resolveAudioDevices } = compiledModule.exports;
 
 const device = (kind, deviceId, label) => ({ kind, deviceId, label });
 
@@ -54,4 +54,19 @@ test("physical and virtual devices remain available and the pseudo default is no
   assert.equal(result.outputId, "speakers");
   assert.equal(result.missingInput, false);
   assert.equal(result.missingOutput, false);
+});
+
+test("virtual and loopback labels are identified so browser microphone DSP can be disabled", () => {
+  for (const label of [
+    "CABLE Output (VB-Audio Virtual Cable)",
+    "VoiceMeeter Output",
+    "Stereo Mix (Realtek(R) Audio)",
+    "Windows loopback capture",
+  ]) {
+    assert.equal(isLikelyVirtualLoopbackDevice({ label }), true, label);
+  }
+
+  assert.equal(isLikelyVirtualLoopbackDevice({ label: "USB Microphone" }), false);
+  assert.equal(isLikelyVirtualLoopbackDevice({ label: "" }), false);
+  assert.equal(isLikelyVirtualLoopbackDevice(undefined), false);
 });

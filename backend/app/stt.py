@@ -22,7 +22,10 @@ log = get_logger("stt")
 TTS_TEXT = "text"
 TTS_END = "end"
 TTS_NONE = None
-LINE_MAX_CHARS = 50
+# TTS chunks are deliberately short so synthesis/playback can start before a
+# long utterance reaches Soniox's real endpoint. This is audio buffering only;
+# the frontend coalesces non-endpoint `line_ready` messages for display.
+LINE_MAX_CHARS = 80
 
 
 async def pipe_browser_to_stt(

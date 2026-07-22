@@ -54,3 +54,34 @@ The tests feed the same resolver used after `enumerateDevices()` an empty list a
    ```
 
 Also verify on Windows with a real USB or VB-Cable device: select it, unplug or disable it, and confirm the warning plus automatic `System Default` fallback. Use `Test Mic` to observe the live VU meter and `Test Speaker` to hear the routed 440 Hz tone.
+
+## Streaming transcript and virtual-loopback regression
+
+Run the following checks on a Windows build with DevTools Console open.
+
+### Long continuous utterance
+
+1. Select a physical microphone and start a live translation session with TTS enabled.
+2. Speak continuously for 15–20 seconds, producing a translation longer than 80 characters without intentionally pausing.
+3. Confirm TTS begins speaking before the full utterance ends.
+4. Confirm the completed transcript is rendered as one feed block for that speaker turn, rather than several 80-character blocks or 1–2 word rows.
+5. After Soniox emits an endpoint, confirm the next utterance starts a new feed block. Change speaker (when diarization is enabled) and confirm it also starts a new block.
+
+### VB-Cable / virtual loopback input
+
+1. Route a known audio source (for example a media player or browser tab) to `CABLE Input (VB-Audio Virtual Cable)`.
+2. In the app, select `CABLE Output (VB-Audio Virtual Cable)` as the microphone input and start translation.
+3. In DevTools Console, confirm the `[audio-input] acquiring virtual/loopback input` log shows all three constraints as `false`:
+   `echoCancellation`, `noiseSuppression`, and `autoGainControl`.
+4. Confirm the source audio is transcribed and translated continuously, including audio longer than 80 characters.
+5. Stop the source audio before starting a second capture. Confirm that, after about two seconds, the app status and console clearly report that the AudioWorklet received no input data. Resume or correct the audio route and confirm capture recovers on the next session.
+
+### System audio loopback versus System Default microphone
+
+1. With speakers active and TTS enabled, select `System Default` microphone input, then play or speak content that produces a translation.
+2. Check whether TTS output is heard back as input. Repeat with headphones connected; record the difference in echo/barge-in behavior.
+3. Stop the session and select the app's `Tab/System audio` source. In the native capture picker, enable audio sharing. On Windows this uses Electron's configured system loopback capture path.
+4. Confirm only the selected/shared system audio is transcribed and that TTS output is not re-captured through the physical microphone path.
+5. Repeat an intentional barge-in while TTS is audible. Confirm real speech can interrupt according to the configured barge-in behavior, while TTS onset alone does not repeatedly stop/restart the session.
+
+A failed check should include the selected input/output labels, whether headphones were used, the `[audio-input]` console logs, and whether the problem was no PCM data, echo, a fragmented transcript, or an unexpected barge-in.

@@ -940,6 +940,7 @@ async function viewConversation(id: string): Promise<void> {
         };
       });
     currentUtt = newUtt();
+    displayUtteranceOpen = false;
     render();
     setStatus(`Đã mở hội thoại ${id} (${utterances.length} câu)`);
   } catch (error) {
@@ -1022,6 +1023,10 @@ let mode: AppMode = "file";
 let state: AppState = "idle";
 let utterances: Utterance[] = [];
 let currentUtt = newUtt();
+// A false `is_endpoint` line_ready is an early TTS buffering chunk, not a
+// display boundary. This tracks the one transcript block that may receive
+// more chunks until Soniox sends its actual `<end>` endpoint.
+let displayUtteranceOpen = false;
 let fileAudio: HTMLAudioElement | null = null;
 let fileTtsHeard = false;
 let feedAutoScroll = true;
@@ -1184,8 +1189,10 @@ function handleSttResult(data: SonioxSttResponse): void {
     if (!t.text) continue;
 
     if (t.text === "<end>") {
-      currentUtt.originalPartial = "";
-      currentUtt.translationPartial = "";
+      // `line_ready` is the only event that commits a displayed transcript
+      // line. `<end>` can arrive first, so clear its raw preview and let the
+      // matching endpoint line_ready commit the complete utterance once.
+      currentUtt = newUtt();
       continue;
     }
 
@@ -1219,7 +1226,7 @@ function handleLineReady(data: SonioxSttResponse): void {
   const nextLanguage = data.lang || null;
   const previous = utterances[utterances.length - 1];
   const shouldAppendToPrevious =
-    !data.is_endpoint &&
+    displayUtteranceOpen &&
     previous != null &&
     previous.speaker === nextSpeaker;
 
@@ -1238,16 +1245,11 @@ function handleLineReady(data: SonioxSttResponse): void {
     });
   }
 
-  if (data.is_endpoint) {
-    currentUtt = newUtt();
-  } else {
-    currentUtt.originalFinal = original;
-    currentUtt.translationFinal = translated;
-    currentUtt.originalPartial = "";
-    currentUtt.translationPartial = "";
-    currentUtt.speaker = nextSpeaker;
-    currentUtt.language = nextLanguage;
-  }
+  // `line_ready` text is already committed to the final display line above.
+  // Only Soniox's endpoint closes that line; earlier chunks remain eligible
+  // for coalescing so TTS can stream without fragmenting the transcript.
+  displayUtteranceOpen = !data.is_endpoint;
+  currentUtt = newUtt();
 
   render();
 }
@@ -1499,8 +1501,8 @@ function resetSession(): void {
   textToSpeech.resetSession();
   utterances = [];
   currentUtt = newUtt();
+  displayUtteranceOpen = false;
   feedAutoScroll = true;
-  renderedLineCount = 0;
   $transcriptFeed.innerHTML = "";
   ttsSessionUsage = emptyTtsUsage();
   updateTtsCostHint();
@@ -1757,31 +1759,13 @@ function renderFeedLine(u: Utterance, interim = false): void {
   $transcriptFeed.appendChild(line);
 }
 
-/** Cached count of fully-rendered (non-interim) lines in the feed. */
-let renderedLineCount = 0;
-
-/**
- * Incremental render: only update/append the lines that actually changed.
- * Previously this cleared `.innerHTML` and rebuilt every line on each token,
- * which caused visible lag when many utterances accumulated.
- */
 function render(): void {
   const shouldScroll = feedAutoScroll;
   const previousScrollTop = $transcriptFeed.scrollTop;
-
-  // Remove the old interim line (always the last child if it exists).
-  const lastChild = $transcriptFeed.lastElementChild;
-  if (lastChild?.classList.contains("interim")) {
-    lastChild.remove();
-  }
-
-  // Append any new finalized utterances that haven't been rendered yet.
-  while (renderedLineCount < utterances.length) {
-    renderFeedLine(utterances[renderedLineCount]);
-    renderedLineCount += 1;
-  }
-
-  // Append the current interim utterance.
+  // A technical TTS chunk mutates the currently displayed utterance in place.
+  // Rebuild so its existing DOM block reflects the appended text immediately.
+  $transcriptFeed.innerHTML = "";
+  for (const utterance of utterances) renderFeedLine(utterance);
   renderFeedLine(currentUtt, true);
 
   if (shouldScroll) {
