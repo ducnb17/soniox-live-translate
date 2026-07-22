@@ -3,6 +3,7 @@
 import { TTS_SAMPLE_RATE } from "./types";
 import { StrictLineAudioQueue } from "./tts-line-queue";
 import { resolveTtsChunkSchedule } from "./tts-playback";
+import { stretchSamples } from "./audio-stretch";
 
 export interface TextToSpeechConfig {
   outputDevice: string;
@@ -280,16 +281,28 @@ export class TextToSpeech {
       pcm[index] = samples[index] / 32768;
     }
 
-    const buffer = this.audioCtx.createBuffer(1, pcm.length, TTS_SAMPLE_RATE);
-    buffer.getChannelData(0).set(pcm);
+    const rate = this.config.playbackRate;
+    const useStretch = Math.abs(rate - 1) > 1e-6;
+    const rendered = useStretch ? stretchSamples(pcm, rate) : pcm;
+
+    const buffer = this.audioCtx.createBuffer(1, rendered.length, TTS_SAMPLE_RATE);
+    buffer.getChannelData(0).set(rendered);
     const source = this.audioCtx.createBufferSource();
     source.buffer = buffer;
-    source.playbackRate.value = this.config.playbackRate;
-    // Compensate pitch shift caused by playbackRate so the voice stays natural
-    // even at higher speeds. detune = 1200 * log2(1 / rate) restores the
-    // original pitch: a rate of 2.0 shifts pitch +1 octave (+1200 cents),
-    // and detune -1200 cancels it exactly.
-    source.detune.value = 1200 * Math.log2(1 / this.config.playbackRate);
+
+    if (useStretch) {
+      // Time-stretched audio — pitch already preserved; play at normal rate.
+      source.playbackRate.value = 1;
+      source.detune.value = 0;
+    } else {
+      source.playbackRate.value = rate;
+      // Compensate pitch shift caused by playbackRate so the voice stays natural
+      // even at higher speeds. detune = 1200 * log2(1 / rate) restores the
+      // original pitch: a rate of 2.0 shifts pitch +1 octave (+1200 cents),
+      // and detune -1200 cancels it exactly.
+      source.detune.value = 1200 * Math.log2(1 / rate);
+    }
+
     const gain = this.audioCtx.createGain();
     source.connect(gain);
     gain.connect(this.audioCtx.destination);
@@ -303,7 +316,7 @@ export class TextToSpeech {
     );
     if (schedule.isNewLine) this.lastScheduledLineId = schedule.currentLineId;
     const startAt = schedule.startAt;
-    const duration = buffer.duration / this.config.playbackRate;
+    const duration = buffer.duration;
     const endAt = startAt + duration;
     const fadeDuration = Math.min(FADE_MS / 1000, duration / 2);
     if (fadeDuration > 0) {
