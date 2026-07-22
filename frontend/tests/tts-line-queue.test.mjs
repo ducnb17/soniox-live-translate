@@ -15,6 +15,10 @@ const { StrictLineAudioQueue } = compiledModule.exports;
 test("a line can start streaming before all of its chunks have arrived", () => {
   const queue = new StrictLineAudioQueue();
   queue.registerLine(1);
+
+  // Registration alone must not activate the line.
+  assert.equal(queue.takeReady(1), null);
+
   queue.addChunk(1, "line-1-part-1", false);
 
   // Line 1 is next in sequence and has at least one chunk — it should
@@ -36,19 +40,21 @@ test("a line can start streaming before all of its chunks have arrived", () => {
   assert.equal(queue.finishLine(1), true);
 });
 
-test("a later line waits until the preceding line is taken and finished", () => {
+test("a later line waits until the preceding line has audio and is finished", () => {
   const queue = new StrictLineAudioQueue();
   queue.registerLine(1);
   queue.registerLine(2);
   queue.addChunk(2, "line-2-audio", true);
 
-  // Line 1 is next in sequence (even with 0 chunks received so far) and
-  // activates immediately; line 2 can't activate while line 1 is active.
+  // Line 1 is next in sequence but has no audio yet, so line 2 must wait.
+  assert.equal(queue.takeReady(1), null);
+  assert.equal(queue.takeReady(2), null);
+
+  queue.addChunk(1, "line-1-audio", true);
   const line1 = queue.takeReady(1);
   assert.equal(line1.lineId, 1);
   assert.equal(queue.takeReady(2), null);
 
-  queue.addChunk(1, "line-1-audio", true);
   assert.deepEqual(queue.takeNextChunk(), { chunk: "line-1-audio", isLast: true });
   assert.equal(queue.finishLine(1), true);
 
@@ -96,4 +102,26 @@ test("backlog estimate scales with every queued line behind the active one", () 
   queue.addChunk(3, 2, false);
 
   assert.equal(queue.estimatedAudioSeconds((seconds) => seconds, 3), 11);
+});
+
+test("a queued later line becomes playable once the head line receives its first chunk", () => {
+  const queue = new StrictLineAudioQueue();
+  queue.registerLine(10);
+  queue.addChunk(11, "line-11-audio", true);
+
+  // The head line blocks strict ordering, but zero-chunk registration alone
+  // must not consume the active slot.
+  assert.equal(queue.takeReady(10), null);
+  assert.equal(queue.activeLineId, null);
+
+  queue.addChunk(10, "line-10-audio", true);
+  const line10 = queue.takeReady(10);
+  assert.equal(line10.lineId, 10);
+  assert.deepEqual(queue.takeNextChunk(), { chunk: "line-10-audio", isLast: true });
+  assert.equal(queue.finishLine(10), true);
+
+  const line11 = queue.takeReady(11);
+  assert.equal(line11.lineId, 11);
+  assert.deepEqual(queue.takeNextChunk(), { chunk: "line-11-audio", isLast: true });
+  assert.equal(queue.finishLine(11), true);
 });

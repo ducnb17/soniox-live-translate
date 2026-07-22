@@ -40,15 +40,21 @@ export class StrictLineAudioQueue<T> {
   }
 
   /**
-   * Activate the next line if it is next in sequence. Unlike the old
-   * implementation, this does NOT require `done` — a line may be activated
-   * (and streamed via takeNextChunk) as soon as it exists, even with zero
-   * chunks received yet.
+   * Activate the next line if it is next in sequence and has at least one
+   * chunk ready to stream. Registration alone is not enough: `line_ready`
+   * can arrive before the first TTS audio chunk, and activating a zero-chunk
+   * line would stall playback on that line until more events happen to poke
+   * the queue again.
    */
   takeReady(nextLineId: number | null): BufferedAudioLine<T> | null {
     if (this.activeLine !== null) return null;
     const first = this.lines[0];
-    if (!first || nextLineId === null || first.lineId !== nextLineId) {
+    if (
+      !first ||
+      nextLineId === null ||
+      first.lineId !== nextLineId ||
+      first.chunks.length === 0
+    ) {
       return null;
     }
     this.lines.shift();
