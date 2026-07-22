@@ -77,6 +77,7 @@ from .stt_provider import (
     get_provider as get_stt_provider_instance,
     get_available_providers as get_available_stt_providers,
 )
+from .stt_providers.google_provider import GoogleSttStream
 from .translation_provider import (
     get_provider as get_translation_provider_instance,
     get_available_providers as get_available_translation_providers,
@@ -532,17 +533,38 @@ async def translation_websocket(
         await browser_ws.close()
         return
 
-    if stt_provider != "soniox":
-        provider_info = get_stt_provider_instance(
+    if stt_provider not in ("soniox", "google_v2"):
+        provider = get_stt_provider_instance(
             stt_provider, api_key=get_stt_api_key(stt_provider)
         )
         message = (
-            f"{provider_info.info.name if provider_info else stt_provider} is configured, "
+            f"{provider.info.name if provider else stt_provider} is configured, "
             "but its live audio adapter is not available for this browser stream"
         )
         await browser_ws.send_json({"error_code": "stt_adapter_unavailable", "error_message": message})
         await browser_ws.close()
         return
+
+    # Validate Google V2 credentials early
+    if stt_provider == "google_v2":
+        google_provider = get_stt_provider_instance(
+            "google_v2", api_key=get_stt_api_key("google_v2")
+        )
+        if google_provider is None:
+            await browser_ws.send_json({
+                "error_code": "bad_stt_provider",
+                "error_message": "Google STT V2 provider could not be initialised",
+            })
+            await browser_ws.close()
+            return
+        google_ok, google_msg = await google_provider.test_connection()
+        if not google_ok:
+            await browser_ws.send_json({
+                "error_code": "google_v2_credentials",
+                "error_message": f"Google Cloud credentials check failed: {google_msg}",
+            })
+            await browser_ws.close()
+            return
 
     translation_engine = get_translation_provider_instance(
         translation_provider,
@@ -734,11 +756,16 @@ async def translation_websocket(
         stt_finished_event = asyncio.Event()
 
         try:
-            # Connect to Soniox STT
-            stt_ws = await websockets.connect(
-                STT_URL, ping_interval=10, ping_timeout=10, close_timeout=5
-            )
-            await stt_ws.send(json.dumps(stt_config))
+            # Connect to Soniox STT (or Google V2 adapter)
+            use_google_v2 = stt_provider == "google_v2"
+            if use_google_v2:
+                stt_ws = GoogleSttStream(google_provider, language_hints)
+                await stt_ws.open()
+            else:
+                stt_ws = await websockets.connect(
+                    STT_URL, ping_interval=10, ping_timeout=10, close_timeout=5
+                )
+                await stt_ws.send(json.dumps(stt_config))
 
             if is_reconnect:
                 # Report reconnection success
@@ -830,7 +857,7 @@ async def translation_websocket(
                         translate_text=translate_text,
                     )
                 )
-                tg.create_task(stt_keepalive(stt_ws))
+                tg.create_task(stt_keepalive(stt_ws)) if not use_google_v2 else None
                 if tts and not use_external_tts:
                     tg.create_task(
                         tts_sender(

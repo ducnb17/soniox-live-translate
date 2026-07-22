@@ -1,7 +1,8 @@
 # soniox-live-translate
 
-Real-time speech-to-speech translation built on the **Soniox Live** APIs
-(real-time STT + translation + real-time TTS), with barge-in / turn-taking.
+Real-time speech-to-speech translation built on **Soniox Live** APIs and
+**Google Cloud Speech-to-Text V2 (Chirp 3 HD)** (real-time STT + translation
++ real-time TTS), with barge-in / turn-taking.
 
 The browser frontend and FastAPI backend connect live STT/translation to the
 selected TTS provider:
@@ -48,6 +49,10 @@ FastAPI /ws/translate ──► Soniox STT+translation (wss://stt-rt.soniox.com)
   back to Soniox; synthesized audio is cached and estimated character cost is
   shown for the current session. Saved API keys are encrypted for the current
   Windows user with DPAPI.
+- **Five STT providers:** Soniox (default, with real-time translation),
+  Google Cloud STT V2 (Chirp 3 HD streaming), OpenAI Whisper, Deepgram Nova,
+  and AssemblyAI. Selectable per session via the Speech-to-Text settings
+  panel with credential persistence.
 - **Diarization & language identification** toggleable; rendered inline.
 - **Custom context / glossary** (domain, terms, translation_terms) via JSON
   textarea → base64 → STT config `context` block.
@@ -74,6 +79,10 @@ FastAPI /ws/translate ──► Soniox STT+translation (wss://stt-rt.soniox.com)
 - Chrome or Edge with microphone permission; tab/system capture and explicit
   speaker routing depend on browser/OS support
 - Optional API keys for external TTS providers
+- Optional **Google Cloud service account** for STT (Chirp 3 HD):
+  1. Create a [Google Cloud project](https://console.cloud.google.com/), enable the Speech-to-Text API.
+  2. Create a service account with **Cloud Speech Administrator** role, download the JSON key.
+  3. In the app: **Settings → Speech-to-Text** → select "Google Cloud STT V2 (Chirp 3 HD)", paste the JSON key, click Test. The key is encrypted and persisted automatically.
 
 ## Setup
 

@@ -13,7 +13,7 @@ EXPECTED_PROVIDERS = {
     "soniox",
     "openai",
     "deepgram",
-    "google",
+    "google_v2",
     "assemblyai",
 }
 
@@ -49,7 +49,7 @@ def test_stt_provider_tier_rejects_unknown_badge():
         )
 
 
-@pytest.mark.parametrize("provider_id", sorted(EXPECTED_PROVIDERS - {"soniox"}))
+@pytest.mark.parametrize("provider_id", sorted(EXPECTED_PROVIDERS - {"soniox", "google_v2"}))
 async def test_external_provider_connection_check_rejects_missing_key(provider_id):
     provider = get_provider(provider_id)
 
@@ -60,13 +60,22 @@ async def test_external_provider_connection_check_rejects_missing_key(provider_i
     assert "API key is required" in message
 
 
+async def test_google_v2_provider_rejects_missing_credentials():
+    provider = get_provider("google_v2")
+
+    assert provider is not None
+    ok, message = await provider.test_connection()
+
+    assert ok is False
+    assert "credentials required" in message.lower()
+
+
 @pytest.mark.parametrize(
     ("provider_id", "module_name"),
     [
         ("soniox", "soniox_provider"),
         ("openai", "openai_provider"),
         ("deepgram", "deepgram_provider"),
-        ("google", "google_provider"),
         ("assemblyai", "assemblyai_provider"),
     ],
 )
@@ -87,7 +96,7 @@ async def test_each_provider_implements_a_lightweight_connection_check(
     request.assert_awaited_once()
 
 
-async def test_registry_does_not_fake_streaming_by_chunking_audio():
+async def test_non_streaming_provider_raises_not_implemented():
     provider = get_provider("deepgram", api_key="test-key")
 
     async def audio():
@@ -96,3 +105,65 @@ async def test_registry_does_not_fake_streaming_by_chunking_audio():
     assert provider is not None
     with pytest.raises(NotImplementedError, match="not connected"):
         await anext(provider.transcribe_stream(audio()))
+
+
+# ── Google V2 provider unit tests ──
+
+
+class TestGoogleV2Provider:
+    def test_info_has_correct_shape(self):
+        provider = get_provider("google_v2")
+        assert provider is not None
+        info = provider.info
+        assert info.id == "google_v2"
+        assert "Chirp 3" in info.name
+        assert info.supports_streaming is True
+        assert info.supports_realtime_translation is False
+        assert info.tier == "premium"
+        assert "speech-to-text/pricing" in info.pricing_url
+
+    def test_credentials_not_found_when_empty(self):
+        provider = get_provider("google_v2", api_key="")
+        assert provider is not None
+        from app.stt_providers.google_provider import _parse_credentials
+        assert _parse_credentials(None) is None
+        assert _parse_credentials("") is None
+
+    def test_parse_credentials_returns_raw_json(self):
+        from app.stt_providers.google_provider import _parse_credentials
+        creds = '{"project_id": "my-project", "client_email": "x@y.com"}'
+        assert _parse_credentials(creds) == creds
+
+
+class TestGoogleSttRouting:
+    """Two-way direction routing using `language` field per STS docs."""
+
+    def test_language_field_on_token_directly_routes(self, monkeypatch):
+        """When a token has `language`, use it as the TTS target."""
+        from app.stt import _resolve_tts_target
+        result = _resolve_tts_target(
+            {"language": "es"}, "two_way", "en", "es", None
+        )
+        assert result == "es"
+
+    def test_source_language_fallback_still_works(self):
+        from app.stt import _resolve_tts_target
+        result = _resolve_tts_target(
+            {"source_language": "en"}, "two_way", "en", "es", None
+        )
+        assert result == "es"
+
+    def test_missing_both_fields_falls_back_to_target_lang(self):
+        from app.stt import _resolve_tts_target
+        result = _resolve_tts_target({}, "two_way", "en", "es", "vi")
+        assert result == "vi"
+
+    def test_language_field_on_end_direction(self):
+        from app.stt import _direction
+        result = _direction({"language": "es"}, "two_way", "en", "es", source_lang=None)
+        assert result == "es"
+
+    def test_end_direction_falls_back_to_tracked_source(self):
+        from app.stt import _direction
+        result = _direction({}, "two_way", "en", "es", source_lang="en")
+        assert result == "es"
