@@ -478,7 +478,7 @@ interface ProviderInfo {
 let ttsProviders: TtsProviderInfo[] = [];
 let currentTtsProvider = "soniox";
 let ttsSessionUsage = emptyTtsUsage();
-// Versioned so beta.5 migrates the former 1.5 s default to Soniox's
+// Versioned so this release migrates the former 1.5 s default to Soniox's
 // low-latency 500 ms endpoint recommendation without touching other settings.
 const STT_DELAY_SECONDS_KEY = "sttDelaySecondsRtV1";
 const TTS_DELAY_SECONDS_KEY = "ttsDelaySeconds";
