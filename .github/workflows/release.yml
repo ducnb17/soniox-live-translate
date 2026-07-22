@@ -4,7 +4,6 @@ on:
   push:
     tags:
       - "v*.*.*"
-      - "electron-v*.*.*"
 
 permissions:
   contents: write
