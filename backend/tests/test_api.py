@@ -81,6 +81,17 @@ class TestSetupStatus:
 
 
 class TestSetupPage:
+    def test_resolves_pyinstaller_frontend_from_bundle_root(
+        self, monkeypatch, tmp_path
+    ):
+        bundle_root = tmp_path / "_internal"
+        monkeypatch.setattr(main.sys, "frozen", True, raising=False)
+        monkeypatch.setattr(main.sys, "_MEIPASS", str(bundle_root), raising=False)
+
+        resolved = main._resolve_frontend_source_dir()
+
+        assert resolved == str(bundle_root / "frontend")
+
     def test_returns_html(self, client):
         r = client.get("/setup")
         assert r.status_code == 200

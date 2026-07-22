@@ -1165,9 +1165,20 @@ def _websocket_close_details(ws) -> tuple[int | None, str | None]:
     return close_code, close_reason
 
 
-_frontend_source_dir = os.path.join(
-    os.path.dirname(__file__), "..", "..", "frontend"
-)
+def _resolve_frontend_source_dir() -> str:
+    """Return the frontend asset root for source and PyInstaller runtimes."""
+    bundle_root = getattr(sys, "_MEIPASS", None)
+    if getattr(sys, "frozen", False) and bundle_root:
+        # PyInstaller onedir places collected data under
+        # <backend>/_internal.  Module __file__ is one level deeper at
+        # <backend>/_internal/app/main.py, so the source-checkout relative
+        # path would incorrectly resolve to <backend>/frontend.
+        return os.path.join(bundle_root, "frontend")
+
+    return os.path.join(os.path.dirname(__file__), "..", "..", "frontend")
+
+
+_frontend_source_dir = _resolve_frontend_source_dir()
 _static_dir = os.path.join(_frontend_source_dir, "dist")
 if os.path.isdir(_static_dir):
     app.mount("/", StaticFiles(directory=_static_dir, html=True), name="static")
