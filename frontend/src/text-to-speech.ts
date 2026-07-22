@@ -43,6 +43,7 @@ export class TextToSpeech {
   private activeLineSources: AudioBufferSourceNode[] = [];
   private playbackEpoch = 0;
   private lastRegisteredLineId = 0;
+  private readonly registeredLineIds = new Set<number>();
   private minimumAcceptedLineId = 1;
   private nextLineIdToPlay: number | null = null;
   private lastScheduledLineId: number | null = null;
@@ -103,6 +104,8 @@ export class TextToSpeech {
 
   registerLine(lineId: number): void {
     if (!this.state.isTtsEnabled) return;
+    if (this.registeredLineIds.has(lineId)) return;
+    this.registeredLineIds.add(lineId);
     this.lineAudioQueue.registerLine(lineId);
     this.lastRegisteredLineId = Math.max(this.lastRegisteredLineId, lineId);
     this.audioLineReadyCount += 1;
@@ -115,6 +118,10 @@ export class TextToSpeech {
 
   addAudioChunk(chunk: Uint8Array, lineId: number, isLastChunk: boolean): void {
     if (!this.state.isTtsEnabled || lineId < this.minimumAcceptedLineId) return;
+    // Real-time Soniox audio can arrive before the final line_ready payload.
+    // Register here so playback starts on first audio instead of waiting for
+    // the speaker to finish the utterance.
+    this.registerLine(lineId);
     this.lineAudioQueue.addChunk(lineId, chunk, isLastChunk);
     if (this.nextLineIdToPlay === null) {
       this.nextLineIdToPlay = this.lineAudioQueue.firstLineId;
@@ -153,6 +160,7 @@ export class TextToSpeech {
   resetSession(): void {
     this.cancelAllAudio();
     this.lastRegisteredLineId = 0;
+    this.registeredLineIds.clear();
     this.minimumAcceptedLineId = 1;
     this.audioLineReadyCount = 0;
     this.audioLinePlayedCount = 0;
@@ -232,6 +240,11 @@ export class TextToSpeech {
     let next = this.lineAudioQueue.takeNextChunk();
     while (next !== null) {
       const { chunk, isLast } = next;
+      if (chunk.byteLength === 0) {
+        if (isLast) this.activeLineDoneScheduling = true;
+        next = this.lineAudioQueue.takeNextChunk();
+        continue;
+      }
       this.activeLinePendingChunks += 1;
       this.activeLineAudioSeconds += this.pcmChunkDurationSeconds(chunk);
       this.playPcmChunk(chunk, lineId, () => {

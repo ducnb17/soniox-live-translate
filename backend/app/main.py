@@ -24,7 +24,6 @@ from .config import (
     LANGUAGES,
     MAX_ENDPOINT_DELAY_MS,
     MIN_ENDPOINT_DELAY_MS,
-    SONIOX_API_KEY,
     STT_URL,
     TTS_URL,
     VOICES,
@@ -598,8 +597,6 @@ async def translation_websocket(
             language_hints.append(lang_a)
         if lang_b:
             language_hints.append(lang_b)
-    elif target_lang:
-        language_hints.append(target_lang)
     stt_config = build_stt_config(
         mode=mode,
         target_lang=target_lang,
@@ -855,6 +852,9 @@ async def translation_websocket(
                         finished_event=stt_finished_event,
                         extra_hold_ms=extra_hold_ms,
                         translate_text=translate_text,
+                        stream_translation_tokens=(
+                            tts and not use_external_tts and translate_text is None
+                        ),
                     )
                 )
                 tg.create_task(stt_keepalive(stt_ws)) if not use_google_v2 else None
@@ -873,6 +873,7 @@ async def translation_websocket(
                             tts_ws=tts_ws,
                             browser_ws=browser_ws,
                             tts_state=tts_state,
+                            direction_voices=direction_voices,
                         )
                     )
                     tg.create_task(tts_keepalive(tts_ws=tts_ws))
@@ -1108,7 +1109,7 @@ def _reconnect_delay(attempt: int, random_value: float | None = None) -> float:
     )
     r = random_value if random_value is not None else random.random()
     jitter = exponential * RECONNECT_JITTER_RATIO
-    return exponential + r * jitter
+    return min(exponential + r * jitter, RECONNECT_MAX_DELAY_SECONDS)
 
 
 def _parse_context(context_b64: str | None) -> dict | None:
@@ -1136,8 +1137,13 @@ def _connection_close_details(eg: ExceptionGroup | BaseExceptionGroup) -> tuple[
             code, reason = _connection_close_details(exc)
             if code is not None:
                 return code, reason
-        if isinstance(exc, websockets.exceptions.ConnectionClosed):
-            return exc.code, exc.reason
+        # websockets 16 no longer exposes ``websockets.exceptions`` as a
+        # package attribute. The public close shape is stable, and checking
+        # it directly also preserves details from wrapped transport errors.
+        code = getattr(exc, "code", None)
+        reason = getattr(exc, "reason", None)
+        if code is not None:
+            return code, reason
         if isinstance(exc, ConnectionError):
             return 1006, str(exc)
     return None, None

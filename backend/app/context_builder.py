@@ -6,7 +6,8 @@ keys — see https://soniox.com/docs/stt/concepts/context.
 
 from typing import Any
 
-from .config import MAX_ENDPOINT_DELAY_MS, SONIOX_API_KEY, STT_MODEL
+from . import config as runtime_config
+from .config import MAX_ENDPOINT_DELAY_MS, STT_MODEL
 
 
 def build_stt_config(
@@ -31,7 +32,7 @@ def build_stt_config(
     real-time speech-to-speech pipeline's end-to-end latency minimal.
     """
     config: dict[str, Any] = {
-        "api_key": SONIOX_API_KEY,
+        "api_key": runtime_config.SONIOX_API_KEY,
         "model": STT_MODEL,
         "audio_format": "pcm_s16le",
         "sample_rate": 16000,
@@ -49,8 +50,9 @@ def build_stt_config(
     if language_hints is None and lang_id:
         if mode == "two_way":
             language_hints = [l for l in (lang_a, lang_b) if l]
-        elif mode == "one_way" and target_lang:
-            language_hints = [target_lang]
+        # In one-way translation the configured language is the *target*,
+        # not necessarily an input language. Hinting it can bias recognition
+        # away from the speaker, so leave source detection unconstrained.
     if language_hints:
         # Deduplicate while preserving order.
         seen: set[str] = set()

@@ -478,15 +478,15 @@ interface ProviderInfo {
 let ttsProviders: TtsProviderInfo[] = [];
 let currentTtsProvider = "soniox";
 let ttsSessionUsage = emptyTtsUsage();
-const STT_DELAY_SECONDS_KEY = "sttDelaySeconds";
+const STT_DELAY_SECONDS_KEY = "sttDelaySecondsRtV2";
 const TTS_DELAY_SECONDS_KEY = "ttsDelaySeconds";
 const TTS_PLAYBACK_RATE_KEY = "ttsPlaybackRate";
 
 function readSttDelaySeconds(): number {
   let saved: string | null = null;
   try { saved = localStorage.getItem(STT_DELAY_SECONDS_KEY); } catch { /* storage disabled */ }
-  const value = Number(saved ?? "1.5");
-  return Number.isFinite(value) && value >= 0 && value <= 10 ? value : 1.5;
+  const value = Number(saved ?? "0.5");
+  return Number.isFinite(value) && value >= 0.5 && value <= 10 ? value : 0.5;
 }
 
 function updateSttDelaySelection(): void {
@@ -497,7 +497,7 @@ function updateSttDelaySelection(): void {
 
 function currentSttDelaySeconds(): number {
   const value = $sttDelay.valueAsNumber;
-  return Number.isFinite(value) && value >= 0 && value <= 10 ? value : 1.5;
+  return Number.isFinite(value) && value >= 0.5 && value <= 10 ? value : 0.5;
 }
 
 function readTtsDelaySeconds(): number {
