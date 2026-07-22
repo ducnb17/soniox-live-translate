@@ -32,7 +32,7 @@ STT_KEEPALIVE_INTERVAL = 15
 # https://soniox.com/docs/translation/sts-translation). The frontend can
 # override this per session via the `stt_delay_ms` query parameter.
 MAX_ENDPOINT_DELAY_MS = 500
-MIN_ENDPOINT_DELAY_MS = 200
+MIN_ENDPOINT_DELAY_MS = 500
 
 def _user_data_dir() -> Path:
     """Per-user, always-writable data directory (mirrors config_store.py).

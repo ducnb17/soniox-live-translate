@@ -1,10 +1,26 @@
 """Tests for context_builder.build_stt_config + _normalize_context."""
 import pytest
 
+from app import config as runtime_config
 from app.context_builder import build_stt_config, _normalize_context
 
 
 class TestBuildSttConfig:
+    def test_api_key_is_read_at_call_time(self, monkeypatch):
+        monkeypatch.setattr(runtime_config, "SONIOX_API_KEY", "runtime-key")
+
+        cfg = build_stt_config(
+            mode="one_way",
+            target_lang="vi",
+            lang_a=None,
+            lang_b=None,
+            lang_id=True,
+            diarize=False,
+            context=None,
+        )
+
+        assert cfg["api_key"] == "runtime-key"
+
     def test_one_way_basic(self):
         cfg = build_stt_config(
             mode="one_way",
@@ -24,9 +40,9 @@ class TestBuildSttConfig:
         assert cfg["max_endpoint_delay_ms"] == 500
         assert cfg["enable_speaker_diarization"] is True
         assert cfg["enable_language_identification"] is True
-        # Per Soniox real-time STT docs, language_hints is strongly
-        # recommended; auto-derived from one_way target.
-        assert cfg["language_hints"] == ["vi"]
+        # The target language is not the spoken input language and therefore
+        # must not be used as an STT recognition hint.
+        assert "language_hints" not in cfg
         assert cfg["translation"] == {"type": "one_way", "target_language": "vi"}
         assert "context" not in cfg
 

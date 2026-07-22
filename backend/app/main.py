@@ -12,6 +12,7 @@ import sys
 import time
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager, suppress
+from functools import partial
 from pathlib import Path
 
 import websockets
@@ -24,7 +25,6 @@ from .config import (
     LANGUAGES,
     MAX_ENDPOINT_DELAY_MS,
     MIN_ENDPOINT_DELAY_MS,
-    SONIOX_API_KEY,
     STT_URL,
     TTS_URL,
     VOICES,
@@ -60,6 +60,8 @@ from .config_store import (
     set_translation_api_key,
     get_translation_provider,
     set_translation_provider,
+    get_translation_style,
+    set_translation_style,
     get_tts_api_key,
     set_tts_api_key,
     remove_tts_api_key,
@@ -82,6 +84,7 @@ from .translation_provider import (
     get_provider as get_translation_provider_instance,
     get_available_providers as get_available_translation_providers,
 )
+from .translation_styles import TRANSLATION_STYLES, normalize_translation_style
 from .external_tts import external_tts_sender
 from .version import APP_VERSION
 from .db import (
@@ -167,6 +170,11 @@ async def setup_status() -> JSONResponse:
 @app.get("/setup", include_in_schema=False)
 async def setup_page() -> FileResponse:
     setup_html = os.path.join(_static_dir, "setup.html")
+    if not os.path.isfile(setup_html):
+        # CI runs backend tests before the independent frontend build job has
+        # created dist/. Development checkouts still contain the source setup
+        # page, while packaged builds always take the compiled dist asset.
+        setup_html = os.path.join(_frontend_source_dir, "setup.html")
     return FileResponse(setup_html, media_type="text/html")
 
 
@@ -348,10 +356,28 @@ async def api_save_config(payload: dict = Body(...)) -> JSONResponse:
     tts_voice = str(payload.get("tts_voice") or "")
     stt_provider = str(payload.get("stt_provider") or "")
     translation_provider = str(payload.get("translation_provider") or "")
+    translation_style = str(payload.get("translation_style") or "")
 
     tts_api_key = str(payload.get("tts_api_key") or "").strip()
     stt_api_key = str(payload.get("stt_api_key") or "").strip()
     translation_api_key = str(payload.get("translation_api_key") or "").strip()
+
+    style_id: str | None = None
+    if translation_style:
+        try:
+            style_id = normalize_translation_style(translation_style)
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+        provider_id = translation_provider or get_translation_provider()
+        provider = get_translation_provider_instance(provider_id)
+        if provider is None or style_id not in provider.info.supported_styles:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "message": f"Translation style {style_id!r} is not supported by {provider_id!r}",
+                },
+                status_code=400,
+            )
 
     # Save TTS
     if tts_provider:
@@ -372,6 +398,8 @@ async def api_save_config(payload: dict = Body(...)) -> JSONResponse:
         set_translation_provider(translation_provider)
         if translation_api_key:
             set_translation_api_key(translation_provider, translation_api_key)
+    if style_id:
+        set_translation_style(style_id)
 
     return JSONResponse({"ok": True})
 
@@ -459,6 +487,7 @@ async def api_translation_providers() -> JSONResponse:
             "tier": p.tier,
             "pricing_url": p.pricing_url,
             "signup_url": p.signup_url,
+            "supported_styles": list(p.supported_styles),
             "has_api_key": bool(get_translation_api_key(p.id)) or (p.id == "soniox" and bool(get_api_key())),
         }
         for p in get_available_translation_providers()
@@ -481,20 +510,39 @@ async def api_test_translation_provider(provider_id: str, payload: dict = Body(.
                 save_config(cfg)
                 set_api_key(key)
         set_translation_provider(provider_id)
+        if get_translation_style() not in provider.info.supported_styles:
+            set_translation_style("natural")
     return JSONResponse({"ok": ok, "message": message})
 
 
 @app.get("/api/translation/config")
 async def api_get_translation_config() -> JSONResponse:
-    return JSONResponse({"current_provider": get_translation_provider()})
+    return JSONResponse({
+        "current_provider": get_translation_provider(),
+        "current_style": get_translation_style(),
+        "styles": [{"id": style.id, "name": style.name} for style in TRANSLATION_STYLES],
+    })
 
 
 @app.post("/api/translation/config")
 async def api_set_translation_config(payload: dict = Body(...)) -> JSONResponse:
     provider_id = str(payload.get("provider_id") or "")
-    if get_translation_provider_instance(provider_id) is None:
+    provider = get_translation_provider_instance(provider_id)
+    if provider is None:
         return JSONResponse({"ok": False, "message": f"Unknown provider: {provider_id}"}, status_code=404)
+    try:
+        style_id = normalize_translation_style(
+            str(payload.get("translation_style") or get_translation_style())
+        )
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+    if style_id not in provider.info.supported_styles:
+        return JSONResponse(
+            {"ok": False, "message": f"Translation style {style_id!r} is not supported by {provider_id!r}"},
+            status_code=400,
+        )
     set_translation_provider(provider_id)
+    set_translation_style(style_id)
     return JSONResponse({"ok": True})
 
 
@@ -519,6 +567,7 @@ async def translation_websocket(
     tts_provider: str = "soniox",
     stt_provider: str = "soniox",
     translation_provider: str = "soniox",
+    translation_style: str = "natural",
     stt_delay_ms: int = MAX_ENDPOINT_DELAY_MS,
 ) -> None:
     await browser_ws.accept()
@@ -582,7 +631,31 @@ async def translation_websocket(
         await browser_ws.close()
         return
 
-    translate_text = None if translation_provider == "soniox" else translation_engine.translate
+    try:
+        translation_style = normalize_translation_style(translation_style)
+    except ValueError as exc:
+        await browser_ws.send_json({
+            "error_code": "bad_translation_style",
+            "error_message": str(exc),
+        })
+        await browser_ws.close()
+        return
+    if translation_style not in translation_engine.info.supported_styles:
+        await browser_ws.send_json({
+            "error_code": "unsupported_translation_style",
+            "error_message": (
+                f"Translation style {translation_style!r} is not supported by "
+                f"{translation_provider!r}"
+            ),
+        })
+        await browser_ws.close()
+        return
+
+    translate_text = (
+        None
+        if translation_provider == "soniox"
+        else partial(translation_engine.translate, style=translation_style)
+    )
 
     context = _parse_context(context_b64)
     # Honor the frontend's endpointing choice within a safe window. Earlier
@@ -598,8 +671,6 @@ async def translation_websocket(
             language_hints.append(lang_a)
         if lang_b:
             language_hints.append(lang_b)
-    elif target_lang:
-        language_hints.append(target_lang)
     stt_config = build_stt_config(
         mode=mode,
         target_lang=target_lang,
@@ -855,6 +926,9 @@ async def translation_websocket(
                         finished_event=stt_finished_event,
                         extra_hold_ms=extra_hold_ms,
                         translate_text=translate_text,
+                        stream_translation_tokens=(
+                            tts and not use_external_tts and translate_text is None
+                        ),
                     )
                 )
                 tg.create_task(stt_keepalive(stt_ws)) if not use_google_v2 else None
@@ -873,6 +947,7 @@ async def translation_websocket(
                             tts_ws=tts_ws,
                             browser_ws=browser_ws,
                             tts_state=tts_state,
+                            direction_voices=direction_voices,
                         )
                     )
                     tg.create_task(tts_keepalive(tts_ws=tts_ws))
@@ -1108,7 +1183,7 @@ def _reconnect_delay(attempt: int, random_value: float | None = None) -> float:
     )
     r = random_value if random_value is not None else random.random()
     jitter = exponential * RECONNECT_JITTER_RATIO
-    return exponential + r * jitter
+    return min(exponential + r * jitter, RECONNECT_MAX_DELAY_SECONDS)
 
 
 def _parse_context(context_b64: str | None) -> dict | None:
@@ -1136,8 +1211,13 @@ def _connection_close_details(eg: ExceptionGroup | BaseExceptionGroup) -> tuple[
             code, reason = _connection_close_details(exc)
             if code is not None:
                 return code, reason
-        if isinstance(exc, websockets.exceptions.ConnectionClosed):
-            return exc.code, exc.reason
+        # websockets 16 no longer exposes ``websockets.exceptions`` as a
+        # package attribute. The public close shape is stable, and checking
+        # it directly also preserves details from wrapped transport errors.
+        code = getattr(exc, "code", None)
+        reason = getattr(exc, "reason", None)
+        if code is not None:
+            return code, reason
         if isinstance(exc, ConnectionError):
             return 1006, str(exc)
     return None, None
@@ -1154,6 +1234,20 @@ def _websocket_close_details(ws) -> tuple[int | None, str | None]:
     return close_code, close_reason
 
 
-_static_dir = os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist")
+def _resolve_frontend_source_dir() -> str:
+    """Return the frontend asset root for source and PyInstaller runtimes."""
+    bundle_root = getattr(sys, "_MEIPASS", None)
+    if getattr(sys, "frozen", False) and bundle_root:
+        # PyInstaller onedir places collected data under
+        # <backend>/_internal.  Module __file__ is one level deeper at
+        # <backend>/_internal/app/main.py, so the source-checkout relative
+        # path would incorrectly resolve to <backend>/frontend.
+        return os.path.join(bundle_root, "frontend")
+
+    return os.path.join(os.path.dirname(__file__), "..", "..", "frontend")
+
+
+_frontend_source_dir = _resolve_frontend_source_dir()
+_static_dir = os.path.join(_frontend_source_dir, "dist")
 if os.path.isdir(_static_dir):
     app.mount("/", StaticFiles(directory=_static_dir, html=True), name="static")

@@ -15,12 +15,22 @@ class DeepLTranslationProvider(TranslationProviderBase):
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"DeepL-Auth-Key {self._api_key}"}
 
-    async def translate(self, text: str, source_lang: str | None, target_lang: str) -> str:
+    async def translate(
+        self,
+        text: str,
+        source_lang: str | None,
+        target_lang: str,
+        style: str = "natural",
+    ) -> str:
         if not self._api_key:
             raise ValueError("DeepL API key is required")
         data: dict[str, object] = {"text": [text], "target_lang": target_lang.upper()}
         if source_lang:
             data["source_lang"] = source_lang.upper()
+        if style == "professional":
+            data["formality"] = "prefer_more"
+        elif style == "casual":
+            data["formality"] = "prefer_less"
         async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
             response = await client.post(
                 f"{self._base_url()}/v2/translate",
@@ -46,4 +56,5 @@ class DeepLTranslationProvider(TranslationProviderBase):
             tier="premium",
             pricing_url="https://www.deepl.com/pro-api",
             signup_url="https://www.deepl.com/pro-api",
+            supported_styles=("natural", "professional", "casual"),
         )

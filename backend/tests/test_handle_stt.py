@@ -38,6 +38,56 @@ class FakeBrowserWs:
 
 
 class TestHandleSttOneWay:
+    async def test_realtime_mode_streams_stable_tokens_on_one_utterance_line(self):
+        messages = [
+            {
+                "tokens": [
+                    {"text": "xin ", "translation_status": "translation", "is_final": True},
+                    {"text": "chao", "translation_status": "translation", "is_final": True},
+                ]
+            },
+            {"tokens": [{"text": " ban", "translation_status": "translation", "is_final": True}]},
+            {"tokens": [{"text": "<end>"}]},
+            {"finished": True},
+        ]
+        browser = FakeBrowserWs()
+        queue: asyncio.Queue = asyncio.Queue()
+
+        await handle_stt(
+            stt_ws=FakeSttWs(messages),
+            browser_ws=browser,
+            tts_queue=queue,
+            tts_state=new_tts_state(["vi"]),
+            mode="one_way",
+            lang_a=None,
+            lang_b=None,
+            target_lang="vi",
+            stream_translation_tokens=True,
+        )
+
+        items = []
+        while not queue.empty():
+            items.append(queue.get_nowait())
+        spoken = [item for item in items if isinstance(item, tuple) and item[0] == TTS_TEXT]
+        assert spoken == [
+            (TTS_TEXT, "xin ", "vi", 1),
+            (TTS_TEXT, "chao", "vi", 1),
+            (TTS_TEXT, " ban", "vi", 1),
+        ]
+        ready = [item for item in browser.sent if item.get("type") == "line_ready"]
+        assert ready == [
+            {
+                "type": "line_ready",
+                "line_id": 1,
+                "speaker": None,
+                "original_text": "",
+                "translated_text": "xin chao ban",
+                "lang": None,
+                "is_endpoint": True,
+            }
+        ]
+        assert items[-3:] == [(TTS_END, "vi"), (TTS_END, None), TTS_NONE]
+
     async def test_final_translation_is_queued_once_at_utterance_end(self):
         messages = [
             {

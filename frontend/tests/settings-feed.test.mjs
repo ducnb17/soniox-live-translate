@@ -40,6 +40,16 @@ test("save config button is present and wired to /api/config/save", () => {
   assert.match(app, /saveConfigBtn\.addEventListener/);
 });
 
+test("translation style offers six modes and is sent to the backend", () => {
+  for (const style of ["natural", "literal", "professional", "casual", "subtitle_game", "technical"]) {
+    assert.match(html, new RegExp(`<option value="${style}">`));
+  }
+  assert.match(app, /translation_style:\s*\$translationStyle\.value/);
+  assert.match(app, /translationStyle:\s*\$translationStyle\.value/);
+  assert.match(speechToText, /translation_style:\s*config\.translationStyle/);
+  assert.match(app, /supported_styles/);
+});
+
 test("changing provider auto-detects saved key and disables input", () => {
   assert.match(app, /updateKeyInputState/);
   assert.match(app, /\.disabled\s*=\s*true/);
