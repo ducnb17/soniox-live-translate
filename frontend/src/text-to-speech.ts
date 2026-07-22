@@ -285,6 +285,11 @@ export class TextToSpeech {
     const source = this.audioCtx.createBufferSource();
     source.buffer = buffer;
     source.playbackRate.value = this.config.playbackRate;
+    // Compensate pitch shift caused by playbackRate so the voice stays natural
+    // even at higher speeds. detune = 1200 * log2(1 / rate) restores the
+    // original pitch: a rate of 2.0 shifts pitch +1 octave (+1200 cents),
+    // and detune -1200 cancels it exactly.
+    source.detune.value = 1200 * Math.log2(1 / this.config.playbackRate);
     const gain = this.audioCtx.createGain();
     source.connect(gain);
     gain.connect(this.audioCtx.destination);

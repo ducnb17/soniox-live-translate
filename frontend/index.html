@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -13,11 +14,13 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/styles.css">
 </head>
+
 <body>
   <div id="tts-error-banner" class="tts-error-banner hidden" role="alert">
     <span class="tts-error-icon">⚠️</span>
     <span class="tts-error-text"></span>
-    <button id="tts-error-settings-btn" class="tts-error-settings" type="button" aria-label="Open TTS settings">Cài đặt ⚙</button>
+    <button id="tts-error-settings-btn" class="tts-error-settings" type="button" aria-label="Open TTS settings">Cài đặt
+      ⚙</button>
     <button class="tts-error-close" type="button" aria-label="Dismiss">✕</button>
   </div>
   <div class="layout">
@@ -25,12 +28,17 @@
       <div class="brand">
         <span class="brand-logo">soniox</span>
         <span class="brand-name">speech translation</span>
-        <button id="theme-toggle" class="theme-toggle" type="button" title="Toggle dark mode" aria-label="Toggle dark mode">
-          <svg class="icon icon-sun" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>
+        <button id="theme-toggle" class="theme-toggle" type="button" title="Toggle dark mode"
+          aria-label="Toggle dark mode">
+          <svg class="icon icon-sun" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="4" />
+            <path
+              d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" />
           </svg>
-          <svg class="icon icon-moon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+          <svg class="icon icon-moon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
           </svg>
         </button>
       </div>
@@ -53,12 +61,14 @@
             <div class="section provider-card">
               <label for="stt-provider-select">Provider</label>
               <select id="stt-provider-select"></select>
-              <div class="provider-meta"><span id="stt-tier-badge" class="tier-badge"></span><span id="stt-provider-description"></span></div>
+              <div class="provider-meta"><span id="stt-tier-badge" class="tier-badge"></span><span
+                  id="stt-provider-description"></span></div>
               <div class="device-row" id="stt-api-key-row">
                 <label for="stt-api-key">API Key</label>
                 <div class="secret-input-row">
                   <input type="password" id="stt-api-key" class="audio-url-input" placeholder="Enter API key...">
-                  <button class="secret-toggle" type="button" data-secret-target="stt-api-key" aria-label="Show or hide API key">👁</button>
+                  <button class="secret-toggle" type="button" data-secret-target="stt-api-key"
+                    aria-label="Show or hide API key">👁</button>
                 </div>
                 <div class="provider-actions">
                   <button id="btn-test-stt-key" class="test-btn" type="button">Test</button>
@@ -76,12 +86,15 @@
             <div class="section provider-card">
               <label for="translation-provider-select">Translation Engine</label>
               <select id="translation-provider-select"></select>
-              <div class="provider-meta"><span id="translation-tier-badge" class="tier-badge"></span><span id="translation-provider-description"></span></div>
+              <div class="provider-meta"><span id="translation-tier-badge" class="tier-badge"></span><span
+                  id="translation-provider-description"></span></div>
               <div class="device-row" id="translation-api-key-row">
                 <label for="translation-api-key">API Key</label>
                 <div class="secret-input-row">
-                  <input type="password" id="translation-api-key" class="audio-url-input" placeholder="Enter API key...">
-                  <button class="secret-toggle" type="button" data-secret-target="translation-api-key" aria-label="Show or hide API key">👁</button>
+                  <input type="password" id="translation-api-key" class="audio-url-input"
+                    placeholder="Enter API key...">
+                  <button class="secret-toggle" type="button" data-secret-target="translation-api-key"
+                    aria-label="Show or hide API key">👁</button>
                 </div>
                 <div class="provider-actions">
                   <button id="btn-test-translation-key" class="test-btn" type="button">Test</button>
@@ -107,240 +120,257 @@
 
       <div id="settings-staging">
 
-      <div class="section" id="translation-mode-block">
-        <h3>1. Translation mode</h3>
-        <div class="segmented">
-          <label class="seg">
-            <input type="radio" name="mode" value="one_way" checked>
-            <span>One-way</span>
-          </label>
-          <label class="seg">
-            <input type="radio" name="mode" value="two_way">
-            <span>Two-way</span>
-          </label>
-        </div>
-      </div>
-
-      <div class="section" id="one-way-block">
-        <h3>2. Target language</h3>
-        <select id="target-language"></select>
-      </div>
-
-      <div class="section hidden" id="two-way-block">
-        <h3>2. Conversation pair</h3>
-        <select id="lang-a"></select>
-        <select id="lang-b" class="mt-4"></select>
-        <p class="hint">Spoken TTS plays the B-side translation (listener of language B).</p>
-      </div>
-
-      <div class="section" id="voice-a-block">
-        <h3>3a. Voice (for B → A translation)</h3>
-        <select id="voice"></select>
-      </div>
-
-      <div class="section hidden" id="voice-b-block">
-        <h3>3b. Voice (for A → B translation)</h3>
-        <select id="voice-b"></select>
-      </div>
-
-      <div class="section" id="general-options-block">
-        <h3>4. Settings (optional)</h3>
-        <label class="checkbox">
-          <input type="checkbox" id="diarization" checked>
-          Enable speaker diarization
-        </label>
-        <label class="checkbox">
-          <input type="checkbox" id="lang-id" checked>
-          Enable language identification
-        </label>
-        <label class="checkbox">
-          <input type="checkbox" id="barge" checked>
-          Barge-in (interrupt TTS when you speak)
-        </label>
-        <p class="hint hidden" id="barge-hint">Barge-in only applies to Microphone mode.</p>
-        <p class="hint">Tip: using headphones with Microphone mode avoids the speaker's TTS output being picked up as echo, which can otherwise cause false barge-in interruptions.</p>
-      </div>
-
-      <!-- Device Settings -->
-      <div class="section" id="device-block">
-        <h3>4b. Audio Devices</h3>
-        <div class="device-row">
-          <label for="input-device">Microphone / Audio Input</label>
-          <select id="input-device"></select>
-        </div>
-        <div class="device-test-row">
-          <button id="btn-test-input" class="test-btn" type="button">Test Mic</button>
-          <div id="input-level-meter" class="level-meter hidden">
-            <div id="input-level-bar" class="level-bar"></div>
+        <div class="section" id="translation-mode-block">
+          <h3>1. Translation mode</h3>
+          <div class="segmented">
+            <label class="seg">
+              <input type="radio" name="mode" value="one_way" checked>
+              <span>One-way</span>
+            </label>
+            <label class="seg">
+              <input type="radio" name="mode" value="two_way">
+              <span>Two-way</span>
+            </label>
           </div>
-          <button id="btn-stop-test-input" class="test-btn hidden" type="button">Stop Test</button>
         </div>
-        <div class="device-row">
-          <label for="output-device">Speaker / Audio Output</label>
-          <select id="output-device"></select>
-        </div>
-        <div class="device-test-row">
-          <button id="btn-test-output" class="test-btn" type="button">Test Speaker</button>
-        </div>
-        <p class="hint">Tip: Select "CABLE Output (VB-Audio Virtual Cable)" as Input and "CABLE Input" as Output for call routing.</p>
-      </div>
 
-      <!-- TTS Provider Selection -->
-      <div class="section" id="tts-provider-block">
-        <h3>4c. TTS Provider</h3>
-        <label for="tts-provider-select">Provider</label>
-        <select id="tts-provider-select"></select>
-        <div class="device-row" id="tts-api-key-row" style="display:none">
-          <label for="tts-api-key">API Key</label>
-          <input type="password" id="tts-api-key" class="audio-url-input" placeholder="Enter API key...">
-          <div class="provider-actions">
-            <button class="secret-toggle" type="button" data-secret-target="tts-api-key" aria-label="Show or hide API key">👁</button>
-            <button id="btn-save-tts-key" class="test-btn" type="button">Test</button>
-            <span id="tts-test-status" class="provider-test-status"></span>
+        <div class="section" id="one-way-block">
+          <h3>2. Target language</h3>
+          <select id="target-language"></select>
+        </div>
+
+        <div class="section hidden" id="two-way-block">
+          <h3>2. Conversation pair</h3>
+          <select id="lang-a"></select>
+          <select id="lang-b" class="mt-4"></select>
+          <p class="hint">Spoken TTS plays the B-side translation (listener of language B).</p>
+        </div>
+
+        <div class="section" id="voice-a-block">
+          <h3>3a. Voice (for B → A translation)</h3>
+          <select id="voice"></select>
+        </div>
+
+        <div class="section hidden" id="voice-b-block">
+          <h3>3b. Voice (for A → B translation)</h3>
+          <select id="voice-b"></select>
+        </div>
+
+        <div class="section" id="general-options-block">
+          <h3>4. Settings (optional)</h3>
+          <label class="checkbox">
+            <input type="checkbox" id="diarization" checked>
+            Enable speaker diarization
+          </label>
+          <label class="checkbox">
+            <input type="checkbox" id="lang-id" checked>
+            Enable language identification
+          </label>
+          <label class="checkbox">
+            <input type="checkbox" id="barge" checked>
+            Barge-in (interrupt TTS when you speak)
+          </label>
+          <p class="hint hidden" id="barge-hint">Barge-in only applies to Microphone mode.</p>
+          <p class="hint">Tip: using headphones with Microphone mode avoids the speaker's TTS output being picked up as
+            echo, which can otherwise cause false barge-in interruptions.</p>
+        </div>
+
+        <!-- Device Settings -->
+        <div class="section" id="device-block">
+          <h3>4b. Audio Devices</h3>
+          <div class="device-row">
+            <label for="input-device">Microphone / Audio Input</label>
+            <select id="input-device"></select>
           </div>
-          <a id="tts-key-link" class="provider-link" href="#" target="_blank" rel="noopener">Get key</a>
+          <div class="device-test-row">
+            <button id="btn-test-input" class="test-btn" type="button">Test Mic</button>
+            <div id="input-level-meter" class="level-meter hidden">
+              <div id="input-level-bar" class="level-bar"></div>
+            </div>
+            <button id="btn-stop-test-input" class="test-btn hidden" type="button">Stop Test</button>
+          </div>
+          <div class="device-row">
+            <label for="output-device">Speaker / Audio Output</label>
+            <select id="output-device"></select>
+          </div>
+          <div class="device-test-row">
+            <button id="btn-test-output" class="test-btn" type="button">Test Speaker</button>
+          </div>
+          <p class="hint">Tip: Select "CABLE Output (VB-Audio Virtual Cable)" as Input and "CABLE Input" as Output for
+            call routing.</p>
         </div>
-        <div class="device-row">
-          <label for="tts-voice-select">Voice</label>
-          <select id="tts-voice-select"></select>
-        </div>
-        <div class="device-row">
-          <label for="stt-delay-seconds">
-            Độ trễ nhận diện (giây): <span id="stt-delay-seconds-value">1.5</span>
-          </label>
-          <input type="range" id="stt-delay-seconds" min="0" max="10" step="0.5" value="1.5">
-          <p class="hint">0–3 giây: Soniox chờ lâu hơn để nhận diện chính xác hơn. Trên 3 giây: hệ thống tự giữ thêm câu đã nhận diện xong trước khi hiển thị/đọc, giúp mượt hơn nhưng tăng độ trễ tổng thể.</p>
-        </div>
-        <div class="device-row">
-          <label for="tts-delay-seconds">
-            Độ trễ đọc (giây): <span id="tts-delay-seconds-value">0</span>
-          </label>
-          <input type="range" id="tts-delay-seconds" min="0" max="10" step="0.5" value="0">
-          <p class="hint">Khoảng lặng chèn thêm giữa các câu đọc. Để 0 nếu muốn đọc liên tục không ngắt.</p>
-        </div>
-        <div class="device-row">
-          <label for="tts-playback-rate">
-            Tốc độ đọc: <span id="tts-playback-rate-value">1.0x</span>
-          </label>
-          <input type="range" id="tts-playback-rate" min="0.25" max="2" step="0.05" value="1">
-        </div>
-        <p class="hint" id="tts-cost-hint"></p>
-        <div class="provider-meta"><span id="tts-tier-badge" class="tier-badge"></span><span id="tts-provider-description"></span></div>
-      </div>
 
-      <details class="section collapsible" id="context-block">
-        <summary>5. Custom context (optional)</summary>
-        <p class="hint">Domain context + glossary to improve specialized accuracy. JSON shape shown below.</p>
-        <textarea id="context-json" rows="8" placeholder='{
+        <!-- TTS Provider Selection -->
+        <div class="section" id="tts-provider-block">
+          <h3>4c. TTS Provider</h3>
+          <label for="tts-provider-select">Provider</label>
+          <select id="tts-provider-select"></select>
+          <div class="device-row" id="tts-api-key-row" style="display:none">
+            <label for="tts-api-key">API Key</label>
+            <input type="password" id="tts-api-key" class="audio-url-input" placeholder="Enter API key...">
+            <div class="provider-actions">
+              <button class="secret-toggle" type="button" data-secret-target="tts-api-key"
+                aria-label="Show or hide API key">👁</button>
+              <button id="btn-save-tts-key" class="test-btn" type="button">Test</button>
+              <span id="tts-test-status" class="provider-test-status"></span>
+            </div>
+            <a id="tts-key-link" class="provider-link" href="#" target="_blank" rel="noopener">Get key</a>
+          </div>
+          <div class="device-row">
+            <label for="tts-voice-select">Voice</label>
+            <select id="tts-voice-select"></select>
+          </div>
+          <div class="device-row">
+            <label for="stt-delay-seconds">
+              Độ trễ nhận diện (giây): <span id="stt-delay-seconds-value">1.5</span>
+            </label>
+            <input type="range" id="stt-delay-seconds" min="0" max="10" step="0.5" value="1.5">
+            <p class="hint">0–3 giây: Soniox chờ lâu hơn để nhận diện chính xác hơn. Trên 3 giây: hệ thống tự giữ thêm
+              câu đã nhận diện xong trước khi hiển thị/đọc, giúp mượt hơn nhưng tăng độ trễ tổng thể.</p>
+          </div>
+          <div class="device-row">
+            <label for="tts-delay-seconds">
+              Độ trễ đọc (giây): <span id="tts-delay-seconds-value">0</span>
+            </label>
+            <input type="range" id="tts-delay-seconds" min="0" max="10" step="0.5" value="0">
+            <p class="hint">Khoảng lặng chèn thêm giữa các câu đọc. Để 0 nếu muốn đọc liên tục không ngắt.</p>
+          </div>
+          <div class="device-row">
+            <label for="tts-playback-rate">
+              Tốc độ đọc: <span id="tts-playback-rate-value">1.0x</span>
+            </label>
+            <input type="range" id="tts-playback-rate" min="0.25" max="2" step="0.05" value="1">
+          </div>
+          <p class="hint" id="tts-cost-hint"></p>
+          <div class="provider-meta"><span id="tts-tier-badge" class="tier-badge"></span><span
+              id="tts-provider-description"></span></div>
+        </div>
+
+        <details class="section collapsible" id="context-block">
+          <summary>5. Custom context (optional)</summary>
+          <p class="hint">Domain context + glossary to improve specialized accuracy. JSON shape shown below.</p>
+          <textarea id="context-json" rows="8" placeholder='{
   "general": [["domain","Healthcare"],["topic","Diabetes"]],
   "text": "Optional longer passage",
   "terms": ["Celebrex","Prilosec"],
   "translation_terms": [["Mr. Smith","Sr. Smith"]]
 }'></textarea>
-      </details>
+        </details>
 
-      <div class="section" id="audio-url-block">
-        <h3>6. Test with audio URL (optional)</h3>
-        <input type="text" id="audio-url" class="audio-url-input" placeholder="https://example.com/audio.mp3">
-      </div>
+        <div class="section" id="audio-url-block">
+          <h3>6. Test with audio URL (optional)</h3>
+          <input type="text" id="audio-url" class="audio-url-input" placeholder="https://example.com/audio.mp3">
+        </div>
 
-      <div class="sidebar-footer">
-        <span id="status" class="status">Ready</span>
-        <span id="delay-status" class="status hidden"></span>
-        <span id="connection-dot" class="connection-dot hidden" title="Connection status"></span>
-        <button id="btn-retry" class="test-btn hidden" type="button" style="margin-top:6px">Thử lại</button>
-      <div id="barge-meter" class="barge-meter hidden" title="Mic input volume">
-        <div id="barge-bar" class="barge-bar"></div>
-      </div>
-        <div class="section hidden" id="audio-source-block">
-          <h3>Audio source</h3>
-          <div class="segmented">
-            <label class="seg">
-              <input type="radio" name="audio-source" value="microphone" checked>
-              <span>Microphone</span>
-            </label>
-            <label class="seg">
-              <input type="radio" name="audio-source" value="tab">
-              <span>Tab / System audio</span>
-            </label>
+        <div class="sidebar-footer">
+          <span id="status" class="status">Ready</span>
+          <span id="delay-status" class="status hidden"></span>
+          <span id="connection-dot" class="connection-dot hidden" title="Connection status"></span>
+          <button id="btn-retry" class="test-btn hidden" type="button" style="margin-top:6px">Thử lại</button>
+          <div id="barge-meter" class="barge-meter hidden" title="Mic input volume">
+            <div id="barge-bar" class="barge-bar"></div>
           </div>
-          <p class="hint">Tab/System audio: share a browser tab or your screen and make sure "Share tab audio" / "Share system audio" is checked in the browser's picker.</p>
-        </div>
-        <div class="action-row" data-mode="file">
-
-          <button id="action" class="action-btn" data-state="idle" type="button">
-            <svg class="icon icon-mic" viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
-              <path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/>
-            </svg>
-            <svg class="icon icon-play" viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true">
-              <path d="M8 5v14l11-7L8 5z"/>
-            </svg>
-            <span class="btn-label">STT: Play file</span>
-          </button>
-          <button id="action-tts" class="action-btn action-btn-tts" data-state="disabled" type="button" aria-pressed="false">
-            <svg class="icon icon-speaker" viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true">
-              <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 7.97v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>
-            </svg>
-            <span class="btn-label-tts">TTS: Tắt</span>
-          </button>
-          <button id="mode-toggle" class="mode-toggle" type="button" title="Switch input mode">
-            <svg class="icon icon-mic" viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true">
-              <path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/>
-            </svg>
-            <svg class="icon icon-play" viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true">
-              <path d="M8 5v14l11-7L8 5z"/>
-            </svg>
-          </button>
-        </div>
-      </div>
-
-      <div class="session-info hidden" id="session-info">
-        <strong>Session</strong>
-        <code id="session-id"></code>
-        <a id="transcript-link" href="#" target="_blank">/transcript/…</a>
-      </div>
-
-      <div class="section" id="download-block">
-        <h3>7. Save transcript</h3>
-        <div class="download-row">
-          <button id="dl-json" class="download-btn" type="button" disabled>
-            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
-            </svg>
-            JSON
-          </button>
-          <button id="dl-csv" class="download-btn" type="button" disabled>
-            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
-            </svg>
-            CSV
-          </button>
-        </div>
-      </div>
-
-      <!-- 8. Session history -->
-      <div class="history-section">
-        <button id="btn-history-toggle" class="btn-history-toggle"
-                onclick="toggleHistoryPanel()">Lịch sử ▼</button>
-        <div id="history-panel" class="history-panel">
-          <div class="history-toolbar">
-            <span class="history-title">Phiên đã lưu</span>
+          <div class="section hidden" id="audio-source-block">
+            <h3>Audio source</h3>
+            <div class="segmented">
+              <label class="seg">
+                <input type="radio" name="audio-source" value="microphone" checked>
+                <span>Microphone</span>
+              </label>
+              <label class="seg">
+                <input type="radio" name="audio-source" value="tab">
+                <span>Tab / System audio</span>
+              </label>
+            </div>
+            <p class="hint">Tab/System audio: share a browser tab or your screen and make sure "Share tab audio" /
+              "Share system audio" is checked in the browser's picker.</p>
           </div>
-          <form id="history-search-form" class="history-search-row">
-            <input id="history-search" type="search" placeholder="Tìm trong nội dung hội thoại…" aria-label="Tìm lịch sử">
-            <button id="history-search-button" class="hbtn" type="submit">Tìm</button>
-          </form>
-          <div id="history-list" class="history-list"></div>
-          <button id="history-load-more" class="hbtn history-load-more hidden" type="button">Tải thêm</button>
-          <div class="retention-controls">
-            <label for="retention-days">Giữ lịch sử</label>
-            <input id="retention-days" type="number" min="1" max="3650" value="30">
-            <span>ngày</span>
-            <button id="retention-cleanup" class="hbtn" type="button">Dọn ngay</button>
+          <div class="action-row" data-mode="file">
+
+            <button id="action" class="action-btn" data-state="idle" type="button">
+              <svg class="icon icon-mic" viewBox="0 0 24 24" width="18" height="18" fill="currentColor"
+                aria-hidden="true">
+                <path
+                  d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z" />
+              </svg>
+              <svg class="icon icon-play" viewBox="0 0 24 24" width="16" height="16" fill="currentColor"
+                aria-hidden="true">
+                <path d="M8 5v14l11-7L8 5z" />
+              </svg>
+              <span class="btn-label">STT: Play file</span>
+            </button>
+            <button id="action-tts" class="action-btn action-btn-tts" data-state="disabled" type="button"
+              aria-pressed="false">
+              <svg class="icon icon-speaker" viewBox="0 0 24 24" width="16" height="16" fill="currentColor"
+                aria-hidden="true">
+                <path
+                  d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 7.97v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z" />
+              </svg>
+              <span class="btn-label-tts">TTS: Tắt</span>
+            </button>
+            <button id="mode-toggle" class="mode-toggle" type="button" title="Switch input mode">
+              <svg class="icon icon-mic" viewBox="0 0 24 24" width="16" height="16" fill="currentColor"
+                aria-hidden="true">
+                <path
+                  d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z" />
+              </svg>
+              <svg class="icon icon-play" viewBox="0 0 24 24" width="14" height="14" fill="currentColor"
+                aria-hidden="true">
+                <path d="M8 5v14l11-7L8 5z" />
+              </svg>
+            </button>
           </div>
-          <span id="retention-stats" class="retention-stats"></span>
         </div>
-      </div>
+
+        <div class="session-info hidden" id="session-info">
+          <strong>Session</strong>
+          <code id="session-id"></code>
+          <a id="transcript-link" href="#" target="_blank">/transcript/…</a>
+        </div>
+
+        <div class="section" id="download-block">
+          <h3>7. Save transcript</h3>
+          <div class="download-row">
+            <button id="dl-json" class="download-btn" type="button" disabled>
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" />
+              </svg>
+              JSON
+            </button>
+            <button id="dl-csv" class="download-btn" type="button" disabled>
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" />
+              </svg>
+              CSV
+            </button>
+          </div>
+        </div>
+
+        <!-- 8. Session history -->
+        <div class="history-section">
+          <button id="btn-history-toggle" class="btn-history-toggle" onclick="toggleHistoryPanel()">Lịch sử ▼</button>
+          <div id="history-panel" class="history-panel">
+            <div class="history-toolbar">
+              <span class="history-title">Phiên đã lưu</span>
+            </div>
+            <form id="history-search-form" class="history-search-row">
+              <input id="history-search" type="search" placeholder="Tìm trong nội dung hội thoại…"
+                aria-label="Tìm lịch sử">
+              <button id="history-search-button" class="hbtn" type="submit">Tìm</button>
+            </form>
+            <div id="history-list" class="history-list"></div>
+            <button id="history-load-more" class="hbtn history-load-more hidden" type="button">Tải thêm</button>
+            <div class="retention-controls">
+              <label for="retention-days">Giữ lịch sử</label>
+              <input id="retention-days" type="number" min="1" max="3650" value="30">
+              <span>ngày</span>
+              <button id="retention-cleanup" class="hbtn" type="button">Dọn ngay</button>
+            </div>
+            <span id="retention-stats" class="retention-stats"></span>
+          </div>
+        </div>
       </div>
     </aside>
 
@@ -355,6 +385,8 @@
     </main>
   </div>
 
+  <footer id="copyright-duc">© 2026 Nguyễn Bá Đức — Soniox Live Translate. All rights reserved.</footer>
   <script type="module" src="/src/app.ts"></script>
 </body>
+
 </html>

@@ -5,7 +5,7 @@
 #define MyAppVersion    "0.1.7"
 
 
-#define MyAppPublisher  "ducnb17"
+#define MyAppPublisher  "Nguyễn Bá Đức"
 #define MyAppURL        "https://github.com/ducnb17/soniox-live-translate"
 #define MyAppExeName    "SonioxLiveTranslate.exe"
 
@@ -14,6 +14,7 @@ AppId={{A7B3C2D1-E4F5-6789-ABCD-EF0123456789}}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
+AppCopyright=Nguyễn Bá Đức
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}/issues
 AppUpdatesURL={#MyAppURL}/releases

@@ -312,3 +312,7 @@ and attaches it to a new GitHub Release automatically.
   frontend with strict typing).
 - M6 — done (Windows installer: PyInstaller + Inno Setup + GitHub Actions
   + system tray + first-run prompt).
+
+## Copyright
+
+© 2026 Nguyễn Bá Đức. All rights reserved.

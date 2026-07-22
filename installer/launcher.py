@@ -111,6 +111,24 @@ def _wait_ready(timeout: float = 30.0) -> bool:
     return False
 
 
+# ── About dialog ──────────────────────────────────────────────────────────
+def _show_about(icon) -> None:
+    """Display a simple About message box."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(
+                None,
+                "Soniox Live Translate — © Nguyễn Bá Đức",
+                "About",
+                0x40,  # MB_ICONINFORMATION
+            )
+        except Exception:
+            icon.notify("Soniox Live Translate — © Nguyễn Bá Đức", title="About")
+    else:
+        icon.notify("Soniox Live Translate — © Nguyễn Bá Đức", title="About")
+
+
 # ── System tray icon ──────────────────────────────────────────────────────
 def _make_icon():
     from PIL import Image, ImageDraw
@@ -147,6 +165,7 @@ def _run_tray(stop: threading.Event, window, quitting: threading.Event) -> None:
             pystray.MenuItem("Open",      lambda: window.show()),
             pystray.MenuItem("Settings",  lambda: open_settings()),
             pystray.Menu.SEPARATOR,
+            pystray.MenuItem("About",     lambda: _show_about(icon)),
             pystray.MenuItem("Quit",      lambda: quit_app(icon)),
         ),
     )
