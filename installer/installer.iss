@@ -2,7 +2,7 @@
 ; Build: ISCC installer\installer.iss
 
 #define MyAppName       "Soniox Live Translate"
-#define MyAppVersion    "0.3.5"
+#define MyAppVersion    "0.4.0"
 
 
 #define MyAppPublisher  "Nguyễn Bá Đức"

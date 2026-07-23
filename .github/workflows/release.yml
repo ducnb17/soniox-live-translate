@@ -58,9 +58,21 @@ jobs:
           python -m pip install packaging pyinstaller pystray pillow
 
       # ── 4. PyInstaller ───────────────────────────────────────────────────
+      - name: Sync installer version with tag
+        shell: pwsh
+        run: |
+          # Extract semver from tag (strip 'v' or 'electron-v' prefix)
+          $tag = "${{ github.ref_name }}"
+          $ver = $tag -replace '^(electron-v|v)', ''
+          Write-Host "Setting installer.iss MyAppVersion to $ver"
+          (Get-Content installer\installer.iss) `
+            -replace '#define MyAppVersion\s+"[^"]*"', "#define MyAppVersion    `"$ver`"" |
+            Set-Content installer\installer.iss
+
       - name: Copy backend/app to root
         shell: pwsh
         run: |
+
           Write-Host "Copying backend\app -> app\"
           Copy-Item -Recurse -Force backend\app app
           Write-Host "app\ contents: $(Get-ChildItem app | Select-Object -ExpandProperty Name)"
