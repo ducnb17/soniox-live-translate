@@ -1457,12 +1457,18 @@ async function startRecorder(): Promise<void> {
     setStatus(message);
   }, 1500);
 
-  // --- TTS self-hearing prevention for tab/system audio mode ---
-  // When capturing system audio, our own TTS output is part of the capture.
-  // Mute the capture while TTS is audible to prevent the self-hearing loop.
-  if ($audioSource() === "tab") {
-    startTtsMuteCheck();
-  }
+  // --- TTS self-hearing prevention (acoustic feedback) ---
+  // Whenever the TTS output is audible through speakers, the microphone
+  // picks it back up. In tab/system-audio mode that's a direct capture of
+  // our own output; in plain microphone mode (speakers, no headset) it's
+  // acoustic feedback through the room. Either way Soniox keeps "hearing
+  // speech" (the TTS voice) and never emits the `<end>` token that closes
+  // the utterance — which looks like STT+translation "freezing" until TTS
+  // finishes, then resuming. Muting capture while TTS is audible breaks
+  // that loop in both input modes. Barge-in (mic mode only) intentionally
+  // reads a separate, unmuted AnalyserNode tap on the raw mic stream so the
+  // user can still interrupt TTS by talking over it.
+  startTtsMuteCheck();
 
   // Barge-in only makes sense for microphone input.
   if ($barge.checked && $audioSource() === "microphone") startBargeVad(micStream);
@@ -1470,7 +1476,8 @@ async function startRecorder(): Promise<void> {
 
 /**
  * Periodically check if TTS is audible and mute/unmute the AudioWorklet
- * capture accordingly. Only active in tab/system audio mode.
+ * capture accordingly. Active for every audio source — see the comment
+ * in startRecorder() for why microphone input needs this too.
  */
 function startTtsMuteCheck(): void {
   stopTtsMuteCheck();
