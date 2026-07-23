@@ -3,7 +3,8 @@ name: Release Electron Desktop App
 on:
   push:
     tags:
-      - "electron-v*.*.*"
+      - "electron-v*.*.*"   # standalone Electron-only release tag
+      - "v*.*.*"             # main app release tag — also builds Electron
 
 permissions:
   contents: write
@@ -98,12 +99,24 @@ jobs:
         working-directory: electron
         run: npm run build:icons
 
+      - name: Sync Electron version with tag
+        shell: pwsh
+        working-directory: electron
+        run: |
+          # Extract semver from tag (strip 'v' or 'electron-v' prefix)
+          $tag = "${{ github.ref_name }}"
+          $ver = $tag -replace '^(electron-v|v)', ''
+          Write-Host "Setting electron/package.json version to $ver"
+          $pkg = Get-Content package.json | ConvertFrom-Json
+          $pkg.version = $ver
+          $pkg | ConvertTo-Json -Depth 10 | Set-Content package.json
+
       - name: Build Electron installer (NSIS)
         shell: pwsh
         working-directory: electron
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
-        run: npx electron-builder --win
+        run: npx electron-builder --win --publish never
 
       - name: Verify Electron installer
         shell: pwsh
@@ -123,20 +136,21 @@ jobs:
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-beta.') }}
           body: |
-            ## Soniox Live Translate (Desktop / Electron) ${{ github.ref_name }}
+            ## Soniox Live Translate — Desktop App (Electron) ${{ github.ref_name }}
 
-            Bản cài đặt **desktop app độc lập** — cửa sổ riêng, icon riêng trên
-            Desktop/Start Menu/Taskbar, không mở tab trình duyệt.
+            Bản cài đặt **Electron desktop** — cửa sổ riêng, icon riêng trên
+            Desktop/Start Menu/Taskbar, **không cần mở trình duyệt**.
+
+            > ⚠️ Đây là bản **Electron** (khuyến nghị). Nếu bản release này cũng có file
+            > `SonioxLiveTranslate-Setup-*.exe` khác (bản pywebview cũ), hãy chọn file
+            > **`Soniox Live Translate Setup *.exe`** — đây là bản Electron.
 
             ### Cài đặt trên Windows
-            1. Tải file `.exe` bên dưới
+            1. Tải file `Soniox Live Translate Setup *.exe` bên dưới
             2. Chạy installer → cài vào `Program Files`
             3. Mở app từ Desktop / Start Menu
-            4. Lần đầu: nhập API key trong trang Setup → **Save**
+            4. Lần đầu: nhập Soniox API key trong trang Setup → **Save**
 
             ### Yêu cầu
             - Windows 10/11 (64-bit)
-            - Không cần cài Chrome/Edge/Python/Node — app chạy độc lập
-
-            > Bản cài đặt "cổ điển" (pywebview) vẫn được phát hành riêng
-            > qua tag `v*.*.*` và không bị ảnh hưởng.
+            - Không cần cài Chrome/Edge/Python/Node — app chạy hoàn toàn độc lập
