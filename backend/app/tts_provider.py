@@ -8,7 +8,6 @@ can be added by implementing the interface without touching the UI.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import AsyncIterator
-import os
 
 from .logging_config import get_logger
 
@@ -66,70 +65,6 @@ class TTSProviderBase(ABC):
     @abstractmethod
     def info(self) -> TTSProviderInfo:
         ...
-
-
-# ── Cache ──
-
-class TTSCache:
-    """Bounded in-memory LRU cache for TTS audio by text+voice+provider hash."""
-
-    def __init__(self, max_size: int = 100, max_bytes: int = 64 * 1024 * 1024) -> None:
-        if max_size < 1 or max_bytes < 1:
-            raise ValueError("TTS cache limits must be positive")
-        self._cache: dict[str, bytes] = {}
-        self._order: list[str] = []
-        self._max_size = max_size
-        self._max_bytes = max_bytes
-        self._total_bytes = 0
-
-    def _key(self, text: str, voice_id: str, provider_id: str) -> str:
-        import hashlib
-        return hashlib.sha256(f"{text}|{voice_id}|{provider_id}".encode()).hexdigest()
-
-    def get(self, text: str, voice_id: str, provider_id: str) -> bytes | None:
-        key = self._key(text, voice_id, provider_id)
-        value = self._cache.get(key)
-        if value is not None:
-            self._order.remove(key)
-            self._order.append(key)
-        return value
-
-    def set(self, text: str, voice_id: str, provider_id: str, data: bytes) -> None:
-        k = self._key(text, voice_id, provider_id)
-        if k in self._cache:
-            self._order.remove(k)
-            self._total_bytes -= len(self._cache[k])
-        if len(data) > self._max_bytes:
-            self._cache.pop(k, None)
-            return
-        while self._order and (
-            len(self._cache) >= self._max_size
-            or self._total_bytes + len(data) > self._max_bytes
-        ):
-            oldest = self._order.pop(0)
-            self._total_bytes -= len(self._cache.pop(oldest))
-        self._cache[k] = data
-        self._order.append(k)
-        self._total_bytes += len(data)
-
-    def clear(self) -> None:
-        self._cache.clear()
-        self._order.clear()
-        self._total_bytes = 0
-
-    @property
-    def entry_count(self) -> int:
-        return len(self._cache)
-
-    @property
-    def total_bytes(self) -> int:
-        return self._total_bytes
-
-
-tts_cache = TTSCache(
-    max_size=int(os.environ.get("TTS_CACHE_MAX_ENTRIES", "100")),
-    max_bytes=int(os.environ.get("TTS_CACHE_MAX_MB", "64")) * 1024 * 1024,
-)
 
 
 # ── Provider factory ──

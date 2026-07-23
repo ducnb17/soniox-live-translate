@@ -27,6 +27,7 @@ State
             ...,
         },
         "line_counter": 0,
+        "prewarm_counter": 0,
         "stt_done": False,
         "enabled": True,
         "barge_epoch": 0,
@@ -62,6 +63,7 @@ log = get_logger("tts")
 TTS_BARGE = "barge"
 
 PREWARM_STREAM_ID = "prewarm"
+PREWARM_REUSE_WINDOW_SECONDS = 2.0
 
 
 def get_tts_config(stream_id: str, voice: str, lang: str) -> dict[str, Any]:
@@ -106,7 +108,8 @@ async def prewarm_stream(
     d = tts_state["directions"].get(direction)
     if d is None or d["current_stream_id"] is not None:
         return
-    stream_id = f"{PREWARM_STREAM_ID}-{direction}"
+    tts_state["prewarm_counter"] = int(tts_state.get("prewarm_counter", 0)) + 1
+    stream_id = f"{PREWARM_STREAM_ID}-{tts_state['prewarm_counter']}-{direction}"
     try:
         await tts_ws.send(json.dumps(get_tts_config(stream_id=stream_id, voice=voice, lang=direction)))
         d["current_stream_id"] = stream_id
@@ -114,6 +117,8 @@ async def prewarm_stream(
         tts_state["stream_id_to_direction"][stream_id] = {
             "direction": direction,
             "line_id": None,
+            "is_prewarm": True,
+            "opened_at": asyncio.get_running_loop().time(),
         }
         d["idle_event"].clear()
     except websockets.WebSocketException:
@@ -166,6 +171,29 @@ async def tts_sender(
                 # STT split a long utterance into multiple lines, finish the
                 # previous line before assigning a stream to the next one.
                 current_sid = d["current_stream_id"]
+                current_meta = tts_state["stream_id_to_direction"].get(
+                    current_sid, {}
+                )
+                if (
+                    current_sid is not None
+                    and not d["stream_used"]
+                    and current_meta.get("is_prewarm")
+                    and asyncio.get_running_loop().time()
+                    - float(current_meta.get("opened_at", 0.0))
+                    > PREWARM_REUSE_WINDOW_SECONDS
+                ):
+                    # A config-only stream can expire while STT is still
+                    # producing its first stable translation token. Rotate a
+                    # stale prewarm before binding the line so a queued 408
+                    # cannot consume the text and leave the UI on retry.
+                    await tts_ws.send(
+                        json.dumps({"stream_id": current_sid, "cancel": True})
+                    )
+                    tts_state["stream_id_to_direction"].pop(current_sid, None)
+                    d["current_stream_id"] = None
+                    d["stream_used"] = False
+                    d["idle_event"].set()
+                    current_sid = None
                 if current_sid is not None and d["stream_used"]:
                     current_meta = tts_state["stream_id_to_direction"].get(
                         current_sid, {}
@@ -276,7 +304,6 @@ async def tts_sender(
                                     "voice_id": direction_voices[tgt],
                                     "characters": char_count,
                                     "estimated_cost_usd": 0.0,
-                                    "cache_hit": False,
                                 }
                             })
                         except Exception:
@@ -292,11 +319,24 @@ async def pipe_tts_to_browser(
     tts_ws,
     browser_ws: WebSocket,
     tts_state: dict,
+    direction_voices: dict[str, str] | None = None,
 ) -> None:
     """Read TTS responses (multiplexed by stream_id): forward base64 PCM to
     browser, route `terminated` events back to their direction state, and emit
     `session_done` once STT is finished and every direction is idle."""
-    pending_audio_by_stream: dict[str, bytes] = {}
+    audio_end_streams: set[str] = set()
+
+    async def rewarm_direction(direction: str | None) -> None:
+        if (
+            direction is None
+            or direction_voices is None
+            or tts_state.get("stt_done")
+        ):
+            return
+        voice = direction_voices.get(direction)
+        if voice is None:
+            return
+        await prewarm_stream(tts_ws, tts_state, direction, voice)
 
     async def send_audio_chunk(
         stream_id: str,
@@ -346,24 +386,25 @@ async def pipe_tts_to_browser(
                     error_message=data.get("error_message"),
                 )
 
-                # Report error to the frontend so the user knows TTS is broken.
+                # A config-only prewarm can expire before speech begins. That
+                # is recoverable: the sender opens a fresh stream on the first
+                # text token. Do not turn this into a user-facing "Read: retry".
                 stream_meta = tts_state["stream_id_to_direction"].get(error_stream_id, {}) if error_stream_id else {}
                 error_line_id = stream_meta.get("line_id")
-                try:
-                    await browser_ws.send_json({
-                        "type": "tts_error",
-                        "line_id": error_line_id,
-                        "error_code": data["error_code"],
-                        "error_message": data.get("error_message", ""),
-                    })
-                except Exception:
-                    pass
+                if error_line_id is not None:
+                    try:
+                        await browser_ws.send_json({
+                            "type": "tts_error",
+                            "line_id": error_line_id,
+                            "error_code": data["error_code"],
+                            "error_message": data.get("error_message", ""),
+                        })
+                    except Exception:
+                        pass
 
                 # Mark the line as "done" with 0 bytes audio so
                 # StrictLineAudioQueue does not block on it forever.
                 if error_stream_id:
-                    # Flush any pending audio for this stream (0 bytes).
-                    pending_audio_by_stream.pop(error_stream_id, None)
                     if error_line_id is not None:
                         await send_audio_chunk(
                             error_stream_id,
@@ -389,21 +430,30 @@ async def pipe_tts_to_browser(
                 audio = base64.b64decode(audio_b64)
                 sid = data.get("stream_id")
                 if sid is not None:
-                    previous_audio = pending_audio_by_stream.pop(sid, None)
-                    if previous_audio is not None:
-                        await send_audio_chunk(
-                            sid, previous_audio, line_audio_end=False
-                        )
-                    # Soniox marks stream completion on a later `terminated`
-                    # event, so retain one chunk of look-ahead. That lets the
-                    # browser know which binary payload is truly last.
-                    pending_audio_by_stream[sid] = audio
+                    is_audio_end = bool(data.get("audio_end"))
+                    if is_audio_end:
+                        audio_end_streams.add(sid)
+                    # Forward every PCM frame immediately. Soniox's audio_end
+                    # flag identifies the last frame, so no look-ahead buffer
+                    # is needed and first-audio latency stays minimal.
+                    await send_audio_chunk(
+                        sid, audio, line_audio_end=is_audio_end
+                    )
 
             if data.get("terminated"):
                 sid = data.get("stream_id")
-                final_audio = pending_audio_by_stream.pop(sid, None)
-                if final_audio is not None:
-                    await send_audio_chunk(sid, final_audio, line_audio_end=True)
+                stream_meta_before_cleanup = tts_state[
+                    "stream_id_to_direction"
+                ].get(sid, {})
+                # Be defensive with older/aborted streams that terminate
+                # without an audio_end frame: a zero-byte end marker releases
+                # the frontend's strict FIFO without synthesizing silence.
+                if (
+                    sid not in audio_end_streams
+                    and stream_meta_before_cleanup.get("line_id") is not None
+                ):
+                    await send_audio_chunk(sid, b"", line_audio_end=True)
+                audio_end_streams.discard(sid)
                 stream_meta = tts_state["stream_id_to_direction"].pop(sid, None)
                 direction = (
                     stream_meta.get("direction") if stream_meta is not None else None
@@ -415,6 +465,8 @@ async def pipe_tts_to_browser(
                             d["current_stream_id"] = None
                             d["stream_used"] = False
                         d["idle_event"].set()
+
+                await rewarm_direction(direction)
 
                 _maybe_send_session_done_sync(tts_state)
                 if tts_state.get("_session_done_sent"):

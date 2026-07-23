@@ -1,4 +1,4 @@
-// Builds the PyInstaller backend exe (reusing installer/spec.spec) and copies
+// Builds the server-only PyInstaller backend (no pywebview) and copies
 // the result into electron/resources/backend for electron-builder to bundle.
 import { execFileSync } from "node:child_process";
 import { cp, rm, mkdir, access } from "node:fs/promises";
@@ -41,7 +41,7 @@ async function main() {
     python,
     [
       "-m", "PyInstaller",
-      path.join("installer", "spec.spec"),
+      path.join("installer", "electron-backend.spec"),
       "--distpath", "dist_win",
       "--workpath", "build_win",
       "--noconfirm",

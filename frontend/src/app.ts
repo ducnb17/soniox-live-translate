@@ -31,6 +31,14 @@ import {
 import { addTtsUsage, emptyTtsUsage, formatTtsCostHint } from "./tts-usage";
 import { SpeechToText, type SpeechToTextConfig } from "./speech-to-text";
 import { TextToSpeech } from "./text-to-speech";
+import { formatDisplayLines } from "./sentence-lines";
+import {
+  displayAudioConstraints,
+  FallbackCaptureGate,
+  resolveDisplayCaptureIsolation,
+  type CaptureIsolationMode,
+  type OwnAudioTrackSettings,
+} from "./capture-isolation";
 
 
 // UTF-8 safe base64 (handles non-ASCII context text).
@@ -99,8 +107,6 @@ const $ttsProvider = $<HTMLSelectElement>("tts-provider-select");
 const $ttsVoice = $<HTMLSelectElement>("tts-voice-select");
 const $sttDelay = $<HTMLInputElement>("stt-delay-seconds");
 const $sttDelayValue = $<HTMLSpanElement>("stt-delay-seconds-value");
-const $ttsDelay = $<HTMLInputElement>("tts-delay-seconds");
-const $ttsDelayValue = $<HTMLSpanElement>("tts-delay-seconds-value");
 const $ttsPlaybackRate = $<HTMLInputElement>("tts-playback-rate");
 const $ttsPlaybackRateValue = $<HTMLSpanElement>("tts-playback-rate-value");
 const $ttsApiKey = $<HTMLInputElement>("tts-api-key");
@@ -127,6 +133,8 @@ const $translationTestStatus = $<HTMLSpanElement>("translation-test-status");
 const $translationTierBadge = $<HTMLSpanElement>("translation-tier-badge");
 const $translationProviderDescription = $<HTMLSpanElement>("translation-provider-description");
 const $translationKeyLink = $<HTMLAnchorElement>("translation-key-link");
+const $translationStyle = $<HTMLSelectElement>("translation-style-select");
+const $translationStyleHint = $<HTMLParagraphElement>("translation-style-hint");
 const $saveConfigBtn = $<HTMLButtonElement>("save-config-btn");
 const $saveConfigStatus = $<HTMLSpanElement>("save-config-status");
 const $historyPanel = $<HTMLDivElement>("history-panel");
@@ -472,21 +480,24 @@ interface ProviderInfo {
   tier: "free" | "cheap" | "premium";
   pricing_url: string;
   signup_url?: string;
+  supported_styles?: string[];
   has_api_key: boolean;
 }
 
 let ttsProviders: TtsProviderInfo[] = [];
 let currentTtsProvider = "soniox";
 let ttsSessionUsage = emptyTtsUsage();
-const STT_DELAY_SECONDS_KEY = "sttDelaySeconds";
-const TTS_DELAY_SECONDS_KEY = "ttsDelaySeconds";
+const STT_DELAY_SECONDS_KEY = "sttDelaySecondsRtV2";
 const TTS_PLAYBACK_RATE_KEY = "ttsPlaybackRate";
+
+// Remove the obsolete persisted pause so upgrades cannot silently restore it.
+try { localStorage.removeItem("ttsDelaySeconds"); } catch { /* storage disabled */ }
 
 function readSttDelaySeconds(): number {
   let saved: string | null = null;
   try { saved = localStorage.getItem(STT_DELAY_SECONDS_KEY); } catch { /* storage disabled */ }
-  const value = Number(saved ?? "1.5");
-  return Number.isFinite(value) && value >= 0 && value <= 10 ? value : 1.5;
+  const value = Number(saved ?? "0.5");
+  return Number.isFinite(value) && value >= 0.5 && value <= 10 ? value : 0.5;
 }
 
 function updateSttDelaySelection(): void {
@@ -497,26 +508,7 @@ function updateSttDelaySelection(): void {
 
 function currentSttDelaySeconds(): number {
   const value = $sttDelay.valueAsNumber;
-  return Number.isFinite(value) && value >= 0 && value <= 10 ? value : 1.5;
-}
-
-function readTtsDelaySeconds(): number {
-  let saved: string | null = null;
-  try { saved = localStorage.getItem(TTS_DELAY_SECONDS_KEY); } catch { /* storage disabled */ }
-  const value = Number(saved ?? "0");
-  return Number.isFinite(value) && value >= 0 && value <= 10 ? value : 0;
-}
-
-function updateTtsDelaySelection(): void {
-  $ttsDelayValue.textContent = $ttsDelay.value;
-  try { localStorage.setItem(TTS_DELAY_SECONDS_KEY, $ttsDelay.value); } catch { /* storage disabled */ }
-  textToSpeech.updateConfig({ ttsDelaySeconds: currentTtsDelaySeconds() });
-  updateDelayStatusIndicator();
-}
-
-function currentTtsDelaySeconds(): number {
-  const value = $ttsDelay.valueAsNumber;
-  return Number.isFinite(value) && value >= 0 && value <= 10 ? value : 0;
+  return Number.isFinite(value) && value >= 0.5 && value <= 10 ? value : 0.5;
 }
 
 function readTtsPlaybackRate(): number {
@@ -545,9 +537,6 @@ function updateTtsPlaybackRateSelection(): void {
 $sttDelay.value = String(readSttDelaySeconds());
 $sttDelayValue.textContent = $sttDelay.value;
 $sttDelay.addEventListener("input", updateSttDelaySelection);
-$ttsDelay.value = String(readTtsDelaySeconds());
-$ttsDelayValue.textContent = $ttsDelay.value;
-$ttsDelay.addEventListener("input", updateTtsDelaySelection);
 $ttsPlaybackRate.value = String(readTtsPlaybackRate());
 $ttsPlaybackRateValue.textContent = formatTtsPlaybackRate($ttsPlaybackRate.valueAsNumber);
 $ttsPlaybackRate.addEventListener("input", updateTtsPlaybackRateSelection);
@@ -693,6 +682,22 @@ $btnSaveTtsKey.addEventListener("click", async () => {
 let sttProviders: ProviderInfo[] = [];
 let translationProviders: ProviderInfo[] = [];
 
+function updateTranslationStyleAvailability(): void {
+  const provider = translationProviders.find((item) => item.id === $translationProvider.value);
+  const supported = new Set(provider?.supported_styles || ["natural"]);
+  for (const option of Array.from($translationStyle.options)) {
+    option.disabled = !supported.has(option.value);
+  }
+  if (!supported.has($translationStyle.value)) $translationStyle.value = "natural";
+  $translationStyle.disabled = supported.size <= 1;
+  const supportedNames = Array.from($translationStyle.options)
+    .filter((option) => supported.has(option.value))
+    .map((option) => option.textContent?.replace(/^\d+\.\s*/, "") || option.value);
+  $translationStyleHint.textContent = supported.size <= 1
+    ? `${provider?.name || "This engine"} currently supports Natural style only.`
+    : `Supported by ${provider?.name || "this engine"}: ${supportedNames.join(", ")}.`;
+}
+
 function populateProviderSelect(select: HTMLSelectElement, providers: ProviderInfo[]): void {
   select.innerHTML = "";
   for (const provider of providers) {
@@ -787,9 +792,15 @@ async function loadSpeechProviders(): Promise<void> {
       $translationProvider, translationProviders, $translationApiKeyRow,
       $translationTierBadge, $translationProviderDescription, $translationKeyLink,
     );
+    const styleResponse = await fetch("/api/translation/config");
+    if (styleResponse.ok) {
+      const styleConfig = await styleResponse.json() as { current_style?: string };
+      $translationStyle.value = styleConfig.current_style || "natural";
+    }
     // Auto-detect saved provider keys and disable inputs accordingly.
     updateKeyInputState($sttProvider, sttProviders, $sttApiKey, $sttTestStatus);
     updateKeyInputState($translationProvider, translationProviders, $translationApiKey, $translationTestStatus);
+    updateTranslationStyleAvailability();
   } catch {
     window.setTimeout(() => { void loadSpeechProviders(); }, 3000);
   }
@@ -807,6 +818,7 @@ $translationProvider.addEventListener("change", () => {
     $translationTierBadge, $translationProviderDescription, $translationKeyLink,
   );
   updateKeyInputState($translationProvider, translationProviders, $translationApiKey, $translationTestStatus);
+  updateTranslationStyleAvailability();
 });
 $btnTestSttKey.addEventListener("click", () => {
   void testDomainProvider("stt", $sttProvider, $sttApiKey, $sttTestStatus);
@@ -832,6 +844,7 @@ $saveConfigBtn.addEventListener("click", async () => {
       tts_voice: $ttsVoice.value,
       stt_provider: $sttProvider.value,
       translation_provider: $translationProvider.value,
+      translation_style: $translationStyle.value,
     };
     if (ttsKeyInput) payload["tts_api_key"] = ttsKeyInput;
     if (sttKeyInput) payload["stt_api_key"] = sttKeyInput;
@@ -1123,9 +1136,12 @@ let interimFeedLine: HTMLDivElement | null = null;
 let captureCtx: AudioContext | null = null;
 let captureWorklet: AudioWorkletNode | null = null;
 let micStream: MediaStream | null = null;
-// When true, the worklet sends silence instead of real audio (anti TTS self-hear).
+// Last-resort silence gate. Normal tab/system capture uses restrictOwnAudio and
+// therefore keeps the source flowing while TTS plays on the same output.
 let captureMuted = false;
-// Interval that checks whether TTS is audible and mutes/unmutes capture in tab mode.
+let captureIsolationMode: CaptureIsolationMode = "microphone-aec";
+const fallbackCaptureGate = new FallbackCaptureGate();
+// Interval used only when the platform cannot exclude this app's own audio.
 let ttsMuteCheckInterval: ReturnType<typeof setInterval> | null = null;
 
 // Barge-in VAD state
@@ -1158,18 +1174,24 @@ function newUtt(): Utterance {
 const textToSpeech = new TextToSpeech(
   {
     onLineStarted: () => {
+      updateFallbackCaptureMute();
       if (state === "playing-file" && fileAudio && !fileTtsHeard) {
         fileTtsHeard = true;
         fileAudio.volume = 0.1;
       }
     },
-    onLineFinished: () => updateDelayStatusIndicator(),
-    onQueueChanged: () => updateDelayStatusIndicator(),
+    onLineFinished: () => {
+      updateFallbackCaptureMute();
+      updateDelayStatusIndicator();
+    },
+    onQueueChanged: () => {
+      updateFallbackCaptureMute();
+      updateDelayStatusIndicator();
+    },
     onError: (message) => showTtsErrorBanner(message),
   },
   {
     outputDevice: $outputDevice.value || "default",
-    ttsDelaySeconds: currentTtsDelaySeconds(),
     playbackRate: currentTtsPlaybackRate(),
   },
 );
@@ -1242,6 +1264,7 @@ function buildSpeechToTextConfig(): SpeechToTextConfig {
     ttsProvider: $ttsProvider.value,
     sttProvider: $sttProvider.value || "soniox",
     translationProvider: $translationProvider.value || "soniox",
+    translationStyle: $translationStyle.value || "natural",
     sttDelayMs: Math.round(currentSttDelaySeconds() * 1000),
     isTtsEnabled: textToSpeech.getState().isTtsEnabled,
   };
@@ -1350,7 +1373,13 @@ async function acquireInputStream(): Promise<MediaStream> {
     if (!navigator.mediaDevices.getDisplayMedia) {
       throw new Error("Tab/system audio capture is not supported in this browser.");
     }
-    const displayStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+    const supported = navigator.mediaDevices.getSupportedConstraints() as MediaTrackSupportedConstraints & {
+      restrictOwnAudio?: boolean;
+    };
+    const displayStream = await navigator.mediaDevices.getDisplayMedia({
+      video: true,
+      audio: displayAudioConstraints(),
+    });
     // We only need audio — stop the video track(s) immediately.
     displayStream.getVideoTracks().forEach((t) => t.stop());
     const audioTracks = displayStream.getAudioTracks();
@@ -1360,6 +1389,21 @@ async function acquireInputStream(): Promise<MediaStream> {
         "No audio track was shared. Please check the option to also share tab/system audio when selecting what to share.",
       );
     }
+    const audioTrack = audioTracks[0];
+    const ownAudioSupported = supported.restrictOwnAudio === true;
+    if (ownAudioSupported) {
+      await audioTrack.applyConstraints(displayAudioConstraints()).catch(() => undefined);
+    }
+    const trackSettings = audioTrack.getSettings() as MediaTrackSettings & OwnAudioTrackSettings;
+    captureIsolationMode = resolveDisplayCaptureIsolation(
+      ownAudioSupported,
+      trackSettings,
+    );
+    console.info("[audio-input] display capture isolation", {
+      mode: captureIsolationMode,
+      restrictOwnAudioSupported: ownAudioSupported,
+      restrictOwnAudioActive: trackSettings.restrictOwnAudio === true,
+    });
     const stream = new MediaStream(audioTracks);
     // Auto-stop the session if the user clicks the browser's native "Stop sharing" control.
     audioTracks[0].onended = () => {
@@ -1375,6 +1419,7 @@ async function acquireInputStream(): Promise<MediaStream> {
     $audioSource() !== "tab" &&
     selectedInputId !== "default" &&
     isLikelyVirtualLoopbackDevice({ label: selectedLabel });
+  captureIsolationMode = isVirtualLoopback ? "fallback-gate" : "microphone-aec";
 
   // Keep browser DSP enabled for real microphones to reduce speaker echo.
   // Virtual/loopback devices already carry clean app audio, so WebRTC DSP can
@@ -1432,7 +1477,11 @@ async function startRecorder(): Promise<void> {
     if (pcmBuffer.byteLength > 0) {
       pcmChunks += 1;
       pcmBytes += pcmBuffer.byteLength;
-      speechToText.sendAudio(new Blob([pcmBuffer]));
+      // Close the main-thread race before the worklet observes its mute flag.
+      const outboundPcm = captureMuted
+        ? new ArrayBuffer(pcmBuffer.byteLength)
+        : pcmBuffer;
+      speechToText.sendAudio(new Blob([outboundPcm]));
     }
   };
 
@@ -1453,10 +1502,9 @@ async function startRecorder(): Promise<void> {
     setStatus(message);
   }, 1500);
 
-  // --- TTS self-hearing prevention for tab/system audio mode ---
-  // When capturing system audio, our own TTS output is part of the capture.
-  // Mute the capture while TTS is audible to prevent the self-hearing loop.
-  if ($audioSource() === "tab") {
+  // Chromium's own-audio filter preserves the source while removing local TTS.
+  // Silence is used only when the runtime cannot verify that filter.
+  if (captureIsolationMode === "fallback-gate") {
     startTtsMuteCheck();
   }
 
@@ -1470,18 +1518,24 @@ async function startRecorder(): Promise<void> {
  */
 function startTtsMuteCheck(): void {
   stopTtsMuteCheck();
-  ttsMuteCheckInterval = setInterval(() => {
-    const shouldMute = textToSpeech.isAudible() || textToSpeech.hasPendingAudio();
-    if (shouldMute !== captureMuted) {
-      captureMuted = shouldMute;
-      captureWorklet?.port.postMessage({ type: "mute", value: shouldMute });
-      if (shouldMute) {
-        console.log("[audio-input] TTS audible → muting capture to prevent self-hearing");
-      } else {
-        console.log("[audio-input] TTS silent → resuming capture");
-      }
-    }
-  }, 50);
+  updateFallbackCaptureMute();
+  ttsMuteCheckInterval = setInterval(updateFallbackCaptureMute, 25);
+}
+
+function updateFallbackCaptureMute(): void {
+  if (captureIsolationMode !== "fallback-gate") return;
+  const shouldMute = fallbackCaptureGate.shouldMute(
+    textToSpeech.hasScheduledAudio(),
+    performance.now(),
+  );
+  if (shouldMute === captureMuted) return;
+  captureMuted = shouldMute;
+  captureWorklet?.port.postMessage({ type: "mute", value: shouldMute });
+  if (shouldMute) {
+    console.warn("[audio-input] own-audio exclusion unavailable; temporarily gating capture");
+  } else {
+    console.log("[audio-input] TTS silent → resuming capture");
+  }
 }
 
 function stopTtsMuteCheck(): void {
@@ -1489,6 +1543,7 @@ function stopTtsMuteCheck(): void {
     clearInterval(ttsMuteCheckInterval);
     ttsMuteCheckInterval = null;
   }
+  fallbackCaptureGate.reset();
   if (captureMuted) {
     captureMuted = false;
     captureWorklet?.port.postMessage({ type: "mute", value: false });
@@ -1583,7 +1638,6 @@ function stopBargeVad(): void {
 function resetSession(): void {
   textToSpeech.updateConfig({
     outputDevice: $outputDevice.value,
-    ttsDelaySeconds: currentTtsDelaySeconds(),
     playbackRate: currentTtsPlaybackRate(),
   });
   textToSpeech.resetSession();
@@ -1679,6 +1733,7 @@ function cleanupSttInput(): void {
     micStream.getTracks().forEach((track) => track.stop());
   }
   micStream = null;
+  captureIsolationMode = "microphone-aec";
   if (fileAudio) {
     fileAudio.pause();
     fileAudio = null;
@@ -1793,12 +1848,10 @@ if ($ttsErrorClose) {
 function updateDelayStatusIndicator(): void {
   const scheduledPlaybackSeconds = textToSpeech.getScheduledPlaybackSeconds();
   const queuedAudioSeconds = textToSpeech.getQueuedAudioSeconds();
-  const queuedLineDelaySeconds = textToSpeech.getQueuedLineDelaySeconds();
   const totalDelaySeconds =
     currentSttDelaySeconds() +
     scheduledPlaybackSeconds +
-    queuedAudioSeconds +
-    queuedLineDelaySeconds;
+    queuedAudioSeconds;
   const visible = state !== "idle" && totalDelaySeconds > 0;
   const formattedDelay = Number.isInteger(totalDelaySeconds)
     ? String(totalDelaySeconds)
@@ -1848,9 +1901,9 @@ function updateFeedLine(line: HTMLDivElement, u: Utterance, interim = false): vo
   label.firstChild!.textContent = `Speaker ${u.speaker ?? "—"}: `;
   line.querySelector<HTMLSpanElement>(".lang-tag")!.textContent = u.language || "auto";
   line.querySelector<HTMLDivElement>(".original-text")!.textContent =
-    `${u.originalFinal}${u.originalPartial}`;
+    formatDisplayLines(`${u.originalFinal}${u.originalPartial}`);
   line.querySelector<HTMLDivElement>(".translated-text")!.textContent =
-    `${u.translationFinal}${u.translationPartial}`;
+    formatDisplayLines(`${u.translationFinal}${u.translationPartial}`);
 }
 
 function appendFinalFeedLine(u: Utterance): void {
@@ -1943,7 +1996,6 @@ async function toggleTextToSpeech(): Promise<void> {
     try {
       await textToSpeech.enable({
         outputDevice: $outputDevice.value,
-        ttsDelaySeconds: currentTtsDelaySeconds(),
         playbackRate: currentTtsPlaybackRate(),
       });
       speechToText.setTtsEnabled(true);

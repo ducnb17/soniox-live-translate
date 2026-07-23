@@ -22,6 +22,7 @@ export interface SpeechToTextConfig {
   ttsProvider: string;
   sttProvider: string;
   translationProvider: string;
+  translationStyle: string;
   sttDelayMs: number;
   isTtsEnabled: boolean;
 }
@@ -210,6 +211,7 @@ export class SpeechToText {
       tts_provider: config.ttsProvider,
       stt_provider: config.sttProvider,
       translation_provider: config.translationProvider,
+      translation_style: config.translationStyle,
       ...extraParams,
     });
 

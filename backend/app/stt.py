@@ -22,10 +22,11 @@ log = get_logger("stt")
 TTS_TEXT = "text"
 TTS_END = "end"
 TTS_NONE = None
-# TTS chunks are deliberately short so synthesis/playback can start before a
-# long utterance reaches Soniox's real endpoint. This is audio buffering only;
-# the frontend coalesces non-endpoint `line_ready` messages for display.
-LINE_MAX_CHARS = 50
+# External TTS APIs generally need a complete text request. Flush a short,
+# natural phrase as soon as it is stable instead of waiting for the endpoint.
+# Soniox's native streaming TTS still receives every final translation token.
+TTS_CHUNK_MIN_CHARS = 12
+TTS_CHUNK_MAX_CHARS = 48
 
 
 async def pipe_browser_to_stt(
@@ -113,6 +114,7 @@ async def handle_stt(
     finished_event: asyncio.Event | None = None,
     extra_hold_ms: int = 0,
     translate_text: Callable[[str, str | None, str], Awaitable[str]] | None = None,
+    stream_translation_tokens: bool = False,
 ) -> None:
     """Read STT responses: forward to browser, route tokens to TTS queue,
     call `on_endpoint` whenever an <end> token closes an utterance,
@@ -125,13 +127,24 @@ async def handle_stt(
     current_lang = None
     line_original_offset = 0
     line_counter = int(tts_state.get("line_counter", 0))
+    active_tts_line_id: int | None = None
+    active_tts_direction: str | None = None
+    active_tts_epoch: int | None = None
+    active_tts_allowed = False
     utterance_start_ms: int | None = None
+    utterance_tts_allowed = False
     stream_finished = False
     pending_tts_chunks: list[tuple[str, str | None, dict[str, Any]]] = []
     hold_queue: asyncio.Queue[
-        tuple[float, list[tuple[str, str | None, dict[str, Any]]], str | None, dict | None]
+        tuple[float, list[tuple[str, str | None, dict[str, Any]]], str | None, dict | None, bool]
     ] | None = None
     hold_worker: asyncio.Task[None] | None = None
+
+    def allocate_line_id() -> int:
+        nonlocal line_counter
+        line_counter += 1
+        tts_state["line_counter"] = line_counter
+        return line_counter
 
     def make_line_ready_payload(
         *,
@@ -140,13 +153,11 @@ async def handle_stt(
         translated_text: str,
         lang: str | None,
         is_endpoint: bool,
+        line_id: int | None = None,
     ) -> dict[str, Any]:
         """Allocate the stable ID shared by one rendered line and its audio."""
-        nonlocal line_counter
-        line_counter += 1
-        tts_state["line_counter"] = line_counter
         return _line_ready_payload(
-            line_id=line_counter,
+            line_id=line_id if line_id is not None else allocate_line_id(),
             speaker=speaker,
             original_text=original_text,
             translated_text=translated_text,
@@ -158,14 +169,24 @@ async def handle_stt(
         tts_chunks: list[tuple[str, str | None, dict[str, Any]]],
         direction: str | None,
         final_segment: dict | None,
+        close_tts_stream: bool,
     ) -> None:
         for chunk, chunk_direction, line_payload in tts_chunks:
             await browser_ws.send_json(line_payload)
-            if tts_queue is not None and tts_state.get("enabled", True) and chunk:
+            if (
+                tts_queue is not None
+                and tts_state.get("enabled", True)
+                and chunk
+                and not stream_translation_tokens
+            ):
                 await tts_queue.put(
                     (TTS_TEXT, chunk, chunk_direction, line_payload["line_id"])
                 )
-        if tts_queue is not None and tts_state.get("enabled", True):
+        if (
+            close_tts_stream
+            and tts_queue is not None
+            and tts_state.get("enabled", True)
+        ):
             await tts_queue.put((TTS_END, direction))
         if on_endpoint is not None:
             await on_endpoint()
@@ -179,12 +200,14 @@ async def handle_stt(
             assert hold_queue is not None
             loop = asyncio.get_running_loop()
             while True:
-                release_at, tts_chunks, direction, final_segment = await hold_queue.get()
+                release_at, tts_chunks, direction, final_segment, close_tts_stream = await hold_queue.get()
                 try:
                     delay = release_at - loop.time()
                     if delay > 0:
                         await asyncio.sleep(delay)
-                    await commit_utterance(tts_chunks, direction, final_segment)
+                    await commit_utterance(
+                        tts_chunks, direction, final_segment, close_tts_stream
+                    )
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
@@ -219,6 +242,7 @@ async def handle_stt(
                     current_lang = token["language"]
                 if utterance_start_ms is None:
                     utterance_start_ms = data.get("start_time_ms") or 0
+                    utterance_tts_allowed = bool(tts_state.get("enabled", True))
 
                 if text == "<end>":
                     got_end = True
@@ -227,6 +251,8 @@ async def handle_stt(
                         if mode == "one_way"
                         else _direction(token, mode, lang_a, lang_b, source_lang=current_lang)
                     )
+                    if active_tts_direction is not None:
+                        direction = active_tts_direction
                     tts_chunks = pending_tts_chunks
                     pending_tts_chunks = []
                     if translate_text is not None and current_original:
@@ -247,9 +273,12 @@ async def handle_stt(
                                 })
                     remaining_original = current_original[line_original_offset:]
                     if current_translation or remaining_original:
-                        translated_parts = _split_line_short(
-                            current_translation, LINE_MAX_CHARS
-                        ) or [""]
+                        if stream_translation_tokens and active_tts_line_id is not None:
+                            translated_parts = [current_translation]
+                        else:
+                            translated_parts = _split_line_short(
+                                current_translation, TTS_CHUNK_MAX_CHARS
+                            ) or [""]
                         for index, translated_part in enumerate(translated_parts):
                             tts_chunks.append((
                                 translated_part,
@@ -262,6 +291,11 @@ async def handle_stt(
                                     translated_text=translated_part,
                                     lang=current_lang,
                                     is_endpoint=index == len(translated_parts) - 1,
+                                    line_id=(
+                                        active_tts_line_id
+                                        if stream_translation_tokens and index == 0
+                                        else None
+                                    ),
                                 ),
                             ))
                     final_segment = None
@@ -274,15 +308,31 @@ async def handle_stt(
                             "started_at_ms": utterance_start_ms,
                             "ended_at_ms": data.get("end_time_ms") or (utterance_start_ms or 0) + 2000,
                         }
+                    close_tts_stream = not stream_translation_tokens or (
+                        active_tts_line_id is not None
+                        and active_tts_allowed
+                        and active_tts_epoch == tts_state.get("barge_epoch")
+                    )
                     if hold_queue is not None:
                         release_at = (
                             asyncio.get_running_loop().time() + extra_hold_ms / 1000
                         )
                         hold_queue.put_nowait(
-                            (release_at, tts_chunks, direction, final_segment)
+                            (
+                                release_at,
+                                tts_chunks,
+                                direction,
+                                final_segment,
+                                close_tts_stream,
+                            )
                         )
                     else:
-                        await commit_utterance(tts_chunks, direction, final_segment)
+                        await commit_utterance(
+                            tts_chunks,
+                            direction,
+                            final_segment,
+                            close_tts_stream,
+                        )
                     current_original = ""
                     current_translation = ""
                     full_translation = ""
@@ -290,18 +340,46 @@ async def handle_stt(
                     current_lang = None
                     line_original_offset = 0
                     utterance_start_ms = None
+                    active_tts_line_id = None
+                    active_tts_direction = None
+                    active_tts_epoch = None
+                    active_tts_allowed = False
+                    utterance_tts_allowed = False
                 elif token.get("translation_status") == "translation":
                     if token.get("is_final"):
                         current_translation += text
                         full_translation += text
-                        if tts_queue is not None:
-                            target = _resolve_tts_target(
-                                token, mode, lang_a, lang_b, target_lang
-                            )
-                            while (
-                                not message_has_end
-                                and len(current_translation) > LINE_MAX_CHARS
+                        target = _resolve_tts_target(
+                            token, mode, lang_a, lang_b, target_lang
+                        )
+                        if (
+                            stream_translation_tokens
+                            and tts_queue is not None
+                            and target is not None
+                            and utterance_tts_allowed
+                        ):
+                            if active_tts_line_id is None:
+                                active_tts_line_id = allocate_line_id()
+                                active_tts_direction = target
+                                active_tts_epoch = int(tts_state.get("barge_epoch", 0))
+                                active_tts_allowed = bool(
+                                    tts_state.get("enabled", True)
+                                )
+                            if (
+                                active_tts_allowed
+                                and tts_state.get("enabled", True)
+                                and active_tts_epoch == tts_state.get("barge_epoch")
                             ):
+                                await tts_queue.put(
+                                    (
+                                        TTS_TEXT,
+                                        text,
+                                        active_tts_direction,
+                                        active_tts_line_id,
+                                    )
+                                )
+                        elif tts_queue is not None:
+                            while not message_has_end:
                                 split_at = _tts_buffer_split_index(current_translation)
                                 if split_at is None:
                                     break
@@ -445,22 +523,24 @@ def _line_ready_payload(
 
 
 def _tts_buffer_split_index(text: str) -> int | None:
-    """Return a safe split at or just before the TTS buffer threshold."""
-    if len(text) <= LINE_MAX_CHARS:
+    """Return the earliest natural boundary ready for an external TTS call."""
+    if len(text) < TTS_CHUNK_MIN_CHARS:
         return None
 
-    limit = min(LINE_MAX_CHARS, len(text) - 1)
-    punctuation_split = None
-    for index in range(limit):
-        if text[index] in ".!?…;" and text[index + 1].isspace():
-            punctuation_split = index + 2
-    if punctuation_split is not None:
-        return punctuation_split
+    sentence_boundary = re.search(r"[.!?…;](?:\s+|$)", text)
+    if (
+        sentence_boundary is not None
+        and sentence_boundary.end() <= TTS_CHUNK_MAX_CHARS
+    ):
+        return sentence_boundary.end()
 
-    whitespace_index = max(
-        (index for index in range(limit) if text[index].isspace()),
-        default=-1,
-    )
+    if len(text) <= TTS_CHUNK_MAX_CHARS:
+        return None
+
+    limit = min(TTS_CHUNK_MAX_CHARS, len(text) - 1)
+    whitespace_index = text.rfind(" ", 0, limit + 1)
+    if whitespace_index < TTS_CHUNK_MIN_CHARS:
+        whitespace_index = text.find(" ", limit)
     return whitespace_index + 1 if whitespace_index >= 0 else None
 
 

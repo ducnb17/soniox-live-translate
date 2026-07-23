@@ -8,11 +8,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.stt import (
-    LINE_MAX_CHARS,
+    TTS_CHUNK_MAX_CHARS,
     TTS_END,
     TTS_NONE,
     TTS_TEXT,
     _split_line_short,
+    _tts_buffer_split_index,
     handle_stt,
 )
 from app.tts import new_tts_state
@@ -38,6 +39,56 @@ class FakeBrowserWs:
 
 
 class TestHandleSttOneWay:
+    async def test_realtime_mode_streams_stable_tokens_on_one_utterance_line(self):
+        messages = [
+            {
+                "tokens": [
+                    {"text": "xin ", "translation_status": "translation", "is_final": True},
+                    {"text": "chao", "translation_status": "translation", "is_final": True},
+                ]
+            },
+            {"tokens": [{"text": " ban", "translation_status": "translation", "is_final": True}]},
+            {"tokens": [{"text": "<end>"}]},
+            {"finished": True},
+        ]
+        browser = FakeBrowserWs()
+        queue: asyncio.Queue = asyncio.Queue()
+
+        await handle_stt(
+            stt_ws=FakeSttWs(messages),
+            browser_ws=browser,
+            tts_queue=queue,
+            tts_state=new_tts_state(["vi"]),
+            mode="one_way",
+            lang_a=None,
+            lang_b=None,
+            target_lang="vi",
+            stream_translation_tokens=True,
+        )
+
+        items = []
+        while not queue.empty():
+            items.append(queue.get_nowait())
+        spoken = [item for item in items if isinstance(item, tuple) and item[0] == TTS_TEXT]
+        assert spoken == [
+            (TTS_TEXT, "xin ", "vi", 1),
+            (TTS_TEXT, "chao", "vi", 1),
+            (TTS_TEXT, " ban", "vi", 1),
+        ]
+        ready = [item for item in browser.sent if item.get("type") == "line_ready"]
+        assert ready == [
+            {
+                "type": "line_ready",
+                "line_id": 1,
+                "speaker": None,
+                "original_text": "",
+                "translated_text": "xin chao ban",
+                "lang": None,
+                "is_endpoint": True,
+            }
+        ]
+        assert items[-3:] == [(TTS_END, "vi"), (TTS_END, None), TTS_NONE]
+
     async def test_final_translation_is_queued_once_at_utterance_end(self):
         messages = [
             {
@@ -284,7 +335,7 @@ class TestHandleSttLongTranslation:
         assert [item[3] for item in text_items] == list(
             range(1, len(text_items) + 1)
         )
-        assert all(len(item[1]) <= LINE_MAX_CHARS for item in text_items)
+        assert all(len(item[1]) <= TTS_CHUNK_MAX_CHARS for item in text_items)
         assert text_items[0][1].rstrip().endswith(".")
         assert "".join(item[1] for item in text_items) == long_translation
         assert callback.await_args.args[0]["translated_text"] == long_translation
@@ -572,7 +623,7 @@ async def test_natural_endpoint_splits_long_utterance_into_short_tts_lines():
     lines = [message for message in browser.sent if message.get("type") == "line_ready"]
     assert len(spoken) > 1
     assert "".join(spoken) == long_translation
-    assert all(len(part) <= LINE_MAX_CHARS for part in spoken)
+    assert all(len(part) <= TTS_CHUNK_MAX_CHARS for part in spoken)
     assert [line["translated_text"] for line in lines] == spoken
     assert [line["line_id"] for line in lines] == list(range(1, len(lines) + 1))
     assert [line["is_endpoint"] for line in lines[:-1]] == [False] * (len(lines) - 1)
@@ -602,3 +653,15 @@ def test_split_line_short_keeps_a_single_over_cap_word_intact():
     assert "".join(chunks) == text
     assert long_word in chunks
     assert all(len(chunk) <= 20 or long_word in chunk for chunk in chunks)
+
+
+def test_tts_buffer_flushes_a_short_completed_phrase_before_endpoint():
+    text = "Xin chào bạn. Phần tiếp theo"
+    split_at = _tts_buffer_split_index(text)
+
+    assert split_at is not None
+    assert text[:split_at] == "Xin chào bạn. "
+
+
+def test_tts_buffer_waits_for_a_natural_boundary_below_minimum():
+    assert _tts_buffer_split_index("Xin chào") is None

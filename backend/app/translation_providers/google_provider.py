@@ -9,7 +9,13 @@ class GoogleTranslationProvider(TranslationProviderBase):
     def __init__(self, api_key: str | None = None) -> None:
         self._api_key = api_key
 
-    async def translate(self, text: str, source_lang: str | None, target_lang: str) -> str:
+    async def translate(
+        self,
+        text: str,
+        source_lang: str | None,
+        target_lang: str,
+        style: str = "natural",
+    ) -> str:
         if not self._api_key:
             raise ValueError("Google Cloud API key is required")
         payload: dict[str, object] = {"q": text, "target": target_lang, "format": "text"}

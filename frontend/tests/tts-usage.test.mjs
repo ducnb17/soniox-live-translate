@@ -12,26 +12,23 @@ const compiledModule = { exports: {} };
 new Function("exports", "module", outputText)(compiledModule.exports, compiledModule);
 const { addTtsUsage, emptyTtsUsage, formatTtsCostHint } = compiledModule.exports;
 
-test("session cost is accumulated from characters read and cache hits cost zero", () => {
+test("session cost is accumulated from every synthesized phrase", () => {
   let totals = emptyTtsUsage();
   totals = addTtsUsage(totals, {
     characters: 100,
     estimated_cost_usd: 0.0015,
-    cache_hit: false,
   });
   totals = addTtsUsage(totals, {
     characters: 100,
-    estimated_cost_usd: 0,
-    cache_hit: true,
+    estimated_cost_usd: 0.0015,
   });
 
   assert.deepEqual(totals, {
     characters: 200,
-    estimatedCostUsd: 0.0015,
-    cacheHits: 1,
+    estimatedCostUsd: 0.003,
   });
   assert.equal(
     formatTtsCostHint(15, totals),
-    "Rate: ~$15/million chars · Session: 200 chars · est. $0.001500 · 1 cache hit",
+    "Rate: ~$15/million chars · Session: 200 chars · est. $0.003000",
   );
 });
