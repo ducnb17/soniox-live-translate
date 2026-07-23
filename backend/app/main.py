@@ -1108,7 +1108,7 @@ def _reconnect_delay(attempt: int, random_value: float | None = None) -> float:
     )
     r = random_value if random_value is not None else random.random()
     jitter = exponential * RECONNECT_JITTER_RATIO
-    return exponential + r * jitter
+    return min(exponential + r * jitter, RECONNECT_MAX_DELAY_SECONDS)
 
 
 def _parse_context(context_b64: str | None) -> dict | None:
@@ -1136,8 +1136,10 @@ def _connection_close_details(eg: ExceptionGroup | BaseExceptionGroup) -> tuple[
             code, reason = _connection_close_details(exc)
             if code is not None:
                 return code, reason
-        if isinstance(exc, websockets.exceptions.ConnectionClosed):
-            return exc.code, exc.reason
+        # Accept any exception that carries WebSocket close frame attributes
+        # (websockets.ConnectionClosed, or test stubs with .code/.reason).
+        if hasattr(exc, "code") and exc.code is not None:
+            return exc.code, getattr(exc, "reason", None)
         if isinstance(exc, ConnectionError):
             return 1006, str(exc)
     return None, None
