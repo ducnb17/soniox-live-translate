@@ -1,3 +1,6 @@
+import { initSentry } from "./sentry-init";
+initSentry(); // no-op when VITE_SENTRY_DSN is not set
+
 import {
   BARGE_RMS_THRESHOLD,
   BARGE_HOLD_MS,
@@ -13,6 +16,7 @@ import {
   type AudioSource,
   type ConnectionStatus,
 } from "./types";
+
 import {
   isLikelyVirtualLoopbackDevice,
   resolveAudioDevices,

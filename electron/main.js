@@ -1,6 +1,32 @@
 "use strict";
 
 const { app, BrowserWindow, Tray, Menu, session, shell } = require("electron");
+
+// ---------------------------------------------------------------------------
+// Sentry — initialise as early as possible after require so startup crashes
+// are caught.  Set SENTRY_DSN in the environment (or via .env loaded by the
+// backend) to enable monitoring.  The init is a no-op when the variable is
+// absent.
+// ---------------------------------------------------------------------------
+(function initSentry() {
+  const dsn = process.env.SENTRY_DSN;
+  if (!dsn) return;
+  try {
+    const { init } = require("@sentry/electron/main");
+    init({
+      dsn,
+      environment: process.env.SENTRY_ENVIRONMENT || (app.isPackaged ? "production" : "development"),
+      release: process.env.SENTRY_RELEASE,   // set by CI; undefined in dev is fine
+      // Capture 10 % of transactions for performance monitoring.
+      tracesSampleRate: 0.1,
+      // Don't send PII (user IPs, etc.).
+      sendDefaultPii: false,
+    });
+  } catch (e) {
+    // @sentry/electron not available — silently skip.
+  }
+})();
+
 const path = require("node:path");
 const http = require("node:http");
 const { spawn } = require("node:child_process");

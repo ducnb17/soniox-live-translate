@@ -5,6 +5,7 @@ httpx==0.28.1
 python-dotenv==1.2.2
 structlog==26.1.0
 aiosqlite==0.22.1
+sentry-sdk[fastapi]>=2.0,<3
 pywin32==312; sys_platform == "win32"
 pywebview==6.2.1
 pythonnet==3.0.5; sys_platform == "win32"

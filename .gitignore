@@ -10,6 +10,7 @@ venv/
 
 # Env / secrets
 .env
+frontend/.env
 backend/secrets/
 
 # Transcripts (per-session dump)

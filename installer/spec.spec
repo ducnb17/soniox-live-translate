@@ -61,6 +61,10 @@ a = Analysis(
         'app.tts_providers.azure_provider', 'app.tts_providers.elevenlabs_provider',
         'app.tts_providers.deepgram_provider', 'app.tts_providers.polly_provider',
         'aiosqlite',
+        # sentry error monitoring (optional — only active when SENTRY_DSN is set)
+        'sentry_sdk', 'sentry_sdk.integrations', 'sentry_sdk.integrations.fastapi',
+        'sentry_sdk.integrations.starlette', 'sentry_sdk.integrations.logging',
+        'sentry_sdk.integrations.asyncio',
     ],
     hookspath=[],
     runtime_hooks=[],

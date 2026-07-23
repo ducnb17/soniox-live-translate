@@ -84,6 +84,7 @@ from .translation_provider import (
 )
 from .external_tts import external_tts_sender
 from .version import APP_VERSION
+from .sentry_init import init_sentry
 from .db import (
     init_db,
     close_db,
@@ -104,6 +105,7 @@ from .db import (
 
 load_dotenv(override=True)
 configure_logging()
+init_sentry()          # no-op if SENTRY_DSN env var is not set
 log = get_logger("main")
 
 transcript_store = TranscriptStore()
