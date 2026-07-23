@@ -1156,6 +1156,18 @@ def _websocket_close_details(ws) -> tuple[int | None, str | None]:
     return close_code, close_reason
 
 
-_static_dir = os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist")
+if getattr(sys, "frozen", False):
+    _static_dir = os.path.join(sys._MEIPASS, "frontend", "dist")
+else:
+    _static_dir = os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist")
 if os.path.isdir(_static_dir):
     app.mount("/", StaticFiles(directory=_static_dir, html=True), name="static")
+else:
+    import logging
+    _logger = logging.getLogger("uvicorn")
+    _logger.warning(
+        "Static files directory not found at %s — "
+        "the frontend will not be served. "
+        "(Is frontend/dist built? Did PyInstaller bundle it?)",
+        _static_dir,
+    )

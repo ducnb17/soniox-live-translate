@@ -139,6 +139,19 @@ function registerDisplayMediaHandler() {
     },
     { useSystemPicker: true }
   );
+
+  // Grant microphone permission automatically. Without this handler,
+  // Electron with sandbox:true may silently deny getUserMedia({audio:true}),
+  // breaking microphone capture in the live translation flow.
+  session.defaultSession.setPermissionRequestHandler(
+    (_webContents, permission, callback) => {
+      if (permission === "media") {
+        callback(true);
+      } else {
+        callback(false);
+      }
+    }
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -326,7 +339,7 @@ app.whenReady().then(async () => {
 });
 
 // Keep running in the tray when all windows are closed.
-app.on("window-all-closed", () => {});
+app.on("window-all-closed", () => { });
 
 app.on("activate", () => {
   if (mainWindow) {
