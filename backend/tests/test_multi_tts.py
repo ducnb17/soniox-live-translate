@@ -3,7 +3,7 @@ import asyncio
 from app.external_tts import external_tts_sender
 from app.stt import TTS_END, TTS_NONE, TTS_TEXT
 from app.tts import new_tts_state
-from app.tts_provider import TTSCache, get_available_providers, get_provider, tts_cache
+from app.tts_provider import get_available_providers, get_provider
 
 
 class FakeBrowser:
@@ -28,6 +28,21 @@ class SuccessfulProvider:
 
     def estimate_cost(self, char_count):
         return char_count * 0.000015
+
+
+class StreamingProvider(SuccessfulProvider):
+    async def synthesize_stream(self, text, voice_id, lang):
+        self.calls += 1
+        yield b"first-"
+        yield b"second"
+
+
+class InterruptedStreamingProvider(SuccessfulProvider):
+    async def synthesize_stream(self, text, voice_id, lang):
+        self.calls += 1
+        yield b"first-"
+        yield b"last-safe-chunk"
+        raise RuntimeError("stream interrupted")
 
 
 class FailingProvider:
@@ -73,27 +88,13 @@ async def test_all_seven_providers_are_registered_and_have_voices():
         assert await provider.list_voices(lang="en")
 
 
-def test_tts_cache_is_true_lru_and_bounded_by_entries_and_bytes():
-    cache = TTSCache(max_size=2, max_bytes=8)
-    cache.set("one", "voice", "provider", b"1111")
-    cache.set("two", "voice", "provider", b"2222")
-    assert cache.get("one", "voice", "provider") == b"1111"  # promote one
-    cache.set("three", "voice", "provider", b"3333")
-    assert cache.get("two", "voice", "provider") is None
-    assert cache.entry_count == 2
-    assert cache.total_bytes == 8
-    cache.set("oversized", "voice", "provider", b"x" * 9)
-    assert cache.get("oversized", "voice", "provider") is None
-
-
-async def test_external_provider_synthesizes_then_reuses_cache_with_zero_second_cost():
-    tts_cache.clear()
+async def test_external_provider_synthesizes_every_phrase_without_cache():
     provider = SuccessfulProvider()
 
     first = await run_sender(provider)
     second = await run_sender(provider)
 
-    assert provider.calls == 1
+    assert provider.calls == 2
     assert first.audio == [b"pcm:nova:vi:xin ch\xc3\xa0o"]
     assert first.json_messages[0] == {
         "type": "audio_chunk_meta",
@@ -105,14 +106,12 @@ async def test_external_provider_synthesizes_then_reuses_cache_with_zero_second_
     second_usage = next(message["tts_usage"] for message in second.json_messages if "tts_usage" in message)
     assert first_usage["characters"] == len("xin chào")
     assert first_usage["estimated_cost_usd"] == len("xin chào") * 0.000015
-    assert first_usage["cache_hit"] is False
-    assert second_usage["estimated_cost_usd"] == 0.0
-    assert second_usage["cache_hit"] is True
+    assert second_usage["estimated_cost_usd"] == len("xin chào") * 0.000015
+    assert "cache_hit" not in first_usage
+    assert "cache_hit" not in second_usage
 
 
 async def test_provider_quota_error_notifies_user_and_falls_back_to_soniox():
-    tts_cache.clear()
-
     async def fallback(text, voice, lang):
         assert (text, voice, lang) == ("xin chào", "Maya", "vi")
         return b"soniox-fallback-pcm"
@@ -131,8 +130,33 @@ async def test_provider_quota_error_notifies_user_and_falls_back_to_soniox():
     assert usage["characters"] == len("xin chào")
 
 
+async def test_streaming_provider_forwards_chunks_without_collecting_the_response():
+    browser = await run_sender(StreamingProvider())
+
+    metas = [message for message in browser.json_messages if message.get("type") == "audio_chunk_meta"]
+    assert browser.audio == [b"first-", b"second"]
+    assert [meta["byte_length"] for meta in metas] == [6, 6]
+    assert [meta["line_audio_end"] for meta in metas] == [False, True]
+
+
+async def test_interrupted_stream_closes_the_started_audio_line_without_replaying_it():
+    fallback_calls = 0
+
+    async def fallback(text, voice, lang):
+        nonlocal fallback_calls
+        fallback_calls += 1
+        return b"duplicate-fallback"
+
+    browser = await run_sender(InterruptedStreamingProvider(), fallback=fallback)
+
+    metas = [message for message in browser.json_messages if message.get("type") == "audio_chunk_meta"]
+    assert browser.audio == [b"first-", b"last-safe-chunk"]
+    assert [meta["line_audio_end"] for meta in metas] == [False, True]
+    assert fallback_calls == 0
+    assert any(message.get("tts_error", {}).get("message") == "stream interrupted" for message in browser.json_messages)
+
+
 async def test_external_provider_keeps_each_line_as_separate_labeled_audio():
-    tts_cache.clear()
     provider = SuccessfulProvider()
     queue = asyncio.Queue()
     state = new_tts_state(["vi"])

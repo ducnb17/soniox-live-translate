@@ -22,10 +22,11 @@ log = get_logger("stt")
 TTS_TEXT = "text"
 TTS_END = "end"
 TTS_NONE = None
-# TTS chunks are deliberately short so synthesis/playback can start before a
-# long utterance reaches Soniox's real endpoint. This is audio buffering only;
-# the frontend coalesces non-endpoint `line_ready` messages for display.
-LINE_MAX_CHARS = 50
+# External TTS APIs generally need a complete text request. Flush a short,
+# natural phrase as soon as it is stable instead of waiting for the endpoint.
+# Soniox's native streaming TTS still receives every final translation token.
+TTS_CHUNK_MIN_CHARS = 12
+TTS_CHUNK_MAX_CHARS = 48
 
 
 async def pipe_browser_to_stt(
@@ -276,7 +277,7 @@ async def handle_stt(
                             translated_parts = [current_translation]
                         else:
                             translated_parts = _split_line_short(
-                                current_translation, LINE_MAX_CHARS
+                                current_translation, TTS_CHUNK_MAX_CHARS
                             ) or [""]
                         for index, translated_part in enumerate(translated_parts):
                             tts_chunks.append((
@@ -378,10 +379,7 @@ async def handle_stt(
                                     )
                                 )
                         elif tts_queue is not None:
-                            while (
-                                not message_has_end
-                                and len(current_translation) > LINE_MAX_CHARS
-                            ):
+                            while not message_has_end:
                                 split_at = _tts_buffer_split_index(current_translation)
                                 if split_at is None:
                                     break
@@ -525,22 +523,24 @@ def _line_ready_payload(
 
 
 def _tts_buffer_split_index(text: str) -> int | None:
-    """Return a safe split at or just before the TTS buffer threshold."""
-    if len(text) <= LINE_MAX_CHARS:
+    """Return the earliest natural boundary ready for an external TTS call."""
+    if len(text) < TTS_CHUNK_MIN_CHARS:
         return None
 
-    limit = min(LINE_MAX_CHARS, len(text) - 1)
-    punctuation_split = None
-    for index in range(limit):
-        if text[index] in ".!?…;" and text[index + 1].isspace():
-            punctuation_split = index + 2
-    if punctuation_split is not None:
-        return punctuation_split
+    sentence_boundary = re.search(r"[.!?…;](?:\s+|$)", text)
+    if (
+        sentence_boundary is not None
+        and sentence_boundary.end() <= TTS_CHUNK_MAX_CHARS
+    ):
+        return sentence_boundary.end()
 
-    whitespace_index = max(
-        (index for index in range(limit) if text[index].isspace()),
-        default=-1,
-    )
+    if len(text) <= TTS_CHUNK_MAX_CHARS:
+        return None
+
+    limit = min(TTS_CHUNK_MAX_CHARS, len(text) - 1)
+    whitespace_index = text.rfind(" ", 0, limit + 1)
+    if whitespace_index < TTS_CHUNK_MIN_CHARS:
+        whitespace_index = text.find(" ", limit)
     return whitespace_index + 1 if whitespace_index >= 0 else None
 
 

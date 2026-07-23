@@ -46,7 +46,6 @@ export interface SonioxSttResponse {
     voice_id: string;
     characters: number;
     estimated_cost_usd: number;
-    cache_hit: boolean;
   };
   translation_error?: { message: string };
   speaker?: number | null;

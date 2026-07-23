@@ -304,7 +304,6 @@ async def tts_sender(
                                     "voice_id": direction_voices[tgt],
                                     "characters": char_count,
                                     "estimated_cost_usd": 0.0,
-                                    "cache_hit": False,
                                 }
                             })
                         except Exception:

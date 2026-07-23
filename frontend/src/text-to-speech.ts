@@ -7,7 +7,6 @@ import { stretchSamples } from "./audio-stretch";
 
 export interface TextToSpeechConfig {
   outputDevice: string;
-  ttsDelaySeconds: number;
   playbackRate: number;
 }
 
@@ -46,7 +45,6 @@ export class TextToSpeech {
   private readonly registeredLineIds = new Set<number>();
   private minimumAcceptedLineId = 1;
   private nextLineIdToPlay: number | null = null;
-  private lastScheduledLineId: number | null = null;
   private activeLinePendingChunks = 0;
   private activeLineDoneScheduling = false;
   private activeLineAudioSeconds = 0;
@@ -68,7 +66,8 @@ export class TextToSpeech {
     return this.activeLineSources.length > 0;
   }
 
-  hasPendingAudio(): boolean {
+  /** Ephemeral playback state used only by the unsupported-capture fallback. */
+  hasScheduledAudio(): boolean {
     return this.currentPlayingLineId !== null || this.lineAudioQueue.lineCount > 0;
   }
 
@@ -151,7 +150,6 @@ export class TextToSpeech {
     this.activeLinePendingChunks = 0;
     this.activeLineDoneScheduling = false;
     this.activeLineAudioSeconds = 0;
-    this.lastScheduledLineId = null;
     this.minimumAcceptedLineId = this.lastRegisteredLineId + 1;
     this.nextLineIdToPlay = null;
     this.callbacks.onQueueChanged();
@@ -188,10 +186,6 @@ export class TextToSpeech {
       (chunk) => this.pcmChunkDurationSeconds(chunk),
       this.averageLineAudioSeconds,
     );
-  }
-
-  getQueuedLineDelaySeconds(): number {
-    return this.lineAudioQueue.lineCount * this.config.ttsDelaySeconds;
   }
 
   private async initAudioContext(): Promise<void> {
@@ -235,7 +229,6 @@ export class TextToSpeech {
       this.callbacks.onLineStarted(line.lineId);
     }
 
-    const lineId = this.currentPlayingLineId;
     const epoch = this.playbackEpoch;
     let next = this.lineAudioQueue.takeNextChunk();
     while (next !== null) {
@@ -247,7 +240,7 @@ export class TextToSpeech {
       }
       this.activeLinePendingChunks += 1;
       this.activeLineAudioSeconds += this.pcmChunkDurationSeconds(chunk);
-      this.playPcmChunk(chunk, lineId, () => {
+      this.playPcmChunk(chunk, () => {
         if (epoch !== this.playbackEpoch) return;
         this.activeLinePendingChunks -= 1;
         this.maybeFinishActiveLine();
@@ -279,7 +272,6 @@ export class TextToSpeech {
 
   private playPcmChunk(
     chunk: Uint8Array,
-    lineId: number,
     onEnded: () => void,
   ): void {
     if (!this.audioCtx) return;
@@ -323,11 +315,7 @@ export class TextToSpeech {
     const schedule = resolveTtsChunkSchedule(
       this.audioCtx.currentTime,
       this.nextPlayTime,
-      this.lastScheduledLineId,
-      lineId,
-      this.config.ttsDelaySeconds,
     );
-    if (schedule.isNewLine) this.lastScheduledLineId = schedule.currentLineId;
     const startAt = schedule.startAt;
     const duration = buffer.duration;
     const endAt = startAt + duration;

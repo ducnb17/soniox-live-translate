@@ -626,6 +626,7 @@ select:disabled,
   font-size: 11px;
   line-height: 1.45;
   opacity: .58;
+  white-space: pre-line;
 }
 
 .translated-text {
@@ -634,6 +635,7 @@ select:disabled,
   font-size: 15px;
   line-height: 1.55;
   font-weight: 650;
+  white-space: pre-line;
 }
 
 .feed-line.interim {
