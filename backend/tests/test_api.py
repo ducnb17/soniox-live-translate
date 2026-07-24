@@ -48,9 +48,12 @@ class TestHealth:
         assert r.json() == {"status": "ok"}
 
     def test_returns_application_version(self, client):
+        from app.version import APP_VERSION
+
         response = client.get("/api/version")
         assert response.status_code == 200
-        assert response.json()["version"] == "0.4.0"
+        assert response.json()["version"] == APP_VERSION
+
 
 
 class TestConfig:
