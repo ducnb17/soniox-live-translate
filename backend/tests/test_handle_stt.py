@@ -538,7 +538,61 @@ async def test_external_translation_never_queues_original_text():
     assert all("Hello world" not in text for text in spoken)
 
 
+async def test_external_translation_fires_incrementally_without_punctuation():
+    """Continuous speech with no sentence punctuation must still translate
+    incrementally as it streams in, instead of batching into one paragraph
+    that only gets translated once <end> finally arrives.
+
+    Soniox delivers original-text tokens progressively across many WebSocket
+    messages as speech continues; `<end>` is a distinct, later message. Each
+    "word " token below simulates one such incremental delivery.
+    """
+    # No '.', '!', '?', '…', ';' anywhere — only run-on text, delivered as many
+    # small messages the way real streaming STT does.
+    word_messages = [
+        {
+            "tokens": [
+                {
+                    "text": "word ",
+                    "translation_status": "original",
+                    "is_final": True,
+                    "language": "en",
+                },
+            ]
+        }
+        for _ in range(40)  # 200 chars total, past EXT_TRANSLATE_FALLBACK_CHARS
+    ]
+    messages = [*word_messages, {"tokens": [{"text": "<end>"}]}, {"finished": True}]
+    long_run_on = "word " * 40
+    queue: asyncio.Queue = asyncio.Queue()
+    translate_calls: list[str] = []
+
+    async def translate(text: str, source: str | None, target: str) -> str:
+        translate_calls.append(text)
+        return f"[{len(translate_calls)}]"
+
+    await handle_stt(
+        stt_ws=FakeSttWs(messages),
+        browser_ws=FakeBrowserWs(),
+        tts_queue=queue,
+        tts_state=new_tts_state(["vi"]),
+        mode="one_way",
+        lang_a=None,
+        lang_b=None,
+        target_lang="vi",
+        translate_text=translate,
+    )
+
+    # More than one translate_text call proves the fallback fired mid-utterance
+    # instead of waiting for <end> to translate the whole thing at once.
+    assert len(translate_calls) > 1
+    # Lossless: rejoining every translated slice covers the whole original text.
+    assert "".join(translate_calls) == long_run_on
+
+
+
 async def test_natural_endpoint_splits_long_utterance_into_short_tts_lines():
+
     long_translation = "Một câu hoàn chỉnh; " * 18
     messages = [
         {

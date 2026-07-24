@@ -26,6 +26,15 @@ TTS_NONE = None
 # long utterance reaches Soniox's real endpoint. This is audio buffering only;
 # the frontend coalesces non-endpoint `line_ready` messages for display.
 LINE_MAX_CHARS = 50
+# External (non-Soniox) translation providers only get a single sentence
+# boundary hint (".", "!", "?", "…", ";") to fire an incremental translate
+# call. Continuous speech without punctuation for a while would otherwise
+# never get translated until the utterance's <end> token, which is exactly
+# the "TTS+translation batches into one big paragraph" symptom. This cap
+# forces an incremental translate call at a safe word boundary once the
+# untranslated tail grows past it, even without sentence punctuation.
+EXT_TRANSLATE_FALLBACK_CHARS = 80
+
 
 
 async def pipe_browser_to_stt(
@@ -128,6 +137,12 @@ async def handle_stt(
     utterance_start_ms: int | None = None
     stream_finished = False
     pending_tts_chunks: list[tuple[str, str | None, dict[str, Any]]] = []
+    # External translation streaming state.
+    # ext_translate_offset: how many chars of current_original have already been
+    # handed off to a translate task (so we don't re-translate the same text).
+    ext_translate_offset = 0
+    # Each entry: (original_slice, target_lang, start_char, end_char, asyncio.Task)
+    ext_translate_tasks: list[tuple[str, str, int, int, asyncio.Task[str]]] = []
     hold_queue: asyncio.Queue[
         tuple[float, list[tuple[str, str | None, dict[str, Any]]], str | None, dict | None]
     ] | None = None
@@ -229,22 +244,58 @@ async def handle_stt(
                     )
                     tts_chunks = pending_tts_chunks
                     pending_tts_chunks = []
-                    if translate_text is not None and current_original:
-                        external_target = _external_translation_target(
+                    if translate_text is not None:
+                        ext_target = _external_translation_target(
                             mode, current_lang, lang_a, lang_b, target_lang
                         )
-                        if external_target:
-                            try:
-                                current_translation = await translate_text(
-                                    current_original, current_lang, external_target
-                                )
-                                full_translation = current_translation
-                                direction = external_target
-                            except Exception as exc:
-                                log.error("external_translation_failed", error=str(exc))
-                                await browser_ws.send_json({
-                                    "translation_error": {"message": str(exc)}
-                                })
+                        if ext_target:
+                            direction = ext_target
+                            # Await any sentence-translate tasks that were fired mid-utterance
+                            # but haven't finished yet.  Add their output to this commit batch.
+                            still_running = list(ext_translate_tasks)
+                            ext_translate_tasks.clear()
+                            for _sl, _tgt, _st, end_off, task in still_running:
+                                try:
+                                    xlated = await task
+                                except Exception as exc:
+                                    log.error("ext_translate_partial_failed_at_end", error=str(exc))
+                                    continue
+                                if not xlated:
+                                    continue
+                                full_translation += xlated
+                                parts = _split_line_short(xlated, LINE_MAX_CHARS) or [""]
+                                for idx, part in enumerate(parts):
+                                    orig_chunk = (
+                                        current_original[line_original_offset:end_off]
+                                        if idx == 0
+                                        else ""
+                                    )
+                                    if idx == 0:
+                                        line_original_offset = end_off
+                                    lp = make_line_ready_payload(
+                                        speaker=current_speaker,
+                                        original_text=orig_chunk,
+                                        translated_text=part,
+                                        lang=current_lang,
+                                        is_endpoint=False,
+                                    )
+                                    tts_chunks.append((part, ext_target, lp))
+                            # Translate only the tail not yet covered by any task.
+                            remaining_tail = current_original[ext_translate_offset:]
+                            if remaining_tail:
+                                try:
+                                    current_translation = await translate_text(
+                                        remaining_tail, current_lang, ext_target
+                                    )
+                                    full_translation += current_translation
+                                except Exception as exc:
+                                    log.error("external_translation_failed", error=str(exc))
+                                    await browser_ws.send_json({
+                                        "translation_error": {"message": str(exc)}
+                                    })
+                            else:
+                                # All text was already translated incrementally.
+                                current_translation = ""
                     remaining_original = current_original[line_original_offset:]
                     if current_translation or remaining_original:
                         translated_parts = _split_line_short(
@@ -290,6 +341,8 @@ async def handle_stt(
                     current_lang = None
                     line_original_offset = 0
                     utterance_start_ms = None
+                    ext_translate_offset = 0
+                    ext_translate_tasks.clear()
                 elif token.get("translation_status") == "translation":
                     if token.get("is_final"):
                         current_translation += text
@@ -336,6 +389,88 @@ async def handle_stt(
                         continue
                     text_pushed = True
 
+            # ── Streaming external translation at sentence boundaries ────────────
+            # For external translation providers we fire translate_text() as a
+            # non-blocking asyncio.Task whenever we detect a sentence boundary in
+            # the accumulated original text.  Completed tasks are flushed below so
+            # TTS audio starts as soon as each sentence is translated rather than
+            # waiting for the full <end> token.
+            #
+            # Continuous speech can go a long time without sentence punctuation
+            # (run-on speech, no pauses). Without a fallback, nothing gets
+            # translated/queued for TTS until the utterance's <end> token, which
+            # produces one large paragraph dumped all at once instead of a
+            # steady stream — so we also fire once the untranslated tail grows
+            # past EXT_TRANSLATE_FALLBACK_CHARS, splitting at the last safe
+            # word boundary so no word is cut in half.
+            if translate_text is not None and not got_end and current_original:
+                tail = current_original[ext_translate_offset:].rstrip()
+                has_sentence_boundary = bool(tail) and tail[-1] in ".!?…;"
+                fallback_split_at: int | None = None
+                if not has_sentence_boundary and len(tail) >= EXT_TRANSLATE_FALLBACK_CHARS:
+                    fallback_split_at = _tts_buffer_split_index(tail + " ")
+                    # _tts_buffer_split_index expects text longer than
+                    # LINE_MAX_CHARS; if it can't find punctuation/whitespace
+                    # in range, fall back to splitting at the whole tail.
+                    if fallback_split_at is None or fallback_split_at <= 0:
+                        fallback_split_at = len(tail)
+                if has_sentence_boundary or fallback_split_at is not None:
+                    fire_text = tail if has_sentence_boundary else tail[:fallback_split_at]
+                    ext_target = _external_translation_target(
+                        mode, current_lang, lang_a, lang_b, target_lang
+                    )
+                    if ext_target and fire_text.strip():
+                        end_off = ext_translate_offset + len(fire_text)
+                        fired_task = asyncio.create_task(
+                            translate_text(fire_text, current_lang, ext_target)
+                        )
+                        ext_translate_tasks.append(
+                            (fire_text, ext_target, ext_translate_offset, end_off, fired_task)
+                        )
+                        ext_translate_offset = end_off
+
+
+            # Flush any sentence-translate tasks that finished during the last recv().
+            if ext_translate_tasks:
+                still_pending_ext: list[tuple[str, str, int, int, asyncio.Task[str]]] = []
+                for orig_slice, ext_tgt, _st, end_off, task in ext_translate_tasks:
+                    if not task.done():
+                        still_pending_ext.append((orig_slice, ext_tgt, _st, end_off, task))
+                        continue
+                    try:
+                        xlated = task.result()
+                    except Exception as exc:
+                        log.error("ext_translate_partial_failed", error=str(exc))
+                        continue
+                    if not xlated:
+                        continue
+                    full_translation += xlated
+                    parts = _split_line_short(xlated, LINE_MAX_CHARS) or [""]
+                    for idx, part in enumerate(parts):
+                        orig_chunk = (
+                            current_original[line_original_offset:end_off]
+                            if idx == 0
+                            else ""
+                        )
+                        if idx == 0:
+                            line_original_offset = end_off
+                        lp = make_line_ready_payload(
+                            speaker=current_speaker,
+                            original_text=orig_chunk,
+                            translated_text=part,
+                            lang=current_lang,
+                            is_endpoint=False,
+                        )
+                        if hold_queue is not None:
+                            pending_tts_chunks.append((part, ext_tgt, lp))
+                        else:
+                            await browser_ws.send_json(lp)
+                            if tts_queue is not None and tts_state.get("enabled", True) and part:
+                                await tts_queue.put(
+                                    (TTS_TEXT, part, ext_tgt, lp["line_id"])
+                                )
+                ext_translate_tasks = still_pending_ext
+
             if data.get("finished"):
                 stream_finished = True
                 if finished_event is not None:
@@ -346,6 +481,13 @@ async def handle_stt(
     except websockets.ConnectionClosedError as e:
         log.warning("stt_ws_closed", error=str(e))
     finally:
+        # Cancel any external-translation tasks that are still in flight
+        # (e.g. session aborted mid-utterance, barge-in, network drop).
+        for _, _, _, _, task in ext_translate_tasks:
+            task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await task
+        ext_translate_tasks.clear()
         try:
             if hold_queue is not None and hold_worker is not None:
                 current_task = asyncio.current_task()

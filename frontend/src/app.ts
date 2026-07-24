@@ -1475,21 +1475,50 @@ async function startRecorder(): Promise<void> {
 }
 
 /**
- * Periodically check if TTS is audible and mute/unmute the AudioWorklet
- * capture accordingly. Active for every audio source — see the comment
- * in startRecorder() for why microphone input needs this too.
+ * Periodically check if TTS is audible and adjust the AudioWorklet capture
+ * accordingly. Active for every audio source, but the response differs:
+ *
+ * - Tab/system-audio capture: hard-mute (send silence). The TTS signal is a
+ *   perfect digital copy of what would be captured — there is no echo
+ *   cancellation available, so full mute is the only way to stop Soniox from
+ *   "hearing" its own TTS output and never emitting `<end>`.
+ *
+ * - Microphone capture: duck (attenuate) instead of hard-muting. The browser's
+ *   echoCancellation constraint (enabled for real mics — see
+ *   acquireInputStream) already removes most of the TTS echo picked up
+ *   through the speakers, so STT can keep receiving live audio and keep
+ *   transcribing/translating while TTS plays instead of freezing until TTS
+ *   finishes. The duck gain further suppresses whatever echo AEC misses, so
+ *   the residual TTS voice can't feed back into a new transcription. Barge-in
+ *   (mic mode only) reads a separate, un-ducked AnalyserNode tap on the raw
+ *   mic stream so the user can still interrupt TTS by talking over it.
  */
+const MIC_DUCK_GAIN = 0.15; // -16 dB while TTS is audible; STT stays live.
+
 function startTtsMuteCheck(): void {
   stopTtsMuteCheck();
+  const isTabCapture = $audioSource() === "tab";
   ttsMuteCheckInterval = setInterval(() => {
-    const shouldMute = textToSpeech.isAudible() || textToSpeech.hasPendingAudio();
-    if (shouldMute !== captureMuted) {
-      captureMuted = shouldMute;
-      captureWorklet?.port.postMessage({ type: "mute", value: shouldMute });
-      if (shouldMute) {
-        console.log("[audio-input] TTS audible → muting capture to prevent self-hearing");
+    const shouldAttenuate = textToSpeech.isAudible();
+    if (shouldAttenuate !== captureMuted) {
+      captureMuted = shouldAttenuate;
+      if (isTabCapture) {
+        captureWorklet?.port.postMessage({ type: "mute", value: shouldAttenuate });
+        console.log(
+          shouldAttenuate
+            ? "[audio-input] TTS audible → muting tab capture to prevent self-hearing"
+            : "[audio-input] TTS silent → resuming tab capture",
+        );
       } else {
-        console.log("[audio-input] TTS silent → resuming capture");
+        captureWorklet?.port.postMessage({
+          type: "duck",
+          value: shouldAttenuate ? MIC_DUCK_GAIN : 1.0,
+        });
+        console.log(
+          shouldAttenuate
+            ? "[audio-input] TTS audible → ducking mic capture (STT stays live)"
+            : "[audio-input] TTS silent → restoring mic capture gain",
+        );
       }
     }
   }, 50);
@@ -1503,8 +1532,10 @@ function stopTtsMuteCheck(): void {
   if (captureMuted) {
     captureMuted = false;
     captureWorklet?.port.postMessage({ type: "mute", value: false });
+    captureWorklet?.port.postMessage({ type: "duck", value: 1.0 });
   }
 }
+
 
 // ---------------------------------------------------------------------------
 // Barge-in VAD
