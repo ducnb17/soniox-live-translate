@@ -5,6 +5,7 @@ from .azure_provider import AzureTTSProvider
 from .elevenlabs_provider import ElevenLabsProvider
 from .deepgram_provider import DeepgramProvider
 from .polly_provider import PollyProvider
+from .pocket_tts_provider import PocketTTSProvider
 
 __all__ = [
     "SonioxProvider",
@@ -14,4 +15,5 @@ __all__ = [
     "ElevenLabsProvider",
     "DeepgramProvider",
     "PollyProvider",
+    "PocketTTSProvider",
 ]

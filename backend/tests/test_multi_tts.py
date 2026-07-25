@@ -61,8 +61,8 @@ async def run_sender(provider, provider_id="openai", fallback=None):
     return browser
 
 
-async def test_all_seven_providers_are_registered_and_have_voices():
-    expected = {"soniox", "google", "openai", "azure", "elevenlabs", "deepgram", "polly"}
+async def test_all_eight_providers_are_registered_and_have_voices():
+    expected = {"soniox", "google", "openai", "azure", "elevenlabs", "deepgram", "polly", "pocket_tts"}
     infos = get_available_providers()
     assert {info.id for info in infos} == expected
     assert {info.tier for info in infos} <= {"free", "cheap", "premium"}

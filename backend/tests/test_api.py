@@ -115,10 +115,10 @@ class TestSetupPost:
 
 class TestTtsProviderApi:
     expected_providers = {
-        "soniox", "google", "openai", "azure", "elevenlabs", "deepgram", "polly",
+        "soniox", "google", "openai", "azure", "elevenlabs", "deepgram", "polly", "pocket_tts",
     }
 
-    def test_lists_all_seven_provider_choices(self, client):
+    def test_lists_all_eight_provider_choices(self, client):
         response = client.get("/api/tts/providers")
 
         assert response.status_code == 200
