@@ -1129,6 +1129,11 @@ let captureWorklet: AudioWorkletNode | null = null;
 let micStream: MediaStream | null = null;
 // When true, the worklet sends silence instead of real audio (anti TTS self-hear).
 let captureMuted = false;
+// True when the selected input device is a virtual loopback (VB-Cable, BlackHole,
+// VoiceMeeter, Stereo Mix, etc.).  In that case TTS output is routed straight back
+// into the capture stream, so we must hard-mute capture while TTS is audible,
+// exactly like we do for tab-capture, rather than just ducking the mic.
+let isVirtualLoopbackInput = false;
 // Interval that checks whether TTS is audible and mutes/unmutes capture in tab mode.
 let ttsMuteCheckInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -1395,6 +1400,11 @@ async function acquireInputStream(): Promise<MediaStream> {
       autoGainControl: true,
     };
 
+  // Remember this for the TTS self-hearing check.  Virtual loopback = TTS
+  // output is routed straight back into the capture stream, so we must mute
+  // capture while TTS is audible (same as tab capture), not just duck it.
+  isVirtualLoopbackInput = isVirtualLoopback;
+
   console.info(
     `[audio-input] acquiring ${isVirtualLoopback ? "virtual/loopback" : "microphone"} input`,
     {
@@ -1498,16 +1508,21 @@ const MIC_DUCK_GAIN = 0.15; // -16 dB while TTS is audible; STT stays live.
 function startTtsMuteCheck(): void {
   stopTtsMuteCheck();
   const isTabCapture = $audioSource() === "tab";
+  // Virtual loopback behaves like tab capture: the TTS signal is a clean
+  // digital copy of our own output, so ducking is not enough.  Hard-mute
+  // capture while TTS is audible to stop Soniox from "hearing" the TTS and
+  // freezing the transcript.
+  const shouldHardMute = isTabCapture || isVirtualLoopbackInput;
   ttsMuteCheckInterval = setInterval(() => {
     const shouldAttenuate = textToSpeech.isAudible();
     if (shouldAttenuate !== captureMuted) {
       captureMuted = shouldAttenuate;
-      if (isTabCapture) {
+      if (shouldHardMute) {
         captureWorklet?.port.postMessage({ type: "mute", value: shouldAttenuate });
         console.log(
           shouldAttenuate
-            ? "[audio-input] TTS audible → muting tab capture to prevent self-hearing"
-            : "[audio-input] TTS silent → resuming tab capture",
+            ? "[audio-input] TTS audible → muting capture to prevent self-hearing"
+            : "[audio-input] TTS silent → resuming capture",
         );
       } else {
         captureWorklet?.port.postMessage({

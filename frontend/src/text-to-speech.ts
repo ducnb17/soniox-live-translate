@@ -53,6 +53,8 @@ export class TextToSpeech {
   private audioLineReadyCount = 0;
   private audioLinePlayedCount = 0;
   private interruptedAudioLineCount = 0;
+  private activeLineStallTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly ACTIVE_LINE_STALL_TIMEOUT_MS = 5000;
 
   constructor(callbacks: TextToSpeechCallbacks, config: TextToSpeechConfig) {
     this.callbacks = callbacks;
@@ -64,7 +66,11 @@ export class TextToSpeech {
   }
 
   isAudible(): boolean {
-    return this.activeLineSources.length > 0;
+    // Count both currently playing sources and sources that have been
+    // scheduled/queued but not yet started.  This lets the anti-feedback
+    // mute kick in as soon as a TTS line is registered, which is critical
+    // for virtual-loopback capture where our own TTS re-enters the input.
+    return this.activeLineSources.length > 0 || this.hasPendingAudio();
   }
 
   hasPendingAudio(): boolean {
@@ -137,6 +143,7 @@ export class TextToSpeech {
       }
     }
     this.activeLineSources = [];
+    this._clearActiveLineStallTimer();
     if (this.audioCtx) this.nextPlayTime = this.audioCtx.currentTime;
     this.currentPlayingLineId = null;
     this.state.activeLineId = null;
@@ -159,6 +166,7 @@ export class TextToSpeech {
     this.interruptedAudioLineCount = 0;
     this.averageLineAudioSeconds = 3;
     this.nextLineIdToPlay = null;
+    this._clearActiveLineStallTimer();
   }
 
   async cleanup(): Promise<void> {
@@ -224,6 +232,7 @@ export class TextToSpeech {
       this.activeLinePendingChunks = 0;
       this.activeLineDoneScheduling = false;
       this.activeLineAudioSeconds = 0;
+      this._resetActiveLineStallTimer();
       this.callbacks.onLineStarted(line.lineId);
     }
 
@@ -234,6 +243,7 @@ export class TextToSpeech {
       const { chunk, isLast } = next;
       this.activeLinePendingChunks += 1;
       this.activeLineAudioSeconds += this.pcmChunkDurationSeconds(chunk);
+      this._resetActiveLineStallTimer();
       this.playPcmChunk(chunk, lineId, () => {
         if (epoch !== this.playbackEpoch) return;
         this.activeLinePendingChunks -= 1;
@@ -248,8 +258,22 @@ export class TextToSpeech {
   private maybeFinishActiveLine(): void {
     if (this.currentPlayingLineId === null) return;
     if (!this.activeLineDoneScheduling || this.activeLinePendingChunks > 0) return;
+    this._finishActiveLine();
+  }
+
+  private _forceFinishStalledLine(): void {
+    if (this.currentPlayingLineId === null) return;
+    console.warn(
+      `[TextToSpeech] Line ${this.currentPlayingLineId} stalled with no audio chunks; skipping`,
+    );
+    this._finishActiveLine();
+  }
+
+  private _finishActiveLine(): void {
+    if (this.currentPlayingLineId === null) return;
     const lineId = this.currentPlayingLineId;
     const audioSeconds = this.activeLineAudioSeconds;
+    this._clearActiveLineStallTimer();
     if (!this.lineAudioQueue.finishLine(lineId)) return;
 
     this.audioLinePlayedCount += 1;
@@ -262,6 +286,20 @@ export class TextToSpeech {
     this.logTtsLineProgress();
     this.callbacks.onQueueChanged();
     this.streamActiveLine();
+  }
+
+  private _resetActiveLineStallTimer(): void {
+    this._clearActiveLineStallTimer();
+    this.activeLineStallTimer = setTimeout(() => {
+      this._forceFinishStalledLine();
+    }, this.ACTIVE_LINE_STALL_TIMEOUT_MS);
+  }
+
+  private _clearActiveLineStallTimer(): void {
+    if (this.activeLineStallTimer !== null) {
+      clearTimeout(this.activeLineStallTimer);
+      this.activeLineStallTimer = null;
+    }
   }
 
   private playPcmChunk(
