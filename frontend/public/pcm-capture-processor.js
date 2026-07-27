@@ -7,19 +7,18 @@
  *
  * Mute modes (sent from main thread via port.postMessage):
  *   { type: 'mute',  value: true|false }   — full mute / unmute (tab-capture / digital loop)
- *   { type: 'duck',  value: 0.0–1.0 }      — apply gain factor (mic mode while TTS plays)
+ *   { type: 'duck',  value: 0.0–1.0 }      — apply gain factor (reserved for future use)
  *     1.0  = no attenuation (normal capture)
- *     0.15 = heavy duck (-16 dB) so STT keeps running but TTS echo is greatly reduced
  *     0.0  = silence (equivalent to mute)
  *
- * For microphone mode we duck rather than hard-mute so the STT stream keeps
- * receiving audio even while TTS is speaking — the browser's built-in AEC
- * (echoCancellation) removes most of the TTS echo before it reaches here, and
- * the duck gain suppresses whatever residual remains. STT therefore stays live
- * and translation does not stall until TTS finishes.
+ * For microphone mode the main thread does NOT duck or mute at all — the
+ * browser's built-in echoCancellation removes TTS echo before it reaches
+ * this worklet, so STT stays fully live and translation continues in real
+ * time while TTS is playing. TTS and STT run in parallel.
  *
- * For tab/system-audio capture we continue to send silence because the TTS
- * signal is a perfect digital copy of what the mic would receive — there is
+ * For tab/system-audio capture and virtual loopback the main thread sends
+ * { type: 'mute', value: true } while TTS is audible, because the TTS
+ * signal is a perfect digital copy of what would be captured — there is
  * no AEC to help, so the only safe option is to block it entirely.
  */
 

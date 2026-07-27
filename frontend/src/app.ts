@@ -110,6 +110,7 @@ const $ttsPlaybackRateValue = $<HTMLSpanElement>("tts-playback-rate-value");
 const $ttsApiKey = $<HTMLInputElement>("tts-api-key");
 const $ttsApiKeyRow = $<HTMLDivElement>("tts-api-key-row");
 const $btnSaveTtsKey = $<HTMLButtonElement>("btn-save-tts-key");
+const $btnTestTtsKey = $<HTMLButtonElement>("btn-test-tts-key");
 const $ttsCostHint = $<HTMLParagraphElement>("tts-cost-hint");
 const $ttsTierBadge = $<HTMLSpanElement>("tts-tier-badge");
 const $ttsProviderDescription = $<HTMLSpanElement>("tts-provider-description");
@@ -118,6 +119,7 @@ const $ttsKeyLink = $<HTMLAnchorElement>("tts-key-link");
 const $sttProvider = $<HTMLSelectElement>("stt-provider-select");
 const $sttApiKey = $<HTMLInputElement>("stt-api-key");
 const $sttApiKeyRow = $<HTMLDivElement>("stt-api-key-row");
+const $btnSaveSttKey = $<HTMLButtonElement>("btn-save-stt-key");
 const $btnTestSttKey = $<HTMLButtonElement>("btn-test-stt-key");
 const $sttTestStatus = $<HTMLSpanElement>("stt-test-status");
 const $sttTierBadge = $<HTMLSpanElement>("stt-tier-badge");
@@ -126,6 +128,7 @@ const $sttKeyLink = $<HTMLAnchorElement>("stt-key-link");
 const $translationProvider = $<HTMLSelectElement>("translation-provider-select");
 const $translationApiKey = $<HTMLInputElement>("translation-api-key");
 const $translationApiKeyRow = $<HTMLDivElement>("translation-api-key-row");
+const $btnSaveTranslationKey = $<HTMLButtonElement>("btn-save-translation-key");
 const $btnTestTranslationKey = $<HTMLButtonElement>("btn-test-translation-key");
 const $translationTestStatus = $<HTMLSpanElement>("translation-test-status");
 const $translationTierBadge = $<HTMLSpanElement>("translation-tier-badge");
@@ -575,10 +578,17 @@ async function loadTtsProviders(): Promise<void> {
     populateTtsProviderSelect();
     // Also load config
     const cfgResp = await fetch("/api/tts/config");
-    const cfg = await cfgResp.json();
+    const cfg = await cfgResp.json() as {
+      current_provider?: string;
+      current_voice?: string;
+      current_provider_key_masked?: string;
+    };
     currentTtsProvider = cfg.current_provider || "soniox";
     $ttsProvider.value = currentTtsProvider;
     await onTtsProviderChange(cfg.current_voice || "");
+    if (cfg.current_provider_key_masked) {
+      $ttsApiKey.placeholder = `✓ Đã lưu: ${cfg.current_provider_key_masked} — nhập key mới để thay đổi`;
+    }
   } catch {
     setTimeout(loadTtsProviders, 3000);
   }
@@ -607,15 +617,14 @@ async function onTtsProviderChange(savedVoice = ""): Promise<void> {
   $ttsProviderDescription.textContent = provider?.description || "";
   $ttsKeyLink.href = provider?.pricing_url || "#";
 
-  // Auto-detect saved TTS key — disable input if key already stored.
+  // Auto-detect saved TTS key — keep input editable so the user can change it.
   const ttsHasKey = provider?.has_api_key ?? false;
   if (ttsHasKey) {
-    $ttsApiKey.disabled = true;
-    $ttsApiKey.placeholder = `✓ Đã lưu key cho ${provider?.name ?? pid} — không cần nhập lại`;
+    $ttsApiKey.placeholder = `✓ Đã lưu key cho ${provider?.name ?? pid} — nhập key mới để thay đổi`;
   } else {
-    $ttsApiKey.disabled = false;
     $ttsApiKey.placeholder = "Enter API key...";
   }
+  $ttsApiKey.disabled = false;
 
   updateTtsCostHint();
 
@@ -667,7 +676,36 @@ $ttsVoice.addEventListener("change", () => {
   });
 });
 
-$btnSaveTtsKey.addEventListener("click", async () => {
+async function saveTtsKey(): Promise<void> {
+  const pid = $ttsProvider.value;
+  const key = $ttsApiKey.value.trim();
+  if (!key) {
+    $ttsTestStatus.textContent = "❌ Enter an API key to save";
+    return;
+  }
+  $ttsTestStatus.textContent = "Saving…";
+  try {
+    const response = await fetch("/api/tts/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider_id: pid, api_key: key, voice: $ttsVoice.value }),
+    });
+    const result = await response.json() as { ok: boolean; message?: string };
+    if (result.ok) {
+      $ttsTestStatus.textContent = "✅ Key saved";
+      setStatus("TTS API key saved");
+      await loadTtsProviders();
+    } else {
+      $ttsTestStatus.textContent = `❌ ${result.message || "Failed to save"}`;
+    }
+  } catch (error) {
+    $ttsTestStatus.textContent = `❌ ${(error as Error).message}`;
+  }
+}
+
+$btnSaveTtsKey.addEventListener("click", () => { void saveTtsKey(); });
+
+$btnTestTtsKey.addEventListener("click", async () => {
   const pid = $ttsProvider.value;
   const key = $ttsApiKey.value.trim();
   const provider = ttsProviders.find((item) => item.id === pid);
@@ -686,7 +724,6 @@ $btnSaveTtsKey.addEventListener("click", async () => {
     $ttsTestStatus.textContent = `${result.ok ? "✅" : "❌"} ${result.message}`;
     if (result.ok) {
       setStatus("TTS connection verified and key saved");
-      $ttsApiKey.value = "";
       await loadTtsProviders();
     }
   } catch (error) {
@@ -727,17 +764,21 @@ function showProviderMeta(
 async function loadDomainProviders(
   domain: "stt" | "translation",
   select: HTMLSelectElement,
-): Promise<ProviderInfo[]> {
+): Promise<{ providers: ProviderInfo[]; maskedKey: string }> {
   const [providersResponse, configResponse] = await Promise.all([
     fetch(`/api/${domain}/providers`),
     fetch(`/api/${domain}/config`),
   ]);
   if (!providersResponse.ok || !configResponse.ok) throw new Error(`Could not load ${domain} providers`);
   const providers = await providersResponse.json() as ProviderInfo[];
-  const config = await configResponse.json() as { current_provider?: string };
+  const config = await configResponse.json() as {
+    current_provider?: string;
+    api_key_masked?: string;
+    api_key_present?: boolean;
+  };
   populateProviderSelect(select, providers);
   select.value = config.current_provider || "soniox";
-  return providers;
+  return { providers, maskedKey: config.api_key_masked || "" };
 }
 
 async function testDomainProvider(
@@ -756,7 +797,6 @@ async function testDomainProvider(
     const result = await response.json() as { ok: boolean; message: string };
     status.textContent = `${result.ok ? "✅" : "❌"} ${result.message}`;
     if (result.ok) {
-      input.value = "";
       setStatus(`${domain === "stt" ? "STT" : "Translation"} connection verified and key saved`);
     }
   } catch (error) {
@@ -769,31 +809,35 @@ function updateKeyInputState(
   providers: ProviderInfo[],
   input: HTMLInputElement,
   status: HTMLSpanElement,
+  maskedKey = "",
 ): void {
   const provider = providers.find((p) => p.id === select.value);
   const hasKey = provider?.has_api_key ?? false;
+  input.disabled = false;
   if (hasKey) {
-    input.disabled = true;
-    input.placeholder = `✓ Đã lưu key cho ${provider?.name ?? select.value} — không cần nhập lại`;
+    input.placeholder = maskedKey
+      ? `✓ Đã lưu: ${maskedKey} — nhập key mới để thay đổi`
+      : `✓ Đã lưu key cho ${provider?.name ?? select.value} — nhập key mới để thay đổi`;
     status.textContent = "";
   } else {
-    input.disabled = false;
     input.placeholder = "Enter API key...";
   }
 }
 
 async function loadSpeechProviders(): Promise<void> {
   try {
-    sttProviders = await loadDomainProviders("stt", $sttProvider);
+    const stt = await loadDomainProviders("stt", $sttProvider);
+    sttProviders = stt.providers;
     showProviderMeta($sttProvider, sttProviders, $sttApiKeyRow, $sttTierBadge, $sttProviderDescription, $sttKeyLink);
-    translationProviders = await loadDomainProviders("translation", $translationProvider);
+    const translation = await loadDomainProviders("translation", $translationProvider);
+    translationProviders = translation.providers;
     showProviderMeta(
       $translationProvider, translationProviders, $translationApiKeyRow,
       $translationTierBadge, $translationProviderDescription, $translationKeyLink,
     );
-    // Auto-detect saved provider keys and disable inputs accordingly.
-    updateKeyInputState($sttProvider, sttProviders, $sttApiKey, $sttTestStatus);
-    updateKeyInputState($translationProvider, translationProviders, $translationApiKey, $translationTestStatus);
+    // Auto-detect saved provider keys but keep inputs editable.
+    updateKeyInputState($sttProvider, sttProviders, $sttApiKey, $sttTestStatus, stt.maskedKey);
+    updateKeyInputState($translationProvider, translationProviders, $translationApiKey, $translationTestStatus, translation.maskedKey);
   } catch {
     window.setTimeout(() => { void loadSpeechProviders(); }, 3000);
   }
@@ -812,8 +856,46 @@ $translationProvider.addEventListener("change", () => {
   );
   updateKeyInputState($translationProvider, translationProviders, $translationApiKey, $translationTestStatus);
 });
+async function saveDomainKey(
+  domain: "stt" | "translation",
+  select: HTMLSelectElement,
+  input: HTMLInputElement,
+  status: HTMLSpanElement,
+): Promise<void> {
+  const pid = select.value;
+  const key = input.value.trim();
+  if (!key) {
+    status.textContent = "❌ Enter an API key to save";
+    return;
+  }
+  status.textContent = "Saving…";
+  try {
+    const response = await fetch(`/api/${domain}/config`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider_id: pid, api_key: key }),
+    });
+    const result = await response.json() as { ok: boolean; message?: string };
+    if (result.ok) {
+      status.textContent = "✅ Key saved";
+      setStatus(`${domain === "stt" ? "STT" : "Translation"} API key saved`);
+      await loadSpeechProviders();
+    } else {
+      status.textContent = `❌ ${result.message || "Failed to save"}`;
+    }
+  } catch (error) {
+    status.textContent = `❌ ${(error as Error).message}`;
+  }
+}
+
+$btnSaveSttKey.addEventListener("click", () => {
+  void saveDomainKey("stt", $sttProvider, $sttApiKey, $sttTestStatus);
+});
 $btnTestSttKey.addEventListener("click", () => {
   void testDomainProvider("stt", $sttProvider, $sttApiKey, $sttTestStatus);
+});
+$btnSaveTranslationKey.addEventListener("click", () => {
+  void saveDomainKey("translation", $translationProvider, $translationApiKey, $translationTestStatus);
 });
 $btnTestTranslationKey.addEventListener("click", () => {
   void testDomainProvider(
@@ -852,10 +934,7 @@ $saveConfigBtn.addEventListener("click", async () => {
       // Reload providers so [key] badges and has_api_key flags update.
       await loadTtsProviders();
       await loadSpeechProviders();
-      // Clear key inputs after successful save.
-      $ttsApiKey.value = "";
-      $sttApiKey.value = "";
-      $translationApiKey.value = "";
+      // Keep key inputs visible so the user can still review/edit them.
     } else {
       $saveConfigStatus.textContent = "❌ Lỗi khi lưu";
     }
@@ -1467,17 +1546,14 @@ async function startRecorder(): Promise<void> {
     setStatus(message);
   }, 1500);
 
-  // --- TTS self-hearing prevention (acoustic feedback) ---
-  // Whenever the TTS output is audible through speakers, the microphone
-  // picks it back up. In tab/system-audio mode that's a direct capture of
-  // our own output; in plain microphone mode (speakers, no headset) it's
-  // acoustic feedback through the room. Either way Soniox keeps "hearing
-  // speech" (the TTS voice) and never emits the `<end>` token that closes
-  // the utterance — which looks like STT+translation "freezing" until TTS
-  // finishes, then resuming. Muting capture while TTS is audible breaks
-  // that loop in both input modes. Barge-in (mic mode only) intentionally
-  // reads a separate, unmuted AnalyserNode tap on the raw mic stream so the
-  // user can still interrupt TTS by talking over it.
+  // --- TTS self-hearing prevention (tab/loopback only) ---
+  // For tab/system-audio and virtual-loopback captures the TTS signal is a
+  // perfect digital copy of what is being captured, so we hard-mute capture
+  // while TTS is audible to prevent Soniox from "hearing" the TTS voice and
+  // stalling the `<end>` token.  For real microphone input we do nothing:
+  // the browser's echoCancellation removes TTS echo acoustically, and STT
+  // keeps running at full gain so translate + display continue in parallel
+  // with TTS playback. See startTtsMuteCheck() for details.
   startTtsMuteCheck();
 
   // Barge-in only makes sense for microphone input.
@@ -1485,56 +1561,50 @@ async function startRecorder(): Promise<void> {
 }
 
 /**
- * Periodically check if TTS is audible and adjust the AudioWorklet capture
- * accordingly. Active for every audio source, but the response differs:
+ * Periodically check if TTS is audible and mute capture for tab/loopback
+ * sources. Microphone mode is intentionally NOT throttled so that STT and
+ * TTS run fully in parallel — new speech continues to be transcribed and
+ * translated while the TTS is still reading, and each translated chunk
+ * appears on screen and starts playing immediately without waiting for the
+ * previous sentence to finish.
  *
  * - Tab/system-audio capture: hard-mute (send silence). The TTS signal is a
  *   perfect digital copy of what would be captured — there is no echo
  *   cancellation available, so full mute is the only way to stop Soniox from
  *   "hearing" its own TTS output and never emitting `<end>`.
  *
- * - Microphone capture: duck (attenuate) instead of hard-muting. The browser's
- *   echoCancellation constraint (enabled for real mics — see
- *   acquireInputStream) already removes most of the TTS echo picked up
- *   through the speakers, so STT can keep receiving live audio and keep
- *   transcribing/translating while TTS plays instead of freezing until TTS
- *   finishes. The duck gain further suppresses whatever echo AEC misses, so
- *   the residual TTS voice can't feed back into a new transcription. Barge-in
- *   (mic mode only) reads a separate, un-ducked AnalyserNode tap on the raw
- *   mic stream so the user can still interrupt TTS by talking over it.
+ * - Virtual-loopback capture: same hard-mute as tab capture (TTS output is
+ *   routed into the same digital stream as the captured audio).
+ *
+ * - Microphone capture: NO ducking, NO muting. The browser's built-in
+ *   echoCancellation (enabled for real mics in acquireInputStream) removes
+ *   TTS echo picked up through speakers before it reaches the worklet, so
+ *   STT stays fully live during TTS playback. Barge-in reads a separate
+ *   AnalyserNode tap so the user can still interrupt TTS by speaking.
  */
-const MIC_DUCK_GAIN = 0.15; // -16 dB while TTS is audible; STT stays live.
-
 function startTtsMuteCheck(): void {
   stopTtsMuteCheck();
   const isTabCapture = $audioSource() === "tab";
-  // Virtual loopback behaves like tab capture: the TTS signal is a clean
-  // digital copy of our own output, so ducking is not enough.  Hard-mute
-  // capture while TTS is audible to stop Soniox from "hearing" the TTS and
-  // freezing the transcript.
+  // Virtual loopback behaves like tab capture: TTS audio is a clean digital
+  // copy of the captured stream — no AEC is available, so hard-mute is the
+  // only way to prevent Soniox from "hearing" its own TTS output.
   const shouldHardMute = isTabCapture || isVirtualLoopbackInput;
+
+  // Microphone mode: browser echoCancellation handles speaker→mic feedback.
+  // Do NOT duck or mute — STT runs at full gain while TTS plays so that
+  // translate + display continue in real time alongside TTS playback.
+  if (!shouldHardMute) return;
+
   ttsMuteCheckInterval = setInterval(() => {
     const shouldAttenuate = textToSpeech.isAudible();
     if (shouldAttenuate !== captureMuted) {
       captureMuted = shouldAttenuate;
-      if (shouldHardMute) {
-        captureWorklet?.port.postMessage({ type: "mute", value: shouldAttenuate });
-        console.log(
-          shouldAttenuate
-            ? "[audio-input] TTS audible → muting capture to prevent self-hearing"
-            : "[audio-input] TTS silent → resuming capture",
-        );
-      } else {
-        captureWorklet?.port.postMessage({
-          type: "duck",
-          value: shouldAttenuate ? MIC_DUCK_GAIN : 1.0,
-        });
-        console.log(
-          shouldAttenuate
-            ? "[audio-input] TTS audible → ducking mic capture (STT stays live)"
-            : "[audio-input] TTS silent → restoring mic capture gain",
-        );
-      }
+      captureWorklet?.port.postMessage({ type: "mute", value: shouldAttenuate });
+      console.log(
+        shouldAttenuate
+          ? "[audio-input] TTS audible → muting tab/loopback capture to prevent self-hearing"
+          : "[audio-input] TTS silent → resuming tab/loopback capture",
+      );
     }
   }, 50);
 }
