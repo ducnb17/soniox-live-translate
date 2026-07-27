@@ -2,10 +2,10 @@
 ; Build: ISCC installer\installer.iss
 
 #define MyAppName       "Soniox Live Translate"
-#define MyAppVersion    "0.2.2"
+#define MyAppVersion    "0.4.0"
 
 
-#define MyAppPublisher  "ducnb17"
+#define MyAppPublisher  "Nguyễn Bá Đức"
 #define MyAppURL        "https://github.com/ducnb17/soniox-live-translate"
 #define MyAppExeName    "SonioxLiveTranslate.exe"
 
@@ -14,9 +14,11 @@ AppId={{A7B3C2D1-E4F5-6789-ABCD-EF0123456789}}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
+AppCopyright=Nguyễn Bá Đức
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}/issues
 AppUpdatesURL={#MyAppURL}/releases
+SetupIconFile=..\installer\icon.ico
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes

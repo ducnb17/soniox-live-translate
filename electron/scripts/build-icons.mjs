@@ -1,9 +1,3 @@
-// Converts frontend/public/icon.svg -> electron/build/icon.png (256x256, for Tray/Linux)
-// and electron/build/icon.ico (multi-size, for Windows NSIS installer + app icon).
-//
-// Rationale: no system image tools (imagemagick/inkscape/rsvg-convert) are
-// available in this environment, so we use the Node-only `sharp` + `png-to-ico`
-// packages (already declared as devDependencies in electron/package.json).
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,14 +16,12 @@ async function main() {
   await mkdir(BUILD_DIR, { recursive: true });
   const svgBuffer = await readFile(SVG_PATH);
 
-  // Tray / Linux PNG
   const pngBuffer = await sharp(svgBuffer, { density: 384 })
     .resize(PNG_SIZE, PNG_SIZE)
     .png()
     .toBuffer();
   await writeFile(path.join(BUILD_DIR, "icon.png"), pngBuffer);
 
-  // Windows ICO (multi-resolution)
   const pngBuffers = await Promise.all(
     ICO_SIZES.map((size) =>
       sharp(svgBuffer, { density: 384 }).resize(size, size).png().toBuffer()

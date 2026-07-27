@@ -1,5 +1,4 @@
 export interface SonioxToken {
-
   text?: string;
   is_final?: boolean;
   speaker?: number | null;
@@ -9,13 +8,52 @@ export interface SonioxToken {
 }
 
 export interface SonioxSttResponse {
+  type?: string;
+  line_id?: number;
+  byte_length?: number;
+  line_audio_end?: boolean;
   tokens?: SonioxToken[];
   finished?: boolean;
-  error_code?: string;
+  error_code?: string | number;
+  error_type?: string;
   error_message?: string;
   session_done?: boolean;
   session_id?: string;
   barge_ack?: boolean;
+  reconnecting?: boolean;
+  attempt?: number;
+  max_attempts?: number;
+  downtime_start?: number;
+  reconnected?: boolean;
+  downtime_ms?: number;
+  downtime_text?: string;
+  buffered_audio_bytes?: number;
+  dropped_audio_bytes?: number;
+  reconnect_failed?: boolean;
+  max_retries?: number;
+  error_message_plain?: string;
+  tts_fallback?: {
+    from_provider: string;
+    to_provider: string;
+    reason: string;
+  };
+  tts_error?: {
+    provider_id: string;
+    message: string;
+  };
+  tts_usage?: {
+    provider_id: string;
+    voice_id: string;
+    characters: number;
+    estimated_cost_usd: number;
+    cache_hit: boolean;
+  };
+  translation_error?: { message: string };
+  speaker?: number | null;
+  original_text?: string;
+  translated_text?: string;
+  lang?: string | null;
+  is_endpoint?: boolean;
 }
 
 export interface Utterance {
@@ -27,21 +65,10 @@ export interface Utterance {
   translationPartial: string;
 }
 
-export const TTS_PROVIDERS: string[] = ["soniox", "openai"];
-
-export const VOICES_BY_PROVIDER: Record<string, string[]> = {
-  soniox: ["Maya", "Daniel", "Liam", "Emma", "Arthur", "Alice"],
-  openai: ["alloy", "echo", "fable", "onyx", "nova", "shimmer"],
-};
-
-export const DEFAULT_TTS_PROVIDER = "soniox";
-
 export interface ConfigResponse {
   voices: string[];
   languages: { code: string; name: string }[];
   configured: boolean;
-  providers: string[];
-  voices_by_provider: Record<string, string[]>;
 }
 
 export interface SetupPayload {
@@ -51,32 +78,33 @@ export interface SetupPayload {
 }
 
 export type AppMode = "file" | "mic";
-export type AppState = "idle" | "recording" | "playing-file" | "reconnecting";
+export type AppState = "idle" | "recording" | "playing-file";
 export type TranslationMode = "one_way" | "two_way";
 export type AudioSource = "microphone" | "tab";
+
+export interface DeviceOption {
+  deviceId: string;
+  label: string;
+  kind: "audioinput" | "audiooutput";
+}
+
+export type ConnectionStatus = "connected" | "reconnecting" | "failed" | "idle";
+
+export interface DeviceOption {
+  deviceId: string;
+  label: string;
+  kind: "audioinput" | "audiooutput";
+}
 
 export const TTS_SAMPLE_RATE = 24000;
 
 export const BARGE_RMS_THRESHOLD = 0.05;
 export const BARGE_HOLD_MS = 220;
-// Grace period after a new TTS chunk starts playing (activeSources goes
+// Grace period after a new TTS line starts playing (activeLineSources goes
 // empty -> non-empty) during which barge-in is suppressed. This avoids the
 // initial "pop" of TTS audio (picked up as echo by the mic) from
 // immediately self-triggering a barge-in.
 export const BARGE_TTS_START_GRACE_MS = 400;
-
-// WebSocket auto-reconnect tuning: exponential backoff with jitter, capped
-// at RECONNECT_MAX_DELAY_MS, giving up after RECONNECT_MAX_ATTEMPTS.
-export const RECONNECT_MAX_ATTEMPTS = 5;
-export const RECONNECT_BASE_DELAY_MS = 1000;
-export const RECONNECT_MAX_DELAY_MS = 20000;
-
-// Audio device selection (Settings panel): localStorage keys + test-tone duration.
-export const INPUT_DEVICE_KEY = "soniox_input_device";
-export const OUTPUT_DEVICE_KEY = "soniox_output_device";
-export const DEVICE_TEST_DURATION_MS = 5000;
-
-
 
 
 export const LANGUAGES: [string, string][] = [

@@ -1,20 +1,12 @@
-
+import { initSentry } from "./sentry-init";
+initSentry(); // no-op when VITE_SENTRY_DSN is not set
 
 import {
-  TTS_SAMPLE_RATE,
   BARGE_RMS_THRESHOLD,
   BARGE_HOLD_MS,
   BARGE_TTS_START_GRACE_MS,
-  RECONNECT_MAX_ATTEMPTS,
-  RECONNECT_BASE_DELAY_MS,
-  RECONNECT_MAX_DELAY_MS,
-  INPUT_DEVICE_KEY,
-  OUTPUT_DEVICE_KEY,
-  DEVICE_TEST_DURATION_MS,
   LANGUAGES,
-  TTS_PROVIDERS,
-  VOICES_BY_PROVIDER,
-  DEFAULT_TTS_PROVIDER,
+  VOICES,
 
   type SonioxSttResponse,
   type Utterance,
@@ -22,19 +14,27 @@ import {
   type AppState,
   type TranslationMode,
   type AudioSource,
+  type ConnectionStatus,
 } from "./types";
 
 import {
-  listSessions,
-  getSession,
-  saveSession,
-  deleteSession,
-  clearSessions,
-  migrateFromLocalStorage,
-} from "./db";
-
-void migrateFromLocalStorage();
-
+  isLikelyVirtualLoopbackDevice,
+  resolveAudioDevices,
+  type AudioDeviceLike,
+} from "./device-selection";
+import {
+  cleanupConversations,
+  deleteConversation,
+  fetchConversation,
+  fetchConversationExport,
+  fetchConversationPage,
+  fetchRetentionStats,
+  type ConversationExportFormat,
+  type ConversationSummary,
+} from "./conversation-api";
+import { addTtsUsage, emptyTtsUsage, formatTtsCostHint } from "./tts-usage";
+import { SpeechToText, type SpeechToTextConfig } from "./speech-to-text";
+import { TextToSpeech } from "./text-to-speech";
 
 
 // UTF-8 safe base64 (handles non-ASCII context text).
@@ -68,22 +68,20 @@ const $twoWayBlock = $<HTMLDivElement>("two-way-block");
 const $voice = $<HTMLSelectElement>("voice");
 const $voiceB = $<HTMLSelectElement>("voice-b");
 const $voiceBBlock = $<HTMLDivElement>("voice-b-block");
-const $providerA = $<HTMLSelectElement>("tts-provider");
-const $providerB = $<HTMLSelectElement>("tts-provider-b");
 const $diarization = $<HTMLInputElement>("diarization");
 const $langId = $<HTMLInputElement>("lang-id");
-const $tts = $<HTMLInputElement>("tts");
 const $barge = $<HTMLInputElement>("barge");
 const $bargeHint = $<HTMLParagraphElement>("barge-hint");
 const $contextJson = $<HTMLTextAreaElement>("context-json");
 const $actionRow = document.querySelector<HTMLDivElement>(".action-row")!;
 const $actionBtn = $<HTMLButtonElement>("action");
 const $actionLabel = $actionBtn.querySelector<HTMLSpanElement>(".btn-label")!;
+const $actionTtsBtn = $<HTMLButtonElement>("action-tts");
 const $modeToggle = $<HTMLButtonElement>("mode-toggle");
 const $audioUrl = $<HTMLInputElement>("audio-url");
-const $originalCol = $<HTMLDivElement>("original");
-const $translationCol = $<HTMLDivElement>("translation");
+const $transcriptFeed = $<HTMLDivElement>("transcript-feed");
 const $status = $<HTMLSpanElement>("status");
+const $delayStatus = $<HTMLSpanElement>("delay-status");
 const $bargeMeter = $<HTMLDivElement>("barge-meter");
 const $bargeBar = $<HTMLDivElement>("barge-bar");
 const $sessionInfo = $<HTMLDivElement>("session-info");
@@ -92,17 +90,107 @@ const $transcriptLink = $<HTMLAnchorElement>("transcript-link");
 const $dlJson = $<HTMLButtonElement>("dl-json");
 const $dlCsv = $<HTMLButtonElement>("dl-csv");
 const $themeToggle = $<HTMLButtonElement>("theme-toggle");
-const $retryBtn = $<HTMLButtonElement>("retry-btn");
 const $inputDevice = $<HTMLSelectElement>("input-device");
 const $outputDevice = $<HTMLSelectElement>("output-device");
-const $testInputBtn = $<HTMLButtonElement>("test-input-btn");
-const $testOutputBtn = $<HTMLButtonElement>("test-output-btn");
-const $inputVuMeter = $<HTMLDivElement>("input-vu-meter");
-const $inputVuBar = $<HTMLDivElement>("input-vu-bar");
-const $deviceFallbackWarning = $<HTMLParagraphElement>("device-fallback-warning");
-const $outputTestAudio = $<HTMLAudioElement>("output-test-audio");
+const $btnTestInput = $<HTMLButtonElement>("btn-test-input");
+const $btnStopTestInput = $<HTMLButtonElement>("btn-stop-test-input");
+const $btnTestOutput = $<HTMLButtonElement>("btn-test-output");
+const $inputLevelMeter = $<HTMLDivElement>("input-level-meter");
+const $inputLevelBar = $<HTMLDivElement>("input-level-bar");
+const $connectionDot = $<HTMLDivElement>("connection-dot");
+const $btnRetry = $<HTMLButtonElement>("btn-retry");
+const $ttsProvider = $<HTMLSelectElement>("tts-provider-select");
+const $ttsVoice = $<HTMLSelectElement>("tts-voice-select");
+const $sttDelay = $<HTMLInputElement>("stt-delay-seconds");
+const $sttDelayValue = $<HTMLSpanElement>("stt-delay-seconds-value");
+const $ttsDelay = $<HTMLInputElement>("tts-delay-seconds");
+const $ttsDelayValue = $<HTMLSpanElement>("tts-delay-seconds-value");
+const $ttsPlaybackRate = $<HTMLInputElement>("tts-playback-rate");
+const $ttsPlaybackRateValue = $<HTMLSpanElement>("tts-playback-rate-value");
+const $ttsApiKey = $<HTMLInputElement>("tts-api-key");
+const $ttsApiKeyRow = $<HTMLDivElement>("tts-api-key-row");
+const $btnSaveTtsKey = $<HTMLButtonElement>("btn-save-tts-key");
+const $btnTestTtsKey = $<HTMLButtonElement>("btn-test-tts-key");
+const $ttsCostHint = $<HTMLParagraphElement>("tts-cost-hint");
+const $ttsTierBadge = $<HTMLSpanElement>("tts-tier-badge");
+const $ttsProviderDescription = $<HTMLSpanElement>("tts-provider-description");
+const $ttsTestStatus = $<HTMLSpanElement>("tts-test-status");
+const $ttsKeyLink = $<HTMLAnchorElement>("tts-key-link");
+const $sttProvider = $<HTMLSelectElement>("stt-provider-select");
+const $sttApiKey = $<HTMLInputElement>("stt-api-key");
+const $sttApiKeyRow = $<HTMLDivElement>("stt-api-key-row");
+const $btnSaveSttKey = $<HTMLButtonElement>("btn-save-stt-key");
+const $btnTestSttKey = $<HTMLButtonElement>("btn-test-stt-key");
+const $sttTestStatus = $<HTMLSpanElement>("stt-test-status");
+const $sttTierBadge = $<HTMLSpanElement>("stt-tier-badge");
+const $sttProviderDescription = $<HTMLSpanElement>("stt-provider-description");
+const $sttKeyLink = $<HTMLAnchorElement>("stt-key-link");
+const $translationProvider = $<HTMLSelectElement>("translation-provider-select");
+const $translationApiKey = $<HTMLInputElement>("translation-api-key");
+const $translationApiKeyRow = $<HTMLDivElement>("translation-api-key-row");
+const $btnSaveTranslationKey = $<HTMLButtonElement>("btn-save-translation-key");
+const $btnTestTranslationKey = $<HTMLButtonElement>("btn-test-translation-key");
+const $translationTestStatus = $<HTMLSpanElement>("translation-test-status");
+const $translationTierBadge = $<HTMLSpanElement>("translation-tier-badge");
+const $translationProviderDescription = $<HTMLSpanElement>("translation-provider-description");
+const $translationKeyLink = $<HTMLAnchorElement>("translation-key-link");
+const $saveConfigBtn = $<HTMLButtonElement>("save-config-btn");
+const $saveConfigStatus = $<HTMLSpanElement>("save-config-status");
+const $historyPanel = $<HTMLDivElement>("history-panel");
+const $historyList = $<HTMLDivElement>("history-list");
+const $historySearch = $<HTMLInputElement>("history-search");
+const $historySearchButton = $<HTMLButtonElement>("history-search-button");
+const $historyLoadMore = $<HTMLButtonElement>("history-load-more");
+const $retentionDays = $<HTMLInputElement>("retention-days");
+const $retentionCleanup = $<HTMLButtonElement>("retention-cleanup");
+const $retentionStats = $<HTMLSpanElement>("retention-stats");
 
+function moveSettingsContent(): void {
+  const general = $<HTMLElement>("settings-general");
+  const ttsPanel = $<HTMLElement>("settings-tts");
+  const display = $<HTMLElement>("settings-display");
+  for (const id of [
+    "translation-mode-block", "one-way-block", "two-way-block",
+    "general-options-block", "device-block", "context-block", "audio-url-block",
+  ]) general.appendChild($(id));
+  const footer = document.querySelector<HTMLElement>(".sidebar-footer");
+  if (footer) general.appendChild(footer);
+  for (const id of ["voice-a-block", "voice-b-block", "tts-provider-block"]) {
+    ttsPanel.appendChild($(id));
+  }
+  for (const id of ["session-info", "download-block"]) display.appendChild($(id));
+  const history = document.querySelector<HTMLElement>(".history-section");
+  if (history) display.appendChild(history);
+  document.getElementById("settings-staging")?.remove();
+}
 
+moveSettingsContent();
+
+document.querySelectorAll<HTMLButtonElement>("[data-settings-tab]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const tab = button.dataset.settingsTab;
+    document.querySelectorAll<HTMLElement>("[data-settings-tab]").forEach((item) => {
+      item.classList.toggle("active", item.dataset.settingsTab === tab);
+    });
+    document.querySelectorAll<HTMLElement>("[data-settings-panel]").forEach((panel) => {
+      panel.classList.toggle("active", panel.dataset.settingsPanel === tab);
+    });
+  });
+});
+
+document.querySelectorAll<HTMLButtonElement>("[data-secret-target]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const input = document.getElementById(button.dataset.secretTarget || "") as HTMLInputElement | null;
+    if (input) input.type = input.type === "password" ? "text" : "password";
+  });
+});
+
+void fetch("/api/version")
+  .then((response) => response.json())
+  .then((data: { version?: string }) => {
+    $("app-version").textContent = data.version || "unknown";
+  })
+  .catch(() => { $("app-version").textContent = "unknown"; });
 
 // ---------------------------------------------------------------------------
 // Populate selectors
@@ -117,44 +205,756 @@ function populateLangs(select: HTMLSelectElement, value: string): void {
   select.value = value;
 }
 
-function populateVoices(select: HTMLSelectElement, provider: string, value: string): void {
-  select.innerHTML = "";
-  const voices = VOICES_BY_PROVIDER[provider] ?? VOICES_BY_PROVIDER[DEFAULT_TTS_PROVIDER];
-  for (const name of voices) {
+function populateVoices(select: HTMLSelectElement, value: string): void {
+  for (const name of VOICES) {
     const opt = document.createElement("option");
     opt.value = name;
     opt.textContent = name;
     select.appendChild(opt);
   }
-  select.value = voices.includes(value) ? value : voices[0] ?? "";
-}
-
-function populateProviders(select: HTMLSelectElement, value: string): void {
-  select.innerHTML = "";
-  for (const name of TTS_PROVIDERS) {
-    const opt = document.createElement("option");
-    opt.value = name;
-    opt.textContent = name;
-    select.appendChild(opt);
-  }
-  select.value = TTS_PROVIDERS.includes(value) ? value : DEFAULT_TTS_PROVIDER;
-}
-
-function rehydrateVoice(select: HTMLSelectElement, provider: string): void {
-  const current = select.value;
-  populateVoices(select, provider, current);
+  select.value = value;
 }
 
 populateLangs($targetLang, "vi");
 populateLangs($langA, "en");
 populateLangs($langB, "es");
-populateProviders($providerA, DEFAULT_TTS_PROVIDER);
-populateProviders($providerB, DEFAULT_TTS_PROVIDER);
-populateVoices($voice, $providerA.value, "Maya");
-populateVoices($voiceB, $providerB.value, "Daniel");
+populateVoices($voice, "Maya");
+populateVoices($voiceB, "Daniel");
 
-$providerA.addEventListener("change", () => rehydrateVoice($voice, $providerA.value));
-$providerB.addEventListener("change", () => rehydrateVoice($voiceB, $providerB.value));
+// ---------------------------------------------------------------------------
+// Device enumeration & selection
+// ---------------------------------------------------------------------------
+const INPUT_DEVICE_KEY = "soniox-input-device";
+const OUTPUT_DEVICE_KEY = "soniox-output-device";
+
+let isTestingMic = false;
+let testMicStream: MediaStream | null = null;
+let testMicRaf: number | null = null;
+
+function getSavedDeviceId(key: string): string {
+  try { return localStorage.getItem(key) || "default"; }
+  catch { return "default"; }
+}
+
+function saveDeviceId(key: string, id: string): void {
+  try { localStorage.setItem(key, id); } catch { /* storage disabled */ }
+}
+
+async function refreshDeviceList(): Promise<void> {
+  if (!navigator.mediaDevices?.enumerateDevices) {
+    populateDeviceSelect($inputDevice, [], "default");
+    populateDeviceSelect($outputDevice, [], "default");
+    setStatus("Audio device enumeration is not supported; using System Default");
+    return;
+  }
+
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const resolved = resolveAudioDevices(
+      devices,
+      getSavedDeviceId(INPUT_DEVICE_KEY),
+      getSavedDeviceId(OUTPUT_DEVICE_KEY),
+    );
+
+    populateDeviceSelect($inputDevice, resolved.inputs, resolved.inputId);
+    populateDeviceSelect($outputDevice, resolved.outputs, resolved.outputId);
+
+    const missing: string[] = [];
+    if (resolved.missingInput) {
+      saveDeviceId(INPUT_DEVICE_KEY, "default");
+      missing.push("microphone");
+    }
+    if (resolved.missingOutput) {
+      saveDeviceId(OUTPUT_DEVICE_KEY, "default");
+      missing.push("speaker");
+      textToSpeech.updateConfig({ outputDevice: "default" });
+    }
+
+    if (missing.length) {
+      setStatus(`Saved ${missing.join(" and ")} no longer available; switched to System Default`);
+    } else if (!resolved.inputs.length && !resolved.outputs.length) {
+      setStatus("No audio devices found; using System Default");
+    }
+  } catch (error) {
+    populateDeviceSelect($inputDevice, [], "default");
+    populateDeviceSelect($outputDevice, [], "default");
+    setStatus(`Could not read audio devices; using System Default (${(error as Error).message})`);
+  }
+}
+
+function populateDeviceSelect(
+  select: HTMLSelectElement,
+  devices: readonly AudioDeviceLike[],
+  selectedId: string,
+): void {
+  select.innerHTML = "";
+  const defaultOpt = document.createElement("option");
+  defaultOpt.value = "default";
+  defaultOpt.textContent = "System Default";
+  select.appendChild(defaultOpt);
+
+  for (const d of devices) {
+    const opt = document.createElement("option");
+    opt.value = d.deviceId;
+    opt.textContent = d.label || `Device ${d.deviceId.slice(0, 8)}`;
+    select.appendChild(opt);
+  }
+  select.value = devices.some(d => d.deviceId === selectedId) ? selectedId : "default";
+}
+
+function onDeviceChange(): void {
+  void refreshDeviceList();
+}
+
+$inputDevice.addEventListener("change", () => {
+  saveDeviceId(INPUT_DEVICE_KEY, $inputDevice.value);
+  setStatus(`Microphone set to ${$inputDevice.selectedOptions[0]?.textContent || "System Default"}`);
+});
+
+$outputDevice.addEventListener("change", () => {
+  saveDeviceId(OUTPUT_DEVICE_KEY, $outputDevice.value);
+  textToSpeech.updateConfig({ outputDevice: $outputDevice.value });
+  setStatus(`Speaker set to ${$outputDevice.selectedOptions[0]?.textContent || "System Default"}`);
+});
+
+function isMissingDeviceError(error: unknown): boolean {
+  const name = error && typeof error === "object" && "name" in error ? String(error.name) : "";
+  return name === "NotFoundError" || name === "OverconstrainedError";
+}
+
+async function getSelectedInputStream(baseConstraints: MediaTrackConstraints): Promise<MediaStream> {
+  const deviceId = $inputDevice.value;
+  const selectedConstraints: MediaTrackConstraints = { ...baseConstraints };
+  if (deviceId !== "default") selectedConstraints.deviceId = { exact: deviceId };
+
+  try {
+    return await navigator.mediaDevices.getUserMedia({ audio: selectedConstraints });
+  } catch (error) {
+    if (deviceId === "default" || !isMissingDeviceError(error)) throw error;
+    $inputDevice.value = "default";
+    saveDeviceId(INPUT_DEVICE_KEY, "default");
+    setStatus("Selected microphone disappeared; switched to System Default");
+    return navigator.mediaDevices.getUserMedia({ audio: baseConstraints });
+  }
+}
+
+// Test input mic with level meter
+async function startTestMic(): Promise<void> {
+  if (isTestingMic) return stopTestMic();
+  isTestingMic = true;
+  $btnTestInput.classList.add("hidden");
+  $btnStopTestInput.classList.remove("hidden");
+  $inputLevelMeter.classList.remove("hidden");
+
+  try {
+    testMicStream = await getSelectedInputStream({});
+    const ctx = new AudioContext();
+    const source = ctx.createMediaStreamSource(testMicStream);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 256;
+    analyser.smoothingTimeConstant = 0.4;
+    source.connect(analyser);
+    const arr = new Uint8Array(analyser.frequencyBinCount);
+
+    function tick(): void {
+      if (!isTestingMic) { ctx.close(); return; }
+      analyser.getByteFrequencyData(arr);
+      let sum = 0;
+      for (let i = 0; i < arr.length; i++) sum += arr[i];
+      const avg = sum / arr.length;
+      const pct = Math.min(100, Math.round((avg / 255) * 200));
+      $inputLevelBar.style.width = `${pct}%`;
+      $inputLevelBar.classList.toggle("warn", pct > 50 && pct <= 80);
+      $inputLevelBar.classList.toggle("hot", pct > 80);
+      testMicRaf = requestAnimationFrame(tick);
+    }
+    tick();
+
+    // Auto-stop after 10s
+    setTimeout(() => { if (isTestingMic) stopTestMic(); }, 10000);
+  } catch (err) {
+    setStatus(`Mic test failed: ${(err as Error).message}`);
+    stopTestMic();
+  }
+}
+
+function stopTestMic(): void {
+  isTestingMic = false;
+  if (testMicRaf) cancelAnimationFrame(testMicRaf);
+  testMicRaf = null;
+  if (testMicStream) {
+    testMicStream.getTracks().forEach(t => t.stop());
+    testMicStream = null;
+  }
+  $btnTestInput.classList.remove("hidden");
+  $btnStopTestInput.classList.add("hidden");
+  $inputLevelMeter.classList.add("hidden");
+  $inputLevelBar.style.width = "0%";
+  $inputLevelBar.classList.remove("warn", "hot");
+}
+
+$btnTestInput.addEventListener("click", startTestMic);
+$btnStopTestInput.addEventListener("click", stopTestMic);
+
+type SinkRoutableAudioContext = AudioContext & {
+  setSinkId?: (sinkId: string) => Promise<void>;
+};
+
+async function setAudioOutputDevice(ctx: AudioContext, deviceId: string): Promise<void> {
+  const setSinkId = (ctx as SinkRoutableAudioContext).setSinkId;
+  if (deviceId === "default") {
+    // An empty sink id selects the current OS default. This also reroutes an
+    // already-active context after its previously selected device is removed.
+    if (typeof setSinkId === "function") await setSinkId.call(ctx, "");
+    return;
+  }
+  if (typeof setSinkId !== "function") {
+    throw new Error("this browser cannot route audio to a selected output device");
+  }
+  await setSinkId.call(ctx, deviceId);
+}
+
+// Test output speaker
+async function testSpeaker(): Promise<void> {
+  let ctx: AudioContext | null = null;
+  try {
+    ctx = new AudioContext();
+    const devId = $outputDevice.value;
+    await setAudioOutputDevice(ctx, devId);
+    playTestTone(ctx, "Playing test tone...");
+  } catch (err) {
+    $outputDevice.value = "default";
+    saveDeviceId(OUTPUT_DEVICE_KEY, "default");
+    if (ctx) {
+      await setAudioOutputDevice(ctx, "default").catch(() => undefined);
+      playTestTone(ctx, `Selected speaker unavailable; using System Default (${(err as Error).message})`);
+    } else {
+      setStatus(`Speaker test failed: ${(err as Error).message}`);
+    }
+  }
+}
+
+function playTestTone(ctx: AudioContext, message: string): void {
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = "sine";
+  osc.frequency.value = 440;
+  gain.gain.setValueAtTime(0.3, ctx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
+  osc.connect(gain);
+  gain.connect(ctx.destination);
+  osc.addEventListener("ended", () => { void ctx.close(); }, { once: true });
+  osc.start(ctx.currentTime);
+  osc.stop(ctx.currentTime + 0.3);
+  setStatus(message);
+}
+
+$btnTestOutput.addEventListener("click", testSpeaker);
+
+// Initialize devices
+if (navigator.mediaDevices) {
+  void refreshDeviceList();
+  navigator.mediaDevices.addEventListener("devicechange", onDeviceChange);
+}
+
+// ---------------------------------------------------------------------------
+// TTS Provider selection
+// ---------------------------------------------------------------------------
+interface TtsProviderInfo {
+  id: string;
+  name: string;
+  description: string;
+  requires_api_key: boolean;
+  tier: "free" | "cheap" | "premium";
+  pricing_url: string;
+  approximate_cost_per_1m_chars: number;
+  has_api_key: boolean;
+}
+
+interface ProviderInfo {
+  id: string;
+  name: string;
+  description: string;
+  requires_api_key: boolean;
+  tier: "free" | "cheap" | "premium";
+  pricing_url: string;
+  signup_url?: string;
+  has_api_key: boolean;
+}
+
+let ttsProviders: TtsProviderInfo[] = [];
+let currentTtsProvider = "soniox";
+let ttsSessionUsage = emptyTtsUsage();
+const STT_DELAY_SECONDS_KEY = "sttDelaySeconds";
+const TTS_DELAY_SECONDS_KEY = "ttsDelaySeconds";
+const TTS_PLAYBACK_RATE_KEY = "ttsPlaybackRate";
+
+function readSttDelaySeconds(): number {
+  let saved: string | null = null;
+  try { saved = localStorage.getItem(STT_DELAY_SECONDS_KEY); } catch { /* storage disabled */ }
+  const value = Number(saved ?? "1.5");
+  return Number.isFinite(value) && value >= 0 && value <= 10 ? value : 1.5;
+}
+
+function updateSttDelaySelection(): void {
+  $sttDelayValue.textContent = $sttDelay.value;
+  try { localStorage.setItem(STT_DELAY_SECONDS_KEY, $sttDelay.value); } catch { /* storage disabled */ }
+  updateDelayStatusIndicator();
+}
+
+function currentSttDelaySeconds(): number {
+  const value = $sttDelay.valueAsNumber;
+  return Number.isFinite(value) && value >= 0 && value <= 10 ? value : 1.5;
+}
+
+function readTtsDelaySeconds(): number {
+  let saved: string | null = null;
+  try { saved = localStorage.getItem(TTS_DELAY_SECONDS_KEY); } catch { /* storage disabled */ }
+  const value = Number(saved ?? "0");
+  return Number.isFinite(value) && value >= 0 && value <= 10 ? value : 0;
+}
+
+function updateTtsDelaySelection(): void {
+  $ttsDelayValue.textContent = $ttsDelay.value;
+  try { localStorage.setItem(TTS_DELAY_SECONDS_KEY, $ttsDelay.value); } catch { /* storage disabled */ }
+  textToSpeech.updateConfig({ ttsDelaySeconds: currentTtsDelaySeconds() });
+  updateDelayStatusIndicator();
+}
+
+function currentTtsDelaySeconds(): number {
+  const value = $ttsDelay.valueAsNumber;
+  return Number.isFinite(value) && value >= 0 && value <= 10 ? value : 0;
+}
+
+function readTtsPlaybackRate(): number {
+  let saved: string | null = null;
+  try { saved = localStorage.getItem(TTS_PLAYBACK_RATE_KEY); } catch { /* storage disabled */ }
+  const value = Number(saved ?? "1");
+  return Number.isFinite(value) && value >= 0.25 && value <= 2 ? value : 1;
+}
+
+function currentTtsPlaybackRate(): number {
+  const value = $ttsPlaybackRate.valueAsNumber;
+  return Number.isFinite(value) && value >= 0.25 && value <= 2 ? value : 1;
+}
+
+function formatTtsPlaybackRate(value: number): string {
+  return `${value.toFixed(2).replace(/0$/, "")}x`;
+}
+
+function updateTtsPlaybackRateSelection(): void {
+  $ttsPlaybackRateValue.textContent = formatTtsPlaybackRate($ttsPlaybackRate.valueAsNumber);
+  try { localStorage.setItem(TTS_PLAYBACK_RATE_KEY, $ttsPlaybackRate.value); } catch { /* storage disabled */ }
+  textToSpeech.updateConfig({ playbackRate: currentTtsPlaybackRate() });
+  updateDelayStatusIndicator();
+}
+
+$sttDelay.value = String(readSttDelaySeconds());
+$sttDelayValue.textContent = $sttDelay.value;
+$sttDelay.addEventListener("input", updateSttDelaySelection);
+$ttsDelay.value = String(readTtsDelaySeconds());
+$ttsDelayValue.textContent = $ttsDelay.value;
+$ttsDelay.addEventListener("input", updateTtsDelaySelection);
+$ttsPlaybackRate.value = String(readTtsPlaybackRate());
+$ttsPlaybackRateValue.textContent = formatTtsPlaybackRate($ttsPlaybackRate.valueAsNumber);
+$ttsPlaybackRate.addEventListener("input", updateTtsPlaybackRateSelection);
+
+function updateTtsCostHint(): void {
+  const provider = ttsProviders.find((item) => item.id === currentTtsProvider);
+  if (!provider) {
+    $ttsCostHint.textContent = "";
+    return;
+  }
+  $ttsCostHint.textContent = formatTtsCostHint(
+    provider.approximate_cost_per_1m_chars,
+    ttsSessionUsage,
+  );
+}
+
+async function loadTtsProviders(): Promise<void> {
+  try {
+    const resp = await fetch("/api/tts/providers");
+    ttsProviders = await resp.json();
+    populateTtsProviderSelect();
+    // Also load config
+    const cfgResp = await fetch("/api/tts/config");
+    const cfg = await cfgResp.json() as {
+      current_provider?: string;
+      current_voice?: string;
+      current_provider_key_masked?: string;
+    };
+    currentTtsProvider = cfg.current_provider || "soniox";
+    $ttsProvider.value = currentTtsProvider;
+    await onTtsProviderChange(cfg.current_voice || "");
+    if (cfg.current_provider_key_masked) {
+      $ttsApiKey.placeholder = `✓ Đã lưu: ${cfg.current_provider_key_masked} — nhập key mới để thay đổi`;
+    }
+  } catch {
+    setTimeout(loadTtsProviders, 3000);
+  }
+}
+
+function populateTtsProviderSelect(): void {
+  $ttsProvider.innerHTML = "";
+  for (const p of ttsProviders) {
+    const opt = document.createElement("option");
+    opt.value = p.id;
+    opt.textContent = `${p.name}${p.has_api_key ? " [key]" : ""}`;
+    $ttsProvider.appendChild(opt);
+  }
+}
+
+async function onTtsProviderChange(savedVoice = ""): Promise<void> {
+  const pid = $ttsProvider.value;
+  currentTtsProvider = pid;
+  const provider = ttsProviders.find(p => p.id === pid);
+
+  // Show/hide API key row
+  $ttsApiKeyRow.style.display = "block";
+  $ttsApiKeyRow.classList.toggle("provider-no-key", !provider?.requires_api_key);
+  $ttsTierBadge.textContent = provider?.tier || "";
+  $ttsTierBadge.dataset.tier = provider?.tier || "";
+  $ttsProviderDescription.textContent = provider?.description || "";
+  $ttsKeyLink.href = provider?.pricing_url || "#";
+
+  // Auto-detect saved TTS key — keep input editable so the user can change it.
+  const ttsHasKey = provider?.has_api_key ?? false;
+  if (ttsHasKey) {
+    $ttsApiKey.placeholder = `✓ Đã lưu key cho ${provider?.name ?? pid} — nhập key mới để thay đổi`;
+  } else {
+    $ttsApiKey.placeholder = "Enter API key...";
+  }
+  $ttsApiKey.disabled = false;
+
+  updateTtsCostHint();
+
+  // Load voices
+  await loadTtsVoices(pid, savedVoice);
+}
+
+async function loadTtsVoices(providerId: string, savedVoice = ""): Promise<void> {
+  $ttsVoice.innerHTML = '<option value="">Loading...</option>';
+  try {
+    const lang = $mode() === "two_way" ? $langB.value : $targetLang.value;
+    const resp = await fetch(`/api/tts/providers/${providerId}/voices?lang=${lang}`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const voices = await resp.json() as Array<{ id: string; name: string }>;
+    $ttsVoice.innerHTML = "";
+    for (const v of voices) {
+      const opt = document.createElement("option");
+      opt.value = v.id;
+      opt.textContent = v.name;
+      $ttsVoice.appendChild(opt);
+    }
+    if (savedVoice && voices.some((voice) => voice.id === savedVoice)) {
+      $ttsVoice.value = savedVoice;
+    }
+  } catch {
+    $ttsVoice.innerHTML = '<option value="">Error loading</option>';
+  }
+}
+
+async function saveTtsSelection(): Promise<void> {
+  const response = await fetch("/api/tts/config", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider_id: $ttsProvider.value, voice: $ttsVoice.value }),
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+}
+
+$ttsProvider.addEventListener("change", () => {
+  void (async () => {
+    await onTtsProviderChange();
+    await saveTtsSelection();
+  })().catch((error: unknown) => setStatus(`Không thể lưu TTS provider: ${(error as Error).message}`));
+});
+
+$ttsVoice.addEventListener("change", () => {
+  void saveTtsSelection().catch((error: unknown) => {
+    setStatus(`Không thể lưu TTS voice: ${(error as Error).message}`);
+  });
+});
+
+async function saveTtsKey(): Promise<void> {
+  const pid = $ttsProvider.value;
+  const key = $ttsApiKey.value.trim();
+  if (!key) {
+    $ttsTestStatus.textContent = "❌ Enter an API key to save";
+    return;
+  }
+  $ttsTestStatus.textContent = "Saving…";
+  try {
+    const response = await fetch("/api/tts/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider_id: pid, api_key: key, voice: $ttsVoice.value }),
+    });
+    const result = await response.json() as { ok: boolean; message?: string };
+    if (result.ok) {
+      $ttsTestStatus.textContent = "✅ Key saved";
+      setStatus("TTS API key saved");
+      await loadTtsProviders();
+    } else {
+      $ttsTestStatus.textContent = `❌ ${result.message || "Failed to save"}`;
+    }
+  } catch (error) {
+    $ttsTestStatus.textContent = `❌ ${(error as Error).message}`;
+  }
+}
+
+$btnSaveTtsKey.addEventListener("click", () => { void saveTtsKey(); });
+
+$btnTestTtsKey.addEventListener("click", async () => {
+  const pid = $ttsProvider.value;
+  const key = $ttsApiKey.value.trim();
+  const provider = ttsProviders.find((item) => item.id === pid);
+  if (!key && provider?.requires_api_key) {
+    $ttsTestStatus.textContent = "❌ API key is required";
+    return;
+  }
+  try {
+    $ttsTestStatus.textContent = "Testing…";
+    const response = await fetch(`/api/tts/providers/${pid}/test`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ api_key: key }),
+    });
+    const result = await response.json() as { ok: boolean; message: string };
+    $ttsTestStatus.textContent = `${result.ok ? "✅" : "❌"} ${result.message}`;
+    if (result.ok) {
+      setStatus("TTS connection verified and key saved");
+      await loadTtsProviders();
+    }
+  } catch (error) {
+    $ttsTestStatus.textContent = `❌ ${(error as Error).message}`;
+  }
+});
+
+let sttProviders: ProviderInfo[] = [];
+let translationProviders: ProviderInfo[] = [];
+
+function populateProviderSelect(select: HTMLSelectElement, providers: ProviderInfo[]): void {
+  select.innerHTML = "";
+  for (const provider of providers) {
+    const option = document.createElement("option");
+    option.value = provider.id;
+    option.textContent = `${provider.name}${provider.has_api_key ? " [key]" : ""}`;
+    select.appendChild(option);
+  }
+}
+
+function showProviderMeta(
+  select: HTMLSelectElement,
+  providers: ProviderInfo[],
+  keyRow: HTMLElement,
+  badge: HTMLElement,
+  description: HTMLElement,
+  link: HTMLAnchorElement,
+): void {
+  const provider = providers.find((item) => item.id === select.value);
+  keyRow.classList.remove("hidden");
+  keyRow.classList.toggle("provider-no-key", !provider?.requires_api_key);
+  badge.textContent = provider?.tier || "";
+  badge.dataset.tier = provider?.tier || "";
+  description.textContent = provider?.description || "";
+  link.href = provider?.signup_url || provider?.pricing_url || "#";
+}
+
+async function loadDomainProviders(
+  domain: "stt" | "translation",
+  select: HTMLSelectElement,
+): Promise<{ providers: ProviderInfo[]; maskedKey: string }> {
+  const [providersResponse, configResponse] = await Promise.all([
+    fetch(`/api/${domain}/providers`),
+    fetch(`/api/${domain}/config`),
+  ]);
+  if (!providersResponse.ok || !configResponse.ok) throw new Error(`Could not load ${domain} providers`);
+  const providers = await providersResponse.json() as ProviderInfo[];
+  const config = await configResponse.json() as {
+    current_provider?: string;
+    api_key_masked?: string;
+    api_key_present?: boolean;
+  };
+  populateProviderSelect(select, providers);
+  select.value = config.current_provider || "soniox";
+  return { providers, maskedKey: config.api_key_masked || "" };
+}
+
+async function testDomainProvider(
+  domain: "stt" | "translation",
+  select: HTMLSelectElement,
+  input: HTMLInputElement,
+  status: HTMLElement,
+): Promise<void> {
+  status.textContent = "Testing…";
+  try {
+    const response = await fetch(`/api/${domain}/providers/${select.value}/test`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ api_key: input.value.trim() }),
+    });
+    const result = await response.json() as { ok: boolean; message: string };
+    status.textContent = `${result.ok ? "✅" : "❌"} ${result.message}`;
+    if (result.ok) {
+      setStatus(`${domain === "stt" ? "STT" : "Translation"} connection verified and key saved`);
+    }
+  } catch (error) {
+    status.textContent = `❌ ${(error as Error).message}`;
+  }
+}
+
+function updateKeyInputState(
+  select: HTMLSelectElement,
+  providers: ProviderInfo[],
+  input: HTMLInputElement,
+  status: HTMLSpanElement,
+  maskedKey = "",
+): void {
+  const provider = providers.find((p) => p.id === select.value);
+  const hasKey = provider?.has_api_key ?? false;
+  input.disabled = false;
+  if (hasKey) {
+    input.placeholder = maskedKey
+      ? `✓ Đã lưu: ${maskedKey} — nhập key mới để thay đổi`
+      : `✓ Đã lưu key cho ${provider?.name ?? select.value} — nhập key mới để thay đổi`;
+    status.textContent = "";
+  } else {
+    input.placeholder = "Enter API key...";
+  }
+}
+
+async function loadSpeechProviders(): Promise<void> {
+  try {
+    const stt = await loadDomainProviders("stt", $sttProvider);
+    sttProviders = stt.providers;
+    showProviderMeta($sttProvider, sttProviders, $sttApiKeyRow, $sttTierBadge, $sttProviderDescription, $sttKeyLink);
+    const translation = await loadDomainProviders("translation", $translationProvider);
+    translationProviders = translation.providers;
+    showProviderMeta(
+      $translationProvider, translationProviders, $translationApiKeyRow,
+      $translationTierBadge, $translationProviderDescription, $translationKeyLink,
+    );
+    // Auto-detect saved provider keys but keep inputs editable.
+    updateKeyInputState($sttProvider, sttProviders, $sttApiKey, $sttTestStatus, stt.maskedKey);
+    updateKeyInputState($translationProvider, translationProviders, $translationApiKey, $translationTestStatus, translation.maskedKey);
+  } catch {
+    window.setTimeout(() => { void loadSpeechProviders(); }, 3000);
+  }
+}
+
+$sttProvider.addEventListener("change", () => {
+  $sttTestStatus.textContent = "";
+  showProviderMeta($sttProvider, sttProviders, $sttApiKeyRow, $sttTierBadge, $sttProviderDescription, $sttKeyLink);
+  updateKeyInputState($sttProvider, sttProviders, $sttApiKey, $sttTestStatus);
+});
+$translationProvider.addEventListener("change", () => {
+  $translationTestStatus.textContent = "";
+  showProviderMeta(
+    $translationProvider, translationProviders, $translationApiKeyRow,
+    $translationTierBadge, $translationProviderDescription, $translationKeyLink,
+  );
+  updateKeyInputState($translationProvider, translationProviders, $translationApiKey, $translationTestStatus);
+});
+async function saveDomainKey(
+  domain: "stt" | "translation",
+  select: HTMLSelectElement,
+  input: HTMLInputElement,
+  status: HTMLSpanElement,
+): Promise<void> {
+  const pid = select.value;
+  const key = input.value.trim();
+  if (!key) {
+    status.textContent = "❌ Enter an API key to save";
+    return;
+  }
+  status.textContent = "Saving…";
+  try {
+    const response = await fetch(`/api/${domain}/config`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider_id: pid, api_key: key }),
+    });
+    const result = await response.json() as { ok: boolean; message?: string };
+    if (result.ok) {
+      status.textContent = "✅ Key saved";
+      setStatus(`${domain === "stt" ? "STT" : "Translation"} API key saved`);
+      await loadSpeechProviders();
+    } else {
+      status.textContent = `❌ ${result.message || "Failed to save"}`;
+    }
+  } catch (error) {
+    status.textContent = `❌ ${(error as Error).message}`;
+  }
+}
+
+$btnSaveSttKey.addEventListener("click", () => {
+  void saveDomainKey("stt", $sttProvider, $sttApiKey, $sttTestStatus);
+});
+$btnTestSttKey.addEventListener("click", () => {
+  void testDomainProvider("stt", $sttProvider, $sttApiKey, $sttTestStatus);
+});
+$btnSaveTranslationKey.addEventListener("click", () => {
+  void saveDomainKey("translation", $translationProvider, $translationApiKey, $translationTestStatus);
+});
+$btnTestTranslationKey.addEventListener("click", () => {
+  void testDomainProvider(
+    "translation", $translationProvider, $translationApiKey, $translationTestStatus,
+  );
+});
+
+// ── Save configuration button ──
+$saveConfigBtn.addEventListener("click", async () => {
+  $saveConfigStatus.classList.remove("hidden");
+  $saveConfigStatus.textContent = "Đang lưu…";
+  try {
+    const ttsKeyInput = $ttsApiKey.value.trim();
+    const sttKeyInput = $sttApiKey.value.trim();
+    const translationKeyInput = $translationApiKey.value.trim();
+
+    // Only send non-empty keys so we don't overwrite stored keys with blanks.
+    const payload: Record<string, string> = {
+      tts_provider: $ttsProvider.value,
+      tts_voice: $ttsVoice.value,
+      stt_provider: $sttProvider.value,
+      translation_provider: $translationProvider.value,
+    };
+    if (ttsKeyInput) payload["tts_api_key"] = ttsKeyInput;
+    if (sttKeyInput) payload["stt_api_key"] = sttKeyInput;
+    if (translationKeyInput) payload["translation_api_key"] = translationKeyInput;
+
+    const r = await fetch("/api/config/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await r.json() as { ok: boolean };
+    if (data.ok) {
+      $saveConfigStatus.textContent = "✅ Đã lưu cấu hình";
+      // Reload providers so [key] badges and has_api_key flags update.
+      await loadTtsProviders();
+      await loadSpeechProviders();
+      // Keep key inputs visible so the user can still review/edit them.
+    } else {
+      $saveConfigStatus.textContent = "❌ Lỗi khi lưu";
+    }
+  } catch (error) {
+    $saveConfigStatus.textContent = `❌ ${(error as Error).message}`;
+  }
+  window.setTimeout(() => {
+    $saveConfigStatus.textContent = "";
+    $saveConfigStatus.classList.add("hidden");
+  }, 4000);
+});
+
+void loadSpeechProviders();
+
+// Load providers on startup
+loadTtsProviders();
+
+$btnRetry.addEventListener("click", () => {
+  void retryConnection();
+});
 
 // ---------------------------------------------------------------------------
 // Mode toggle
@@ -164,129 +964,257 @@ function syncMode(): void {
   $oneWayBlock.classList.toggle("hidden", two);
   $twoWayBlock.classList.toggle("hidden", !two);
   $voiceBBlock.classList.toggle("hidden", !two);
+  if (ttsProviders.length) void loadTtsVoices(currentTtsProvider, $ttsVoice.value);
 }
 
 document.querySelectorAll<HTMLInputElement>("input[name=mode]").forEach((r) =>
   r.addEventListener("change", syncMode),
 );
 syncMode();
+$targetLang.addEventListener("change", () => {
+  if (ttsProviders.length) void loadTtsVoices(currentTtsProvider, $ttsVoice.value);
+});
+$langB.addEventListener("change", () => {
+  if (ttsProviders.length && $mode() === "two_way") {
+    void loadTtsVoices(currentTtsProvider, $ttsVoice.value);
+  }
+});
 
 const DEFAULT_AUDIO_URL = "https://soniox.com/media/examples/spanish_weather_report.mp3";
 $audioUrl.value = new URLSearchParams(location.search).get("audio") || DEFAULT_AUDIO_URL;
 
 // ---------------------------------------------------------------------------
-// Session History (IndexedDB)
+// Conversation history (SQLite REST API)
 // ---------------------------------------------------------------------------
-async function saveToHistory(utts: Utterance[], translationMode: string, targetLang: string): Promise<void> {
-  const final = utts.filter((u) => u.originalFinal || u.translationFinal);
-  if (!final.length) return;
-  await saveSession({
-    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-    ts: Date.now(),
-    mode: translationMode,
-    targetLang,
-    utteranceCount: final.length,
-    utterances: final,
-  });
-  const panel = document.getElementById("history-panel");
-  if (panel?.classList.contains("open")) void renderHistoryPanel();
+const HISTORY_PAGE_SIZE = 10;
+const RETENTION_DAYS_KEY = "soniox-retention-days";
+let historyItems: ConversationSummary[] = [];
+let historyOffset = 0;
+let historyHasMore = false;
+let historyLoading = false;
+let historyQuery = "";
+let historyRequestId = 0;
+
+function escapeHtml(value: unknown): string {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }
 
-async function renderHistoryPanel(): Promise<void> {
-  const list = document.getElementById("history-list");
-  if (!list) return;
-  const entries = await listSessions();
-  if (!entries.length) {
-    list.innerHTML = '<p class="history-empty">Chưa có phiên nào.</p>';
-    return;
-  }
-  list.innerHTML = entries
-    .map((e) => {
-      const date    = new Date(e.ts).toLocaleString("vi-VN", { dateStyle: "short", timeStyle: "short" });
-      const arrow   = e.mode === "two_way" ? "↔" : "→";
-      const preview = (e.utterances[0]?.originalFinal ?? "").slice(0, 72);
+function readRetentionDays(): number {
+  let saved = "30";
+  try { saved = localStorage.getItem(RETENTION_DAYS_KEY) || "30"; } catch { /* storage disabled */ }
+  const parsed = Number(saved);
+  return Number.isInteger(parsed) && parsed >= 1 && parsed <= 3650 ? parsed : 30;
+}
+
+function renderHistoryPanel(): void {
+  if (!historyItems.length) {
+    $historyList.innerHTML = historyLoading
+      ? '<p class="history-empty">Đang tải…</p>'
+      : '<p class="history-empty">Không có hội thoại phù hợp.</p>';
+  } else {
+    $historyList.innerHTML = historyItems.map((entry) => {
+      const date = new Date(entry.started_at).toLocaleString("vi-VN", {
+        dateStyle: "short",
+        timeStyle: "short",
+      });
+      const arrow = entry.mode === "two_way" ? "↔" : "→";
+      const preview = entry.preview ? escapeHtml(entry.preview.slice(0, 100)) : "(chưa có nội dung)";
       return `<div class="history-item">
         <div class="history-meta">
-          <span class="history-date">${date}</span>
-          <span class="history-badge">${arrow}&nbsp;${e.targetLang.toUpperCase()}</span>
-          <span class="history-count">${e.utteranceCount} câu</span>
+          <span class="history-date">${escapeHtml(date)}</span>
+          <span class="history-badge">${arrow}&nbsp;${escapeHtml(entry.target_lang.toUpperCase())}</span>
+          <span class="history-count">${entry.segment_count} câu</span>
         </div>
-        <div class="history-preview">${preview}…</div>
+        <div class="history-preview">${preview}</div>
         <div class="history-actions">
-          <button class="hbtn hbtn-view" data-id="${e.id}">Xem</button>
-          <button class="hbtn hbtn-json" data-id="${e.id}">JSON</button>
-          <button class="hbtn hbtn-csv"  data-id="${e.id}">CSV</button>
-          <button class="hbtn hbtn-del"  data-id="${e.id}">🗑</button>
+          <button class="hbtn hbtn-view" data-id="${escapeHtml(entry.id)}">Xem</button>
+          <button class="hbtn hbtn-export" data-format="txt" data-id="${escapeHtml(entry.id)}">TXT</button>
+          <button class="hbtn hbtn-export" data-format="srt" data-id="${escapeHtml(entry.id)}">SRT</button>
+          <button class="hbtn hbtn-export" data-format="json" data-id="${escapeHtml(entry.id)}">JSON</button>
+          <button class="hbtn hbtn-del" data-id="${escapeHtml(entry.id)}">🗑</button>
         </div>
       </div>`;
-    })
-    .join("");
+    }).join("");
+  }
 
-  list.querySelectorAll<HTMLButtonElement>(".hbtn-view").forEach((b) => {
-    b.onclick = () => {
-      void (async () => {
-        const e = await getSession(b.dataset.id!);
-        if (e) { utterances = e.utterances; render(); }
-      })();
-    };
+  $historyLoadMore.classList.toggle("hidden", !historyHasMore);
+  $historyLoadMore.disabled = historyLoading;
+  $historySearchButton.disabled = historyLoading;
+
+  $historyList.querySelectorAll<HTMLButtonElement>(".hbtn-view").forEach((button) => {
+    button.addEventListener("click", () => { void viewConversation(button.dataset.id || ""); });
   });
-  list.querySelectorAll<HTMLButtonElement>(".hbtn-json").forEach((b) => {
-    b.onclick = () => {
-      void (async () => {
-        const e = await getSession(b.dataset.id!);
-        if (e) downloadBlob(new Blob([JSON.stringify(e, null, 2)], { type: "application/json" }), `transcript-${e.id}.json`);
-      })();
-    };
+  $historyList.querySelectorAll<HTMLButtonElement>(".hbtn-export").forEach((button) => {
+    button.addEventListener("click", () => {
+      void exportSavedConversation(
+        button.dataset.id || "",
+        button.dataset.format as ConversationExportFormat,
+      );
+    });
   });
-  list.querySelectorAll<HTMLButtonElement>(".hbtn-csv").forEach((b) => {
-    b.onclick = () => {
-      void (async () => {
-        const e = await getSession(b.dataset.id!);
-        if (!e) return;
-        const rows = [
-          ["speaker", "language", "original", "translation"].join(","),
-          ...e.utterances.map((u: Utterance) =>
-            [u.speaker ?? "", u.language ?? "",
-             `"${(u.originalFinal ?? "").replace(/"/g, '""')}"`,
-             `"${(u.translationFinal ?? "").replace(/"/g, '""')}"`,
-            ].join(",")
-          ),
-        ];
-        downloadBlob(new Blob(["\uFEFF" + rows.join("\r\n")], { type: "text/csv;charset=utf-8" }), `transcript-${e.id}.csv`);
-      })();
-    };
-  });
-  list.querySelectorAll<HTMLButtonElement>(".hbtn-del").forEach((b) => {
-    b.onclick = () => { void (async () => { await deleteSession(b.dataset.id!); await renderHistoryPanel(); })(); };
+  $historyList.querySelectorAll<HTMLButtonElement>(".hbtn-del").forEach((button) => {
+    button.addEventListener("click", () => { void removeSavedConversation(button.dataset.id || ""); });
   });
 }
 
-async function toggleHistoryPanel(): Promise<void> {
-  const panel = document.getElementById("history-panel");
-  const btn   = document.getElementById("btn-history-toggle");
-  if (!panel || !btn) return;
-  const open = panel.classList.toggle("open");
-  btn.textContent = open ? "Lịch sử ▲" : "Lịch sử ▼";
-  if (open) await renderHistoryPanel();
+async function loadHistory(reset: boolean): Promise<void> {
+  if (historyLoading && !reset) return;
+  const requestId = ++historyRequestId;
+  historyLoading = true;
+  if (reset) {
+    historyItems = [];
+    historyOffset = 0;
+    historyHasMore = false;
+  }
+  renderHistoryPanel();
+  try {
+    const page = await fetchConversationPage(historyQuery, historyOffset, HISTORY_PAGE_SIZE);
+    if (requestId !== historyRequestId) return;
+    historyItems.push(...page.items);
+    historyOffset += page.items.length;
+    historyHasMore = page.hasMore;
+  } catch (error) {
+    if (requestId !== historyRequestId) return;
+    setStatus(`Không thể tải lịch sử: ${(error as Error).message}`);
+  } finally {
+    if (requestId !== historyRequestId) return;
+    historyLoading = false;
+    renderHistoryPanel();
+  }
 }
+
+async function viewConversation(id: string): Promise<void> {
+  try {
+    const conversation = await fetchConversation(id);
+    utterances = conversation.segments
+      .filter((segment) => segment.is_final === 1)
+      .map((segment) => {
+        const speaker = segment.speaker_label === null ? Number.NaN : Number(segment.speaker_label);
+        return {
+          speaker: Number.isFinite(speaker) ? speaker : null,
+          language: segment.source_lang,
+          originalFinal: segment.original_text,
+          originalPartial: "",
+          translationFinal: segment.translated_text || "",
+          translationPartial: "",
+        };
+      });
+    currentUtt = newUtt();
+    displayUtteranceOpen = false;
+    // A history selection replaces the entire model, not merely appends to it.
+    renderedFinalCount = Number.POSITIVE_INFINITY;
+    render();
+    setStatus(`Đã mở hội thoại ${id} (${utterances.length} câu)`);
+  } catch (error) {
+    setStatus(`Không thể mở hội thoại: ${(error as Error).message}`);
+  }
+}
+
+async function exportSavedConversation(id: string, format: ConversationExportFormat): Promise<void> {
+  try {
+    const exported = await fetchConversationExport(id, format);
+    downloadBlob(exported.blob, exported.filename);
+    setStatus(`Đã tải ${exported.filename}`);
+  } catch (error) {
+    setStatus(`Export ${format.toUpperCase()} thất bại: ${(error as Error).message}`);
+  }
+}
+
+async function removeSavedConversation(id: string): Promise<void> {
+  if (!window.confirm("Xóa vĩnh viễn hội thoại này?")) return;
+  try {
+    await deleteConversation(id);
+    await loadHistory(true);
+    await refreshRetentionStats();
+    setStatus("Đã xóa hội thoại");
+  } catch (error) {
+    setStatus(`Không thể xóa hội thoại: ${(error as Error).message}`);
+  }
+}
+
+async function refreshRetentionStats(): Promise<void> {
+  try {
+    const stats = await fetchRetentionStats();
+    $retentionStats.textContent = `${stats.conversations} hội thoại · ${stats.segments} câu · ${stats.db_size_mb} MB`;
+  } catch {
+    $retentionStats.textContent = "Không đọc được thống kê lưu trữ";
+  }
+}
+
+async function runRetentionCleanup(): Promise<void> {
+  const days = Math.max(1, Math.min(3650, Number($retentionDays.value) || 30));
+  $retentionDays.value = String(days);
+  try { localStorage.setItem(RETENTION_DAYS_KEY, String(days)); } catch { /* storage disabled */ }
+  if (!window.confirm(`Xóa các hội thoại đã kết thúc quá ${days} ngày?`)) return;
+  $retentionCleanup.disabled = true;
+  try {
+    const deleted = await cleanupConversations(days);
+    await loadHistory(true);
+    await refreshRetentionStats();
+    setStatus(`Đã dọn ${deleted} hội thoại cũ`);
+  } catch (error) {
+    setStatus(`Dọn lịch sử thất bại: ${(error as Error).message}`);
+  } finally {
+    $retentionCleanup.disabled = false;
+  }
+}
+
+function toggleHistoryPanel(): void {
+  const button = document.getElementById("btn-history-toggle");
+  const open = $historyPanel.classList.toggle("open");
+  if (button) button.textContent = open ? "Lịch sử ▲" : "Lịch sử ▼";
+  if (open) {
+    void loadHistory(true);
+    void refreshRetentionStats();
+  }
+}
+
+$retentionDays.value = String(readRetentionDays());
+$historyLoadMore.addEventListener("click", () => { void loadHistory(false); });
+$retentionCleanup.addEventListener("click", () => { void runRetentionCleanup(); });
+document.getElementById("history-search-form")?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  historyQuery = $historySearch.value.trim();
+  void loadHistory(true);
+});
 
 // ---------------------------------------------------------------------------
 // Runtime state
 // ---------------------------------------------------------------------------
 let mode: AppMode = "file";
 let state: AppState = "idle";
-let mediaRecorder: MediaRecorder | null = null;
-let audioCtx: AudioContext | null = null;
-let nextPlayTime = 0;
 let utterances: Utterance[] = [];
 let currentUtt = newUtt();
+// A false `is_endpoint` line_ready is an early TTS buffering chunk, not a
+// display boundary. This tracks the one transcript block that may receive
+// more chunks until Soniox sends its actual `<end>` endpoint.
+let displayUtteranceOpen = false;
 let fileAudio: HTMLAudioElement | null = null;
 let fileTtsHeard = false;
-let ws: WebSocket | null = null;
-let sessionId: string | null = null;
+let feedAutoScroll = true;
+// Transcript DOM cache. Final lines are append-only except for the active
+// endpoint's final line, which can receive an early TTS buffering chunk.
+let renderedFinalCount = 0;
+let interimFeedLine: HTMLDivElement | null = null;
 
-// Scheduled TTS audio sources for barge-in interrupt.
-let activeSources: AudioBufferSourceNode[] = [];
+// AudioWorklet PCM capture state (replaces MediaRecorder for lower latency)
+let captureCtx: AudioContext | null = null;
+let captureWorklet: AudioWorkletNode | null = null;
+let micStream: MediaStream | null = null;
+// When true, the worklet sends silence instead of real audio (anti TTS self-hear).
+let captureMuted = false;
+// True when the selected input device is a virtual loopback (VB-Cable, BlackHole,
+// VoiceMeeter, Stereo Mix, etc.).  In that case TTS output is routed straight back
+// into the capture stream, so we must hard-mute capture while TTS is audible,
+// exactly like we do for tab-capture, rather than just ducking the mic.
+let isVirtualLoopbackInput = false;
+// Interval that checks whether TTS is audible and mutes/unmutes capture in tab mode.
+let ttsMuteCheckInterval: ReturnType<typeof setInterval> | null = null;
 
 // Barge-in VAD state
 let bargeAnalyser: AnalyserNode | null = null;
@@ -294,25 +1222,14 @@ let bargeArray: Uint8Array<ArrayBuffer> | null = null;
 let bargeRaf: number | null = null;
 let bargeHoldSince = 0;
 let bargeArmed = false;
-let micStream: MediaStream | null = null;
-// Timestamp of the most recent empty -> non-empty transition of
-// activeSources (i.e. a new TTS chunk started playing after silence).
+// Timestamp of the most recent silent -> audible TTS transition.
 // Used to suppress barge-in during the initial grace window, since the
 // onset "pop" of TTS audio can be picked up by the mic as echo.
 let bargeTtsStartedAt = 0;
 let wasTtsAudible = false;
 
-// WebSocket auto-reconnect state.
-let reconnectAttempt = 0;
-let reconnectTimer: number | null = null;
-let intentionalClose = false;
-let lastExtraParams: Record<string, string> = {};
-let pendingAudioChunks: Blob[] = [];
-const PENDING_AUDIO_MAX = 300;
-
 
 function newUtt(): Utterance {
-
   return {
     speaker: null,
     language: null,
@@ -324,168 +1241,108 @@ function newUtt(): Utterance {
 }
 
 // ---------------------------------------------------------------------------
-// WebSocket
+// Independent STT and TTS modules
 // ---------------------------------------------------------------------------
-function openWebSocket(extraParams: Record<string, string> = {}): Promise<void> {
-  lastExtraParams = extraParams;
-  const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  const m = $mode();
-
-  const params = new URLSearchParams({
-    mode: m,
-    lang_id: String($langId.checked),
-    diarize: String($diarization.checked),
-    tts: String($tts.checked),
-    ...extraParams,
-  });
-
-  if (m === "one_way") {
-    params.set("target_lang", $targetLang.value);
-    params.set("voice", $voice.value);
-    params.set("provider", $providerA.value);
-  } else {
-    params.set("lang_a", $langA.value);
-    params.set("lang_b", $langB.value);
-    params.set("target_lang", $langB.value);
-    params.set("voice", $voice.value);
-    params.set("provider", $providerA.value);
-    params.set("voice_b", $voiceB.value);
-    params.set("provider_b", $providerB.value);
-  }
-
-  const ctxText = $contextJson.value.trim();
-  if (ctxText) {
-    try {
-      JSON.parse(ctxText);
-      params.set("context_b64", b64Utf8(ctxText));
-    } catch (e) {
-      setStatus(`Context JSON invalid: ${(e as Error).message}`);
-      return Promise.reject(new Error("invalid context json"));
-    }
-  }
-
-  const url = `${proto}//${location.host}/ws/translate?${params}`;
-  ws = new WebSocket(url);
-  ws.binaryType = "arraybuffer";
-
-  ws.onmessage = (event: MessageEvent) => {
-    if (typeof event.data === "string") {
-      const data: SonioxSttResponse = JSON.parse(event.data);
-      if (data.session_id) {
-        sessionId = data.session_id;
-        showSessionInfo(sessionId);
-        return;
+const textToSpeech = new TextToSpeech(
+  {
+    onLineStarted: () => {
+      if (state === "playing-file" && fileAudio && !fileTtsHeard) {
+        fileTtsHeard = true;
+        fileAudio.volume = 0.1;
       }
-      if (data.error_code || data.error_message) {
-        console.error("Server error:", data.error_code, data.error_message);
-        intentionalClose = true;
-        setState("idle", data.error_message || `Server error: ${data.error_code}`);
-        cleanup();
-        return;
-      }
-      if (data.barge_ack) return;
-      handleSttResult(data);
-    } else {
-      handleTtsAudio(new Uint8Array(event.data as ArrayBuffer));
+    },
+    onLineFinished: () => updateDelayStatusIndicator(),
+    onQueueChanged: () => updateDelayStatusIndicator(),
+    onError: (message) => showTtsErrorBanner(message),
+  },
+  {
+    outputDevice: $outputDevice.value || "default",
+    ttsDelaySeconds: currentTtsDelaySeconds(),
+    playbackRate: currentTtsPlaybackRate(),
+  },
+);
+
+const speechToText = new SpeechToText({
+  onTranscript: handleSttResult,
+  onLineReady: handleLineReady,
+  onAudioChunk: (chunk, lineId, isLastChunk) => {
+    textToSpeech.addAudioChunk(chunk, lineId, isLastChunk);
+  },
+  onSessionId: (id, isResume) => {
+    showSessionInfo(id);
+    if (isResume) sendTranscriptSnapshot();
+  },
+  onReconnecting: (attempt, maxAttempts) => {
+    setConnectionStatus("reconnecting");
+    setStatus(`Đang kết nối lại… (lần ${attempt}/${maxAttempts})`);
+  },
+  onReconnected: (downtimeMs, downtimeText) => {
+    setConnectionStatus("connected");
+    setStatus(`Đã kết nối lại sau ${(downtimeMs / 1000).toFixed(1)}s`);
+    if (downtimeText) {
+      currentUtt.originalFinal += downtimeText;
+      render();
     }
-  };
-
-  ws.onclose = (event: CloseEvent) => {
-    if (intentionalClose || state === "idle") return;
-    console.warn("WebSocket closed unexpectedly", event.code, event.reason);
-    if (state === "recording" || state === "playing-file" || state === "reconnecting") {
-      scheduleReconnect(event.code, event.reason);
-    } else {
-      setState(
-        "idle",
-        `Connection closed unexpectedly (code ${event.code}${event.reason ? ": " + event.reason : ""})`,
-      );
-      cleanup();
-    }
-  };
-
-  return new Promise<void>((resolve, reject) => {
-    ws!.onopen = () => {
-      intentionalClose = false;
-      flushPendingAudio();
-      resolve();
-    };
-    ws!.onerror = () => reject(new Error("WebSocket error"));
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Auto-reconnect
-// ---------------------------------------------------------------------------
-function showRetryButton(): void {
-  $retryBtn.classList.remove("hidden");
-}
-
-function hideRetryButton(): void {
-  $retryBtn.classList.add("hidden");
-}
-
-function flushPendingAudio(): void {
-  if (!pendingAudioChunks.length || !ws || ws.readyState !== WebSocket.OPEN) return;
-  for (const chunk of pendingAudioChunks) {
-    try { ws.send(chunk); } catch { /* ws closed mid-flush */ }
-  }
-  pendingAudioChunks = [];
-}
-
-function scheduleReconnect(code: number, reason: string): void {
-  if (reconnectTimer !== null) return;
-
-  reconnectAttempt += 1;
-  if (reconnectAttempt > RECONNECT_MAX_ATTEMPTS) {
-    console.warn(`Reconnect: giving up after ${RECONNECT_MAX_ATTEMPTS} attempts`);
-    setState(
-      "idle",
-      `Connection lost (code ${code}${reason ? ": " + reason : ""}). Reconnect attempts exhausted.`,
+  },
+  onReconnectFailed: (message) => {
+    setConnectionStatus("failed");
+    setStatus(message);
+  },
+  onError: (message) => stop(message),
+  onSessionDone: () => stop(),
+  onTranslationError: (message) => setStatus(`Translation failed: ${message}`),
+  onTtsFallback: (fromProvider, toProvider, reason) => {
+    setStatus(
+      `${fromProvider} TTS lỗi/hết quota; đã chuyển sang ${toProvider}: ${reason}`,
     );
-    cleanup();
-    return;
+  },
+  onTtsError: (message) => showTtsErrorBanner(message),
+  onTtsUsage: (usage) => {
+    ttsSessionUsage = addTtsUsage(ttsSessionUsage, usage);
+    updateTtsCostHint();
+  },
+  onStatusUpdate: setStatus,
+});
+
+function buildSpeechToTextConfig(): SpeechToTextConfig {
+  const contextText = $contextJson.value.trim();
+  if (contextText) {
+    try {
+      JSON.parse(contextText);
+    } catch (error) {
+      throw new Error(`Context JSON invalid: ${(error as Error).message}`);
+    }
   }
 
-  const backoff = Math.min(RECONNECT_BASE_DELAY_MS * 2 ** (reconnectAttempt - 1), RECONNECT_MAX_DELAY_MS);
-  const jitter = Math.random() * backoff * 0.2;
-  const delay = Math.round(backoff + jitter);
-
-  console.warn(
-    `Reconnect: attempt ${reconnectAttempt}/${RECONNECT_MAX_ATTEMPTS} in ${delay}ms (code ${code}${reason ? ": " + reason : ""})`,
-  );
-  setState(
-    "reconnecting",
-    `Reconnecting… (attempt ${reconnectAttempt}/${RECONNECT_MAX_ATTEMPTS})`,
-  );
-  showRetryButton();
-
-  reconnectTimer = window.setTimeout(() => {
-    reconnectTimer = null;
-    void doReconnect();
-  }, delay);
+  const ttsVoice = $ttsVoice.value || $voice.value;
+  return {
+    mode: $mode(),
+    targetLang: $targetLang.value,
+    langA: $langA.value,
+    langB: $langB.value,
+    langId: $langId.checked,
+    diarize: $diarization.checked,
+    voice: ttsVoice,
+    voiceB: currentTtsProvider === "soniox" ? $voiceB.value : ttsVoice,
+    contextB64: contextText ? b64Utf8(contextText) : undefined,
+    inputDevice: $inputDevice.value,
+    outputDevice: $outputDevice.value,
+    ttsProvider: $ttsProvider.value,
+    sttProvider: $sttProvider.value || "soniox",
+    translationProvider: $translationProvider.value || "soniox",
+    sttDelayMs: Math.round(currentSttDelaySeconds() * 1000),
+    isTtsEnabled: textToSpeech.getState().isTtsEnabled,
+  };
 }
 
-async function doReconnect(): Promise<void> {
-  try {
-    await openWebSocket(lastExtraParams);
-    reconnectAttempt = 0;
-    hideRetryButton();
-    setState(mode === "file" ? "playing-file" : "recording");
-  } catch (err) {
-    console.warn("Reconnect attempt failed:", (err as Error).message);
-    scheduleReconnect(0, (err as Error).message);
-  }
+function sendTranscriptSnapshot(): void {
+  speechToText.sendTranscriptSnapshot([...utterances, currentUtt]);
 }
 
-function manualRetry(): void {
-  if (reconnectTimer !== null) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
-  void doReconnect();
+async function retryConnection(): Promise<void> {
+  await speechToText.retryConnection();
+  setConnectionStatus(speechToText.getState().connectionStatus);
 }
-
 
 
 function showSessionInfo(id: string): void {
@@ -508,15 +1365,10 @@ function handleSttResult(data: SonioxSttResponse): void {
     if (!t.text) continue;
 
     if (t.text === "<end>") {
-      if (
-        currentUtt.originalFinal ||
-        currentUtt.translationFinal ||
-        currentUtt.originalPartial ||
-        currentUtt.translationPartial
-      ) {
-        utterances.push(currentUtt);
-        currentUtt = newUtt();
-      }
+      // `line_ready` is the only event that commits a displayed transcript
+      // line. `<end>` can arrive first, so clear its raw preview and let the
+      // matching endpoint line_ready commit the complete utterance once.
+      currentUtt = newUtt();
       continue;
     }
 
@@ -526,13 +1378,54 @@ function handleSttResult(data: SonioxSttResponse): void {
     const spokenLang = isTranslation ? t.source_language : t.language;
     if (spokenLang) currentUtt.language = spokenLang;
 
-    const side = isTranslation ? "translation" : "original" as const;
+    const side: "translation" | "original" = isTranslation ? "translation" : "original";
     if (t.is_final) {
       currentUtt[`${side}Final`] += t.text;
     } else {
       currentUtt[`${side}Partial`] += t.text;
     }
   }
+
+  render();
+}
+
+function handleLineReady(data: SonioxSttResponse): void {
+  const original = data.original_text || "";
+  const translated = data.translated_text || "";
+  if (!original && !translated) return;
+  if (typeof data.line_id === "number" && translated) {
+    // Subscriber boundary: disabled TTS ignores the line without changing STT.
+    textToSpeech.registerLine(data.line_id);
+  }
+
+  const nextSpeaker = data.speaker ?? null;
+  const nextLanguage = data.lang || null;
+  const previous = utterances[utterances.length - 1];
+  const shouldAppendToPrevious =
+    displayUtteranceOpen &&
+    previous != null &&
+    previous.speaker === nextSpeaker;
+
+  if (shouldAppendToPrevious) {
+    previous.originalFinal += original;
+    previous.translationFinal += translated;
+    if (nextLanguage) previous.language = nextLanguage;
+  } else {
+    utterances.push({
+      speaker: nextSpeaker,
+      language: nextLanguage,
+      originalFinal: original,
+      originalPartial: "",
+      translationFinal: translated,
+      translationPartial: "",
+    });
+  }
+
+  // `line_ready` text is already committed to the final display line above.
+  // Only Soniox's endpoint closes that line; earlier chunks remain eligible
+  // for coalescing so TTS can stream without fragmenting the transcript.
+  displayUtteranceOpen = !data.is_endpoint;
+  currentUtt = newUtt();
 
   render();
 }
@@ -562,90 +1455,172 @@ async function acquireInputStream(): Promise<MediaStream> {
     };
     return stream;
   }
-  // Explicit echo cancellation / noise suppression / auto gain control:
-  // without this, the mic can pick up the speaker's own TTS playback as
-  // echo, which the barge-in VAD then misreads as the user talking over
-  // the TTS.
-  const audioConstraints: MediaTrackConstraints = {
-    echoCancellation: true,
-    noiseSuppression: true,
-    autoGainControl: true,
-  };
-  const selectedInputId = $inputDevice.value;
-  if (selectedInputId && selectedInputId !== "default") {
-    audioConstraints.deviceId = { exact: selectedInputId };
-  }
-  return navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
 
+  const selectedInputId = $inputDevice.value || "default";
+  const selectedOption = $inputDevice.selectedOptions[0];
+  const selectedLabel = selectedOption?.textContent?.trim() || "";
+  const isVirtualLoopback =
+    $audioSource() !== "tab" &&
+    selectedInputId !== "default" &&
+    isLikelyVirtualLoopbackDevice({ label: selectedLabel });
+
+  // Keep browser DSP enabled for real microphones to reduce speaker echo.
+  // Virtual/loopback devices already carry clean app audio, so WebRTC DSP can
+  // suppress or gate them incorrectly.
+  const constraints = isVirtualLoopback
+    ? {
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false,
+    }
+    : {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    };
+
+  // Remember this for the TTS self-hearing check.  Virtual loopback = TTS
+  // output is routed straight back into the capture stream, so we must mute
+  // capture while TTS is audible (same as tab capture), not just duck it.
+  isVirtualLoopbackInput = isVirtualLoopback;
+
+  console.info(
+    `[audio-input] acquiring ${isVirtualLoopback ? "virtual/loopback" : "microphone"} input`,
+    {
+      deviceId: selectedInputId,
+      label: selectedLabel,
+      constraints,
+      audioSource: $audioSource(),
+    },
+  );
+
+  return getSelectedInputStream(constraints);
 }
-
 
 async function startRecorder(): Promise<void> {
   micStream = await acquireInputStream();
-  mediaRecorder = new MediaRecorder(micStream);
 
+  // --- AudioWorklet PCM capture (replaces MediaRecorder for lower latency) ---
+  captureCtx = new AudioContext({ sampleRate: 48000 });
+  try {
+    await captureCtx.audioWorklet.addModule("/pcm-capture-processor.js");
+  } catch (err) {
+    // Fallback: try with relative path for dev server
+    await captureCtx.audioWorklet.addModule("./pcm-capture-processor.js");
+  }
 
-  mediaRecorder.ondataavailable = (e: BlobEvent) => {
-    if (e.data.size === 0) return;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(e.data);
-    } else if (ws) {
-      // Connection is down (reconnecting): buffer audio so it can be
-      // flushed once the socket reopens, capped to avoid unbounded growth.
-      pendingAudioChunks.push(e.data);
-      if (pendingAudioChunks.length > PENDING_AUDIO_MAX) {
-        pendingAudioChunks.splice(0, pendingAudioChunks.length - PENDING_AUDIO_MAX);
-      }
+  const source = captureCtx.createMediaStreamSource(micStream);
+  captureWorklet = new AudioWorkletNode(captureCtx, "pcm-capture-processor");
+  source.connect(captureWorklet);
+  // Don't connect to destination — we don't want to hear the mic locally.
+  // The worklet still processes audio in the background.
+
+  let pcmChunks = 0;
+  let pcmBytes = 0;
+  let warnedNoData = false;
+  const startedAt = performance.now();
+
+  captureWorklet.port.onmessage = (event: MessageEvent) => {
+    const pcmBuffer = event.data as ArrayBuffer;
+    if (pcmBuffer.byteLength > 0) {
+      pcmChunks += 1;
+      pcmBytes += pcmBuffer.byteLength;
+      speechToText.sendAudio(new Blob([pcmBuffer]));
     }
   };
 
+  window.setTimeout(() => {
+    if (!captureWorklet || warnedNoData || pcmChunks > 0) return;
+    warnedNoData = true;
+    const message =
+      $audioSource() === "tab"
+        ? "Chưa nhận được audio từ tab/system share. Hãy kiểm tra đã bật share audio trong hộp chọn capture."
+        : "Chưa nhận được audio từ thiết bị input. Nếu đây là VB-Cable/loopback, hãy kiểm tra ứng dụng đang phát ra đúng thiết bị đó.";
+    console.error("[audio-input] AudioWorklet started but no audio data", {
+      elapsedMs: Math.round(performance.now() - startedAt),
+      totalBytes: pcmBytes,
+      audioSource: $audioSource(),
+      inputDevice: $inputDevice.value || "default",
+      inputLabel: $inputDevice.selectedOptions[0]?.textContent?.trim() || "",
+    });
+    setStatus(message);
+  }, 1500);
 
-  mediaRecorder.start(100);
+  // --- TTS self-hearing prevention (tab/loopback only) ---
+  // For tab/system-audio and virtual-loopback captures the TTS signal is a
+  // perfect digital copy of what is being captured, so we hard-mute capture
+  // while TTS is audible to prevent Soniox from "hearing" the TTS voice and
+  // stalling the `<end>` token.  For real microphone input we do nothing:
+  // the browser's echoCancellation removes TTS echo acoustically, and STT
+  // keeps running at full gain so translate + display continue in parallel
+  // with TTS playback. See startTtsMuteCheck() for details.
+  startTtsMuteCheck();
 
-  // Barge-in only makes sense for microphone input: with tab/system audio,
-  // the "loud" signal we'd be listening to is the source audio itself, not
-  // the user's voice, so it would immediately (and repeatedly) self-trigger.
+  // Barge-in only makes sense for microphone input.
   if ($barge.checked && $audioSource() === "microphone") startBargeVad(micStream);
 }
 
-// ---------------------------------------------------------------------------
-// Audio playback (Web Audio API)
-// ---------------------------------------------------------------------------
-function playPcmChunk(chunk: Uint8Array): void {
-  if (!audioCtx) return;
-  const evenLen = chunk.byteLength - (chunk.byteLength % 2);
-  const int16 = new Int16Array(chunk.buffer as ArrayBuffer, chunk.byteOffset, evenLen / 2);
-  const float32 = new Float32Array(int16.length);
-  for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
-  const buffer = audioCtx.createBuffer(1, float32.length, TTS_SAMPLE_RATE);
-  buffer.getChannelData(0).set(float32);
-  const source = audioCtx.createBufferSource();
-  source.buffer = buffer;
-  source.connect(audioCtx.destination);
-  const startAt = Math.max(audioCtx.currentTime, nextPlayTime);
-  source.start(startAt);
-  nextPlayTime = startAt + buffer.duration;
-  activeSources.push(source);
-  source.onended = () => {
-    const i = activeSources.indexOf(source);
-    if (i !== -1) activeSources.splice(i, 1);
-  };
+/**
+ * Periodically check if TTS is audible and mute capture for tab/loopback
+ * sources. Microphone mode is intentionally NOT throttled so that STT and
+ * TTS run fully in parallel — new speech continues to be transcribed and
+ * translated while the TTS is still reading, and each translated chunk
+ * appears on screen and starts playing immediately without waiting for the
+ * previous sentence to finish.
+ *
+ * - Tab/system-audio capture: hard-mute (send silence). The TTS signal is a
+ *   perfect digital copy of what would be captured — there is no echo
+ *   cancellation available, so full mute is the only way to stop Soniox from
+ *   "hearing" its own TTS output and never emitting `<end>`.
+ *
+ * - Virtual-loopback capture: same hard-mute as tab capture (TTS output is
+ *   routed into the same digital stream as the captured audio).
+ *
+ * - Microphone capture: NO ducking, NO muting. The browser's built-in
+ *   echoCancellation (enabled for real mics in acquireInputStream) removes
+ *   TTS echo picked up through speakers before it reaches the worklet, so
+ *   STT stays fully live during TTS playback. Barge-in reads a separate
+ *   AnalyserNode tap so the user can still interrupt TTS by speaking.
+ */
+function startTtsMuteCheck(): void {
+  stopTtsMuteCheck();
+  const isTabCapture = $audioSource() === "tab";
+  // Virtual loopback behaves like tab capture: TTS audio is a clean digital
+  // copy of the captured stream — no AEC is available, so hard-mute is the
+  // only way to prevent Soniox from "hearing" its own TTS output.
+  const shouldHardMute = isTabCapture || isVirtualLoopbackInput;
+
+  // Microphone mode: browser echoCancellation handles speaker→mic feedback.
+  // Do NOT duck or mute — STT runs at full gain while TTS plays so that
+  // translate + display continue in real time alongside TTS playback.
+  if (!shouldHardMute) return;
+
+  ttsMuteCheckInterval = setInterval(() => {
+    const shouldAttenuate = textToSpeech.isAudible();
+    if (shouldAttenuate !== captureMuted) {
+      captureMuted = shouldAttenuate;
+      captureWorklet?.port.postMessage({ type: "mute", value: shouldAttenuate });
+      console.log(
+        shouldAttenuate
+          ? "[audio-input] TTS audible → muting tab/loopback capture to prevent self-hearing"
+          : "[audio-input] TTS silent → resuming tab/loopback capture",
+      );
+    }
+  }, 50);
 }
 
-function interruptTtsAudio(): void {
-  for (const s of activeSources) {
-    try { s.stop(); } catch { /* already stopped */ }
+function stopTtsMuteCheck(): void {
+  if (ttsMuteCheckInterval !== null) {
+    clearInterval(ttsMuteCheckInterval);
+    ttsMuteCheckInterval = null;
   }
-  activeSources = [];
-  if (audioCtx) nextPlayTime = audioCtx.currentTime;
+  if (captureMuted) {
+    captureMuted = false;
+    captureWorklet?.port.postMessage({ type: "mute", value: false });
+    captureWorklet?.port.postMessage({ type: "duck", value: 1.0 });
+  }
 }
 
-function handleTtsAudio(chunk: Uint8Array): void {
-  playPcmChunk(chunk);
-  if (state !== "playing-file" || !fileAudio || fileTtsHeard) return;
-  fileTtsHeard = true;
-  fileAudio.volume = 0.1;
-}
 
 // ---------------------------------------------------------------------------
 // Barge-in VAD
@@ -680,8 +1655,11 @@ function tickBarge(): void {
   $bargeBar.style.width = `${pct}%`;
 
   const now = performance.now();
+  // Scheduled sources count as audible so barge-in remains available during
+  // the configured playback delay.
   const ttsAudible =
-    activeSources.length > 0 || (state === "playing-file" && fileAudio != null && !fileAudio.paused);
+    textToSpeech.isAudible() ||
+    (state === "playing-file" && fileAudio != null && !fileAudio.paused);
 
   // A new TTS chunk just started playing after silence: remember when, so we
   // can suppress barge-in for a short grace window (the onset "pop" of TTS
@@ -710,12 +1688,8 @@ function tickBarge(): void {
 }
 
 function triggerBargeIn(): void {
-  interruptTtsAudio();
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    try {
-      ws.send(JSON.stringify({ type: "barge" }));
-    } catch { /* ws closed */ }
-  }
+  textToSpeech.cancelAllAudio();
+  speechToText.sendBargeIn();
   setStatus("Barge-in: interrupted TTS");
 }
 
@@ -731,223 +1705,40 @@ function stopBargeVad(): void {
 }
 
 // ---------------------------------------------------------------------------
-// Audio device selection (input/output)
-// ---------------------------------------------------------------------------
-const supportsSinkId = "setSinkId" in HTMLMediaElement.prototype;
-
-function showDeviceWarning(msg: string): void {
-  $deviceFallbackWarning.textContent = msg;
-  $deviceFallbackWarning.classList.remove("hidden");
-}
-
-function hideDeviceWarning(): void {
-  $deviceFallbackWarning.classList.add("hidden");
-}
-
-function loadStoredDevice(key: string): string {
-  try { return localStorage.getItem(key) ?? ""; } catch { return ""; }
-}
-
-function saveStoredDevice(key: string, value: string): void {
-  try { localStorage.setItem(key, value); } catch { /* storage disabled */ }
-}
-
-async function populateDeviceLists(): Promise<void> {
-  let devices: MediaDeviceInfo[];
-  try {
-    devices = await navigator.mediaDevices.enumerateDevices();
-  } catch {
-    return;
-  }
-
-  const inputs = devices.filter((d) => d.kind === "audioinput");
-  const outputs = devices.filter((d) => d.kind === "audiooutput");
-
-  const storedInput = loadStoredDevice(INPUT_DEVICE_KEY);
-  const storedOutput = loadStoredDevice(OUTPUT_DEVICE_KEY);
-  let missing = false;
-
-  $inputDevice.innerHTML = "";
-  const defaultInputOpt = document.createElement("option");
-  defaultInputOpt.value = "default";
-  defaultInputOpt.textContent = "Default microphone";
-  $inputDevice.appendChild(defaultInputOpt);
-  inputs.forEach((d, i) => {
-    const opt = document.createElement("option");
-    opt.value = d.deviceId;
-    opt.textContent = d.label || `Microphone ${i + 1}`;
-    $inputDevice.appendChild(opt);
-  });
-  if (storedInput && inputs.some((d) => d.deviceId === storedInput)) {
-    $inputDevice.value = storedInput;
-  } else {
-    if (storedInput) missing = true;
-    $inputDevice.value = "default";
-  }
-
-  $outputDevice.innerHTML = "";
-  const defaultOutputOpt = document.createElement("option");
-  defaultOutputOpt.value = "default";
-  defaultOutputOpt.textContent = "Default speaker";
-  $outputDevice.appendChild(defaultOutputOpt);
-  outputs.forEach((d, i) => {
-    const opt = document.createElement("option");
-    opt.value = d.deviceId;
-    opt.textContent = d.label || `Speaker ${i + 1}`;
-    $outputDevice.appendChild(opt);
-  });
-  if (storedOutput && outputs.some((d) => d.deviceId === storedOutput)) {
-    $outputDevice.value = storedOutput;
-  } else {
-    if (storedOutput) missing = true;
-    $outputDevice.value = "default";
-  }
-
-  if (missing) {
-    showDeviceWarning("A previously selected device is no longer available; reverted to default.");
-  } else if (!supportsSinkId) {
-    showDeviceWarning("This browser does not support choosing an output device; using system default.");
-  } else {
-    hideDeviceWarning();
-  }
-}
-
-let deviceTestStream: MediaStream | null = null;
-let deviceTestCtx: AudioContext | null = null;
-let deviceTestAnalyser: AnalyserNode | null = null;
-let deviceTestArray: Uint8Array<ArrayBuffer> | null = null;
-let deviceTestRaf: number | null = null;
-let deviceTestTimer: number | null = null;
-
-function stopInputDeviceTest(): void {
-  if (deviceTestRaf) cancelAnimationFrame(deviceTestRaf);
-  deviceTestRaf = null;
-  if (deviceTestTimer) clearTimeout(deviceTestTimer);
-  deviceTestTimer = null;
-  deviceTestAnalyser = null;
-  deviceTestArray = null;
-  if (deviceTestStream) {
-    deviceTestStream.getTracks().forEach((t) => t.stop());
-    deviceTestStream = null;
-  }
-  if (deviceTestCtx) {
-    void deviceTestCtx.close();
-    deviceTestCtx = null;
-  }
-  $inputVuMeter.classList.add("hidden");
-  $inputVuBar.style.width = "0%";
-  $testInputBtn.disabled = false;
-}
-
-function tickDeviceTest(): void {
-  if (!deviceTestAnalyser || !deviceTestArray) return;
-  deviceTestAnalyser.getByteTimeDomainData(deviceTestArray);
-  let sum = 0;
-  for (let i = 0; i < deviceTestArray.length; i++) {
-    const v = (deviceTestArray[i] - 128) / 128;
-    sum += v * v;
-  }
-  const rms = Math.sqrt(sum / deviceTestArray.length);
-  const pct = Math.min(100, Math.round(rms * 200));
-  $inputVuBar.style.width = `${pct}%`;
-  deviceTestRaf = requestAnimationFrame(tickDeviceTest);
-}
-
-async function testInputDevice(): Promise<void> {
-  stopInputDeviceTest();
-  $testInputBtn.disabled = true;
-  const selectedId = $inputDevice.value;
-  const constraints: MediaTrackConstraints = {};
-  if (selectedId && selectedId !== "default") constraints.deviceId = { exact: selectedId };
-
-  try {
-    deviceTestStream = await navigator.mediaDevices.getUserMedia({ audio: constraints });
-  } catch (err) {
-    showDeviceWarning(`Could not access microphone: ${(err as Error).message}`);
-    $testInputBtn.disabled = false;
-    return;
-  }
-
-  deviceTestCtx = new AudioContext();
-  const source = deviceTestCtx.createMediaStreamSource(deviceTestStream);
-  const analyser = deviceTestCtx.createAnalyser();
-  analyser.fftSize = 512;
-  analyser.smoothingTimeConstant = 0.4;
-  source.connect(analyser);
-  deviceTestAnalyser = analyser;
-  deviceTestArray = new Uint8Array(new ArrayBuffer(analyser.fftSize));
-  $inputVuMeter.classList.remove("hidden");
-  tickDeviceTest();
-
-  deviceTestTimer = window.setTimeout(() => stopInputDeviceTest(), DEVICE_TEST_DURATION_MS);
-}
-
-async function testOutputDevice(): Promise<void> {
-  const selectedId = $outputDevice.value;
-  const testCtx = new AudioContext();
-  const oscillator = testCtx.createOscillator();
-  oscillator.type = "sine";
-  oscillator.frequency.value = 440;
-  const gain = testCtx.createGain();
-  gain.gain.value = 0.2;
-  const dest = testCtx.createMediaStreamDestination();
-  oscillator.connect(gain);
-  gain.connect(dest);
-
-  $outputTestAudio.srcObject = dest.stream;
-
-  if (supportsSinkId && selectedId && selectedId !== "default") {
-    try {
-      await ($outputTestAudio as unknown as { setSinkId(id: string): Promise<void> }).setSinkId(selectedId);
-    } catch (err) {
-      showDeviceWarning(`Could not route audio to selected output: ${(err as Error).message}`);
-    }
-  } else if (!supportsSinkId) {
-    showDeviceWarning("This browser does not support choosing an output device; playing on system default.");
-  }
-
-  oscillator.start();
-  try {
-    await $outputTestAudio.play();
-  } catch { /* autoplay may be blocked; user gesture triggered this so should be fine */ }
-
-  window.setTimeout(() => {
-    oscillator.stop();
-    $outputTestAudio.pause();
-    $outputTestAudio.srcObject = null;
-    void testCtx.close();
-  }, 1500);
-}
-
-navigator.mediaDevices.ondevicechange = () => void populateDeviceLists();
-
-// ---------------------------------------------------------------------------
 // Session lifecycle
 // ---------------------------------------------------------------------------
-
 function resetSession(): void {
-  audioCtx = new AudioContext({ sampleRate: TTS_SAMPLE_RATE });
-  nextPlayTime = 0;
+  textToSpeech.updateConfig({
+    outputDevice: $outputDevice.value,
+    ttsDelaySeconds: currentTtsDelaySeconds(),
+    playbackRate: currentTtsPlaybackRate(),
+  });
+  textToSpeech.resetSession();
   utterances = [];
   currentUtt = newUtt();
-  activeSources = [];
+  displayUtteranceOpen = false;
+  feedAutoScroll = true;
+  renderedFinalCount = 0;
+  interimFeedLine = null;
+  $transcriptFeed.innerHTML = "";
+  ttsSessionUsage = emptyTtsUsage();
+  updateTtsCostHint();
   render();
 }
 
 async function start(): Promise<void> {
   setState("recording");
-  resetSession();
 
   try {
-    await openWebSocket();
+    resetSession();
+    await speechToText.start(buildSpeechToTextConfig());
+    setConnectionStatus("connected");
     await startRecorder();
-  } catch (err) {
-    console.error(err);
-    setState("idle", `Failed to start: ${(err as Error).message}`);
-    cleanup();
+  } catch (error) {
+    console.error(error);
+    stop(`Failed to start: ${(error as Error).message}`);
   }
 }
-
 
 async function playFile(): Promise<void> {
   const url = $audioUrl.value.trim();
@@ -957,95 +1748,94 @@ async function playFile(): Promise<void> {
   }
 
   setState("playing-file");
-  resetSession();
   fileTtsHeard = false;
 
   try {
+    resetSession();
     fileAudio = new Audio(url);
-    fileAudio.volume = 1.0;
+    fileAudio.volume = 1;
     await new Promise<void>((resolve, reject) => {
       fileAudio!.addEventListener("loadedmetadata", () => resolve(), { once: true });
-      fileAudio!.addEventListener("error", () => reject(new Error("audio load failed")), { once: true });
+      fileAudio!.addEventListener("error", () => reject(new Error("audio load failed")), {
+        once: true,
+      });
     });
-
-    await openWebSocket({
+    await speechToText.start(buildSpeechToTextConfig(), {
       audio_url: url,
       audio_duration: String(fileAudio.duration),
     });
-
+    setConnectionStatus("connected");
     await fileAudio.play();
-  } catch (err) {
-    console.error(err);
-    setState("idle", `Failed to play file: ${(err as Error).message}`);
-    cleanup();
+  } catch (error) {
+    console.error(error);
+    stop(`Failed to play file: ${(error as Error).message}`);
   }
 }
 
+function stop(message?: string): void {
+  if (speechToText.getState().isListening) sendTranscriptSnapshot();
+  speechToText.stop();
+  cleanupSttInput();
+  // The source has ended, so discard outstanding playback. TTS enablement is
+  // intentionally preserved for the next session.
+  textToSpeech.cancelAllAudio();
+  setState("idle", message);
+  setConnectionStatus("idle");
 
-function stop(): void {
-  intentionalClose = true;
-  setState("idle");
-  cleanup();
+  if ($historyPanel.classList.contains("open")) {
+    window.setTimeout(() => { void loadHistory(true); }, 300);
+  }
 }
 
-function cleanup(): void {
-  if (reconnectTimer !== null) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
-  reconnectAttempt = 0;
-  pendingAudioChunks = [];
-  hideRetryButton();
-
-  // Auto-save completed utterances to session history
-  void saveToHistory([...utterances, currentUtt], $mode(), $targetLang.value);
-
-
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    try {
-      const snapshot = [...utterances, currentUtt].filter(
-        (u) =>
-          u.originalFinal ||
-          u.translationFinal ||
-          u.originalPartial ||
-          u.translationPartial,
-      );
-      ws.send(JSON.stringify({ type: "utterances", utterances: snapshot }));
-    } catch { /* ws closed */ }
-  }
-
+function cleanupSttInput(): void {
   stopBargeVad();
-  if (mediaRecorder) {
-    if (mediaRecorder.state !== "inactive") {
-      try { mediaRecorder.stop(); } catch { /* already stopped */ }
+  stopTtsMuteCheck();
+  if (captureWorklet) {
+    try {
+      captureWorklet.disconnect();
+    } catch {
+      // Already disconnected.
     }
-    mediaRecorder.stream?.getTracks().forEach((t) => t.stop());
+    captureWorklet = null;
   }
-  mediaRecorder = null;
+  if (captureCtx) {
+    captureCtx.close().catch(() => undefined);
+    captureCtx = null;
+  }
+  if (micStream) {
+    micStream.getTracks().forEach((track) => track.stop());
+  }
   micStream = null;
   if (fileAudio) {
     fileAudio.pause();
     fileAudio = null;
   }
-  interruptTtsAudio();
-  if (ws) {
-    try { ws.close(); } catch { /* already closed */ }
-    ws = null;
-  }
 }
 
-function setState(s: AppState, message?: string): void {
-  state = s;
-  const busy = s !== "idle";
-  if (busy) {
-    $actionLabel.textContent = "Stop";
-    $actionBtn.dataset.state = "running";
-    $actionBtn.disabled = false;
-  } else {
-    $actionBtn.dataset.state = "idle";
-    $actionLabel.textContent = mode === "file" ? "Play audio file" : "Start talking";
-    $actionBtn.disabled = mode === "file" && !$audioUrl.value.trim();
-  }
+function renderTtsButton(): void {
+  const enabled = textToSpeech.getState().isTtsEnabled;
+  $actionTtsBtn.dataset.state = enabled ? "enabled" : "disabled";
+  $actionTtsBtn.setAttribute("aria-pressed", String(enabled));
+  $actionTtsBtn.querySelector<HTMLSpanElement>(".btn-label-tts")!.textContent =
+    enabled ? "TTS: Bật" : "TTS: Tắt";
+  $actionTtsBtn.title = enabled
+    ? "Tắt đọc bản dịch (STT vẫn tiếp tục)"
+    : "Bật đọc các bản dịch mới";
+}
+
+function setState(nextState: AppState, message?: string): void {
+  state = nextState;
+  const busy = nextState !== "idle";
+  $actionBtn.dataset.state = busy ? "running" : "idle";
+  $actionLabel.textContent = busy
+    ? "STT: Stop"
+    : mode === "file"
+      ? "STT: Play file"
+      : "STT: Start";
+  $actionBtn.disabled = !busy && mode === "file" && !$audioUrl.value.trim();
+
+  // Session configuration stays fixed while STT is active. The independent
+  // TTS button is deliberately excluded and remains clickable.
   $modeToggle.disabled = busy;
   $audioUrl.disabled = busy;
   $targetLang.disabled = busy;
@@ -1053,25 +1843,26 @@ function setState(s: AppState, message?: string): void {
   $langB.disabled = busy;
   $voice.disabled = busy;
   $voiceB.disabled = busy;
-  $providerA.disabled = busy;
-  $providerB.disabled = busy;
   $diarization.disabled = busy;
   $langId.disabled = busy;
-  $tts.disabled = busy;
   $inputDevice.disabled = busy;
   $outputDevice.disabled = busy;
-  document.querySelectorAll<HTMLInputElement>("input[name=mode]").forEach((r) => (r.disabled = busy));
-  document.querySelectorAll<HTMLInputElement>("input[name=audio-source]").forEach((r) => (r.disabled = busy));
+  $btnTestInput.disabled = busy;
+  $btnTestOutput.disabled = busy;
+  document.querySelectorAll<HTMLInputElement>("input[name=mode]").forEach(
+    (radio) => (radio.disabled = busy),
+  );
+  document.querySelectorAll<HTMLInputElement>("input[name=audio-source]").forEach(
+    (radio) => (radio.disabled = busy),
+  );
   syncBargeAvailability();
+  renderTtsButton();
+
   if (message !== undefined) setStatus(message);
-
-
-  else if (s === "recording") setStatus("Listening…");
-  else if (s === "playing-file") setStatus("Playing audio…");
-  else if (s === "reconnecting") setStatus("Reconnecting…");
+  else if (nextState === "recording") setStatus("Listening…");
+  else if (nextState === "playing-file") setStatus("Playing audio…");
   else setStatus("Ready");
 }
-
 
 
 // Barge-in only applies to Microphone input (see startRecorder). Keep the
@@ -1106,81 +1897,152 @@ function setMode(m: AppMode): void {
 
 function setStatus(msg: string): void {
   $status.textContent = msg;
+  updateDelayStatusIndicator();
+}
+
+/* ─── TTS error banner (sticky, must be dismissed) ─── */
+const $ttsErrorBanner = document.getElementById("tts-error-banner") as HTMLDivElement | null;
+const $ttsErrorText = document.querySelector<HTMLSpanElement>(".tts-error-text");
+const $ttsErrorClose = document.querySelector<HTMLButtonElement>(".tts-error-close");
+
+function showTtsErrorBanner(message: string): void {
+  if (!$ttsErrorBanner || !$ttsErrorText) return;
+  $ttsErrorText.textContent = message;
+  $ttsErrorBanner.classList.remove("hidden");
+}
+
+if ($ttsErrorClose) {
+  $ttsErrorClose.addEventListener("click", () => {
+    $ttsErrorBanner?.classList.add("hidden");
+  });
+}
+
+function updateDelayStatusIndicator(): void {
+  const scheduledPlaybackSeconds = textToSpeech.getScheduledPlaybackSeconds();
+  const queuedAudioSeconds = textToSpeech.getQueuedAudioSeconds();
+  const queuedLineDelaySeconds = textToSpeech.getQueuedLineDelaySeconds();
+  const totalDelaySeconds =
+    currentSttDelaySeconds() +
+    scheduledPlaybackSeconds +
+    queuedAudioSeconds +
+    queuedLineDelaySeconds;
+  const visible = state !== "idle" && totalDelaySeconds > 0;
+  const formattedDelay = Number.isInteger(totalDelaySeconds)
+    ? String(totalDelaySeconds)
+    : totalDelaySeconds.toFixed(1);
+  $delayStatus.textContent = visible ? `Đang xử lý (~${formattedDelay}s)…` : "";
+  $delayStatus.classList.toggle("hidden", !visible);
+}
+
+function setConnectionStatus(s: ConnectionStatus): void {
+  $connectionDot.classList.toggle("hidden", s === "idle");
+  $connectionDot.classList.toggle("green", s === "connected");
+  $connectionDot.classList.toggle("yellow", s === "reconnecting");
+  $connectionDot.classList.toggle("red", s === "failed");
+  $btnRetry.classList.toggle("hidden", s !== "failed");
 }
 
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
-function renderUtterance(u: Utterance, col: HTMLDivElement, side: "original" | "translation"): void {
-  const final = u[`${side}Final`];
-  const partial = u[`${side}Partial`];
-  if (!final && !partial) return;
-
-  const div = document.createElement("div");
-  div.className = "utterance";
-
-  const labels: string[] = [];
-  if (side === "original") {
-    if ($diarization.checked && u.speaker != null) labels.push(`Speaker ${u.speaker}`);
-    if ($langId.checked && u.language) labels.push(u.language);
-  } else if ($langId.checked) {
-    if ($mode() === "one_way") labels.push($targetLang.value);
-    else labels.push(u.language ? otherLang(u.language) : $langB.value);
-  }
-  if (labels.length) {
-    const lbl = document.createElement("div");
-    lbl.className = "label";
-    lbl.textContent = labels.join(" · ");
-    div.appendChild(lbl);
-  }
-
-  if (final) {
-    const finalSpan = document.createElement("span");
-    finalSpan.textContent = final;
-    div.appendChild(finalSpan);
-  }
-  if (partial) {
-    const partialSpan = document.createElement("span");
-    partialSpan.className = "partial";
-    partialSpan.textContent = partial;
-    div.appendChild(partialSpan);
-  }
-
-  col.appendChild(div);
+function hasUtteranceText(u: Utterance): boolean {
+  return Boolean(u.originalFinal || u.originalPartial || u.translationFinal || u.translationPartial);
 }
 
-function otherLang(spoken: string): string {
-  if (spoken === $langA.value) return $langB.value;
-  if (spoken === $langB.value) return $langA.value;
-  return spoken || "";
+function createFeedLine(interim = false): HTMLDivElement {
+  const line = document.createElement("div");
+  const label = document.createElement("div");
+  label.className = "speaker-label";
+  const language = document.createElement("span");
+  language.className = "lang-tag";
+  label.appendChild(language);
+  line.appendChild(label);
+
+  for (const className of ["original-text", "translated-text"]) {
+    const text = document.createElement("div");
+    text.className = className;
+    line.appendChild(text);
+  }
+
+  if (interim) line.classList.add("interim");
+  return line;
+}
+
+function updateFeedLine(line: HTMLDivElement, u: Utterance, interim = false): void {
+  const speaker = u.speaker ?? 0;
+  line.className = `feed-line speaker-${Math.abs(speaker) % 5}${interim ? " interim" : ""}`;
+  const label = line.querySelector<HTMLDivElement>(".speaker-label")!;
+  label.firstChild!.textContent = `Speaker ${u.speaker ?? "—"}: `;
+  line.querySelector<HTMLSpanElement>(".lang-tag")!.textContent = u.language || "auto";
+  line.querySelector<HTMLDivElement>(".original-text")!.textContent =
+    `${u.originalFinal}${u.originalPartial}`;
+  line.querySelector<HTMLDivElement>(".translated-text")!.textContent =
+    `${u.translationFinal}${u.translationPartial}`;
+}
+
+function appendFinalFeedLine(u: Utterance): void {
+  const line = createFeedLine();
+  updateFeedLine(line, u);
+  $transcriptFeed.appendChild(line);
 }
 
 function render(): void {
-  $originalCol.innerHTML = "";
-  $translationCol.innerHTML = "";
-  const all = [...utterances, currentUtt];
-  for (const u of all) {
-    renderUtterance(u, $originalCol, "original");
-    renderUtterance(u, $translationCol, "translation");
+  const shouldScroll = feedAutoScroll;
+  const previousScrollTop = $transcriptFeed.scrollTop;
+
+  // Full reconciliation is needed only after a history view/restart replaces
+  // the model. Live STT normally reaches the fast path below.
+  if (renderedFinalCount > utterances.length) {
+    $transcriptFeed.innerHTML = "";
+    renderedFinalCount = 0;
+    interimFeedLine = null;
   }
-  syncRowHeights();
-  $originalCol.scrollTop = $originalCol.scrollHeight;
-  $translationCol.scrollTop = $translationCol.scrollHeight;
+
+  // Keep the temporary STT preview after all committed lines. Removing and
+  // recreating this one node is still constant work, unlike rebuilding the
+  // whole transcript.
+  if (interimFeedLine && renderedFinalCount < utterances.length) {
+    interimFeedLine.remove();
+    interimFeedLine = null;
+  }
+
+  while (renderedFinalCount < utterances.length) {
+    appendFinalFeedLine(utterances[renderedFinalCount]);
+    renderedFinalCount += 1;
+  }
+
+  // A non-endpoint `line_ready` appends a short TTS chunk to the most recent
+  // final utterance. Update only that existing DOM node rather than rebuilding
+  // every transcript line for each incoming token.
+  if (renderedFinalCount > 0) {
+    const finalLine = $transcriptFeed.children[renderedFinalCount - 1] as HTMLDivElement | undefined;
+    if (finalLine) updateFeedLine(finalLine, utterances[renderedFinalCount - 1]);
+  }
+
+  if (hasUtteranceText(currentUtt)) {
+    if (!interimFeedLine) {
+      interimFeedLine = createFeedLine(true);
+      $transcriptFeed.appendChild(interimFeedLine);
+    }
+    updateFeedLine(interimFeedLine, currentUtt, true);
+  } else if (interimFeedLine) {
+    interimFeedLine.remove();
+    interimFeedLine = null;
+  }
+
+  if (shouldScroll) {
+    $transcriptFeed.scrollTop = $transcriptFeed.scrollHeight;
+  } else {
+    $transcriptFeed.scrollTop = previousScrollTop;
+  }
   refreshDownloadButtons();
 }
 
-function syncRowHeights(): void {
-  const o = $originalCol.children;
-  const t = $translationCol.children;
-  for (const el of o) (el as HTMLElement).style.minHeight = "";
-  for (const el of t) (el as HTMLElement).style.minHeight = "";
-  const n = Math.min(o.length, t.length);
-  for (let i = 0; i < n; i++) {
-    const h = Math.max((o[i] as HTMLElement).offsetHeight, (t[i] as HTMLElement).offsetHeight);
-    (o[i] as HTMLElement).style.minHeight = `${h}px`;
-    (t[i] as HTMLElement).style.minHeight = `${h}px`;
-  }
-}
+$transcriptFeed.addEventListener("scroll", () => {
+  const distanceFromBottom =
+    $transcriptFeed.scrollHeight - $transcriptFeed.scrollTop - $transcriptFeed.clientHeight;
+  feedAutoScroll = distanceFromBottom < 48;
+});
 
 // ---------------------------------------------------------------------------
 // Event listeners
@@ -1195,17 +2057,57 @@ $actionBtn.addEventListener("click", () => {
   }
 });
 
+async function toggleTextToSpeech(): Promise<void> {
+  if (textToSpeech.getState().isTtsEnabled) {
+    textToSpeech.disable();
+    speechToText.setTtsEnabled(false);
+    setStatus(
+      speechToText.getState().isListening
+        ? "TTS đã tắt; STT vẫn đang nghe"
+        : "TTS đã tắt",
+    );
+  } else {
+    try {
+      await textToSpeech.enable({
+        outputDevice: $outputDevice.value,
+        ttsDelaySeconds: currentTtsDelaySeconds(),
+        playbackRate: currentTtsPlaybackRate(),
+      });
+      speechToText.setTtsEnabled(true);
+      setStatus(
+        speechToText.getState().isListening
+          ? "TTS đã bật cho các câu dịch mới"
+          : "TTS đã bật",
+      );
+    } catch {
+      // TextToSpeech already surfaced a user-facing error.
+    }
+  }
+  renderTtsButton();
+}
+
+$actionTtsBtn.addEventListener("click", () => {
+  void toggleTextToSpeech();
+});
+
 $modeToggle.addEventListener("click", () => {
   if (state === "idle") setMode(mode === "file" ? "mic" : "file");
 });
 
 $audioUrl.addEventListener("input", () => {
   if (state === "idle" && mode === "file") {
-    $actionBtn.disabled = !$audioUrl.value.trim();
+    const hasUrl = Boolean($audioUrl.value.trim());
+    $actionBtn.disabled = !hasUrl;
   }
 });
 
 setMode("file");
+renderTtsButton();
+
+window.addEventListener("beforeunload", () => {
+  speechToText.stop();
+  void textToSpeech.cleanup();
+});
 
 // ---------------------------------------------------------------------------
 // Transcript download (client-side, no PII sent back)
@@ -1240,7 +2142,7 @@ function downloadTranscriptJson(): void {
     return;
   }
   const payload = {
-    session_id: sessionId,
+    session_id: speechToText.getState().sessionId,
     mode: $mode(),
     saved_at: new Date().toISOString(),
     utterances: items.map((u) => ({
@@ -1294,13 +2196,6 @@ function refreshDownloadButtons(): void {
 
 $dlJson.addEventListener("click", downloadTranscriptJson);
 $dlCsv.addEventListener("click", downloadTranscriptCsv);
-$retryBtn.addEventListener("click", manualRetry);
-$inputDevice.addEventListener("change", () => saveStoredDevice(INPUT_DEVICE_KEY, $inputDevice.value));
-$outputDevice.addEventListener("change", () => saveStoredDevice(OUTPUT_DEVICE_KEY, $outputDevice.value));
-$testInputBtn.addEventListener("click", () => void testInputDevice());
-$testOutputBtn.addEventListener("click", () => void testOutputDevice());
-void populateDeviceLists();
-
 
 // ---------------------------------------------------------------------------
 // Dark mode
@@ -1326,8 +2221,6 @@ $themeToggle.addEventListener("click", () => {
 // Expose globals for inline HTML onclick handlers
 // ---------------------------------------------------------------------------
 (window as unknown as Record<string, unknown>)["toggleHistoryPanel"] = toggleHistoryPanel;
-(window as unknown as Record<string, unknown>)["renderHistoryPanel"] = renderHistoryPanel;
-(window as unknown as Record<string, unknown>)["clearHistory"] = async () => { await clearSessions(); await renderHistoryPanel(); };
 
 // ---------------------------------------------------------------------------
 // PWA Service Worker

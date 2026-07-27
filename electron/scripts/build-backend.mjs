@@ -1,10 +1,5 @@
-// Builds the PyInstaller backend exe (reusing the existing installer/spec.spec,
-// untouched) and copies the resulting onedir build into electron/resources/backend
-// so electron-builder can bundle it as an extraResource for the production app.
-//
-// This does NOT create a new/separate PyInstaller spec: the installer/ pipeline
-// (launcher.py, spec.spec, installer.iss) stays exactly as-is and is still used
-// on its own for the lightweight non-Electron installer via the existing CI.
+// Builds the PyInstaller backend exe (reusing installer/spec.spec) and copies
+// the result into electron/resources/backend for electron-builder to bundle.
 import { execFileSync } from "node:child_process";
 import { cp, rm, mkdir, access } from "node:fs/promises";
 import path from "node:path";
@@ -18,45 +13,39 @@ const RESOURCES_BACKEND = path.join(ELECTRON_DIR, "resources", "backend");
 
 const isWin = process.platform === "win32";
 
+async function pathExists(p) {
+  try { await access(p); return true; } catch { return false; }
+}
+
 async function main() {
   if (!isWin) {
     console.warn(
-      "[build-backend] Not running on Windows — skipping PyInstaller build.\n" +
-        "  The Windows .exe must be produced on a Windows machine/runner (PyInstaller\n" +
-        "  cannot cross-compile a Windows exe from Linux). If resources/backend already\n" +
-        "  contains a previously built exe, electron-builder will still bundle that."
+      "[build-backend] Not on Windows — skipping PyInstaller build.\n" +
+      "  PyInstaller cannot cross-compile a Windows exe from other platforms.\n" +
+      "  If resources/backend already contains a previously built exe, electron-builder\n" +
+      "  will still bundle it."
     );
-    try {
-      await access(RESOURCES_BACKEND);
+    if (await pathExists(RESOURCES_BACKEND)) {
       console.log("[build-backend] Found existing resources/backend — reusing it.");
-      return;
-    } catch {
-      console.warn(
-        "[build-backend] No resources/backend found either. `npm run dist:win` will\n" +
-          "  still run electron-builder, but the produced installer will NOT contain a\n" +
-          "  working backend. Run this script on Windows first."
-      );
-      return;
+    } else {
+      console.warn("[build-backend] No resources/backend found. The produced installer will lack a working backend.");
     }
+    return;
   }
 
-  const pythonExe = path.join(ROOT, "backend", ".venv", "Scripts", "python.exe");
-  const python = (await pathExists(pythonExe)) ? pythonExe : "python";
+  const venvPython = path.join(ROOT, "backend", ".venv", "Scripts", "python.exe");
+  const python = (await pathExists(venvPython)) ? venvPython : "python";
 
   console.log("[build-backend] Running PyInstaller via", python);
   execFileSync(
     python,
     [
-      "-m",
-      "PyInstaller",
+      "-m", "PyInstaller",
       path.join("installer", "spec.spec"),
-      "--distpath",
-      "dist_win",
-      "--workpath",
-      "build_win",
+      "--distpath", "dist_win",
+      "--workpath", "build_win",
       "--noconfirm",
-      "--log-level",
-      "WARN",
+      "--log-level", "WARN",
     ],
     { cwd: ROOT, stdio: "inherit" }
   );
@@ -69,16 +58,4 @@ async function main() {
   console.log("[build-backend] Done.");
 }
 
-async function pathExists(p) {
-  try {
-    await access(p);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+main().catch((err) => { console.error(err); process.exit(1); });

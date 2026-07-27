@@ -1,19 +1,32 @@
-// Electron main process for the Soniox Live Translate desktop shell.
-//
-// Responsibilities:
-//  - Spawn the backend (dev: uvicorn via python; prod: the PyInstaller-built
-//    SonioxLiveTranslate.exe) with ELECTRON_HOST=1 so launcher.py suppresses
-//    its own webbrowser.open()/pystray tray (see installer/launcher.py).
-//  - Poll GET http://127.0.0.1:8765/health until ready (mirrors launcher.py's
-//    _wait_ready()), then open a BrowserWindow pointed at that URL.
-//  - Configure session.setDisplayMediaRequestHandler so the existing
-//    getDisplayMedia() call in frontend/src/app.ts (tab/system audio capture)
-//    keeps working unmodified, via Electron's native system picker.
-//  - Provide a Tray (Open/Settings/Quit) replacing the pystray tray.
-//  - Kill the spawned backend process on quit so nothing is orphaned.
 "use strict";
 
 const { app, BrowserWindow, Tray, Menu, session, shell } = require("electron");
+
+// ---------------------------------------------------------------------------
+// Sentry — initialise as early as possible after require so startup crashes
+// are caught.  Set SENTRY_DSN in the environment (or via .env loaded by the
+// backend) to enable monitoring.  The init is a no-op when the variable is
+// absent.
+// ---------------------------------------------------------------------------
+(function initSentry() {
+  const dsn = process.env.SENTRY_DSN;
+  if (!dsn) return;
+  try {
+    const { init } = require("@sentry/electron/main");
+    init({
+      dsn,
+      environment: process.env.SENTRY_ENVIRONMENT || (app.isPackaged ? "production" : "development"),
+      release: process.env.SENTRY_RELEASE,   // set by CI; undefined in dev is fine
+      // Capture 10 % of transactions for performance monitoring.
+      tracesSampleRate: 0.1,
+      // Don't send PII (user IPs, etc.).
+      sendDefaultPii: false,
+    });
+  } catch (e) {
+    // @sentry/electron not available — silently skip.
+  }
+})();
+
 const path = require("node:path");
 const http = require("node:http");
 const { spawn } = require("node:child_process");
@@ -23,6 +36,7 @@ const HOST = "127.0.0.1";
 const PORT = 8765;
 const BASE_URL = `http://${HOST}:${PORT}`;
 const HEALTH_URL = `${BASE_URL}/health`;
+const SETUP_STATUS_URL = `${BASE_URL}/setup/status`;
 const IS_DEV = !app.isPackaged;
 
 let mainWindow = null;
@@ -30,9 +44,12 @@ let tray = null;
 let backendProcess = null;
 let quitting = false;
 
+// ---------------------------------------------------------------------------
+// Backend process management
+// ---------------------------------------------------------------------------
+
 function resolveBackendCommand() {
   if (IS_DEV) {
-    // Dev mode: run uvicorn directly against the backend source tree.
     const backendDir = path.resolve(__dirname, "..", "backend");
     const venvPython =
       process.platform === "win32"
@@ -46,8 +63,9 @@ function resolveBackendCommand() {
     };
   }
 
-  // Production mode: run the PyInstaller-built exe bundled as an extraResource.
-  const exeName = process.platform === "win32" ? "SonioxLiveTranslate.exe" : "SonioxLiveTranslate";
+  // Production: spawn the PyInstaller-built exe bundled as an extraResource.
+  const exeName =
+    process.platform === "win32" ? "SonioxLiveTranslate.exe" : "SonioxLiveTranslate";
   const exePath = path.join(process.resourcesPath, "backend", exeName);
   return { command: exePath, args: [], cwd: path.dirname(exePath) };
 }
@@ -72,8 +90,6 @@ function startBackend() {
   backendProcess.on("exit", (code, signal) => {
     console.log(`[backend] exited (code=${code}, signal=${signal})`);
     backendProcess = null;
-    // If the backend dies unexpectedly (not as part of our own quit flow),
-    // surface it and quit — mirrors _report_fatal() in launcher.py.
     if (!quitting) {
       quitting = true;
       const { dialog } = require("electron");
@@ -119,8 +135,7 @@ function killBackend() {
   if (!backendProcess) return;
   const pid = backendProcess.pid;
   if (process.platform === "win32" && pid) {
-    // Kill the whole process tree; a plain kill() can leave orphaned
-    // children behind (e.g. uvicorn workers spawned by the exe).
+    // Kill entire process tree so uvicorn workers don't become orphans.
     spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true });
   } else {
     try {
@@ -132,24 +147,59 @@ function killBackend() {
   backendProcess = null;
 }
 
+// ---------------------------------------------------------------------------
+// Display media / tab+system audio capture
+// ---------------------------------------------------------------------------
+
 function registerDisplayMediaHandler() {
-  // Primary (and only) solution for tab/system audio capture, per plan:
-  // rely on Electron's native system picker so the existing
-  // navigator.mediaDevices.getDisplayMedia({video:true, audio:true}) call in
-  // frontend/src/app.ts keeps working completely unmodified.
+  // Primary approach: Electron 30+ native system picker.
+  // Keeps navigator.mediaDevices.getDisplayMedia({video:true, audio:true}) in
+  // frontend/src/app.ts (acquireInputStream) working unmodified.
+  // audio:"loopback" requests Windows loopback capture alongside the picker.
   session.defaultSession.setDisplayMediaRequestHandler(
     (request, callback) => {
-      // useSystemPicker:true means Chromium/the OS already showed the native
-      // picker and pre-selected the source; hand back a loopback audio
-      // request so both video+audio are granted together.
-      callback({ video: undefined, audio: "loopback" });
+      // Electron 31+ requires `video` to be a WebFrameMain or
+      // DesktopCapturerSource — request.frame satisfies that contract
+      // while useSystemPicker still drives the native OS picker.
+      callback({ video: request.frame, audio: "loopback" });
     },
     { useSystemPicker: true }
   );
+
+  // Grant microphone permission automatically. Without this handler,
+  // Electron with sandbox:true may silently deny getUserMedia({audio:true}),
+  // breaking microphone capture in the live translation flow.
+  session.defaultSession.setPermissionRequestHandler(
+    (_webContents, permission, callback) => {
+      if (permission === "media") {
+        callback(true);
+      } else {
+        callback(false);
+      }
+    }
+  );
 }
 
-function createWindow() {
-  const iconPath = path.join(__dirname, "build", process.platform === "win32" ? "icon.ico" : "icon.png");
+// ---------------------------------------------------------------------------
+// BrowserWindow
+// ---------------------------------------------------------------------------
+
+function getIconPath() {
+  // In dev, icons live in electron/build/. In production they are bundled
+  // as extraResources into resources/icons/ next to resources/backend/.
+  const base = app.isPackaged
+    ? path.join(process.resourcesPath, "icons")
+    : path.join(__dirname, "build");
+  const ico = path.join(base, "icon.ico");
+  const png = path.join(base, "icon.png");
+  if (process.platform === "win32" && fs.existsSync(ico)) return ico;
+  if (fs.existsSync(png)) return png;
+  if (fs.existsSync(ico)) return ico;
+  return undefined;
+}
+
+async function createWindow() {
+  const iconPath = getIconPath();
 
   mainWindow = new BrowserWindow({
     width: 1280,
@@ -157,7 +207,7 @@ function createWindow() {
     minWidth: 720,
     minHeight: 560,
     autoHideMenuBar: true,
-    icon: fs.existsSync(iconPath) ? iconPath : undefined,
+    icon: iconPath,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -166,10 +216,20 @@ function createWindow() {
     },
   });
 
-  mainWindow.loadURL(BASE_URL);
+  // Decide which URL to load first — if not configured yet, go to setup page.
+  let startUrl = BASE_URL;
+  try {
+    const statusData = await fetchJson(SETUP_STATUS_URL);
+    if (!statusData.configured) {
+      startUrl = `${BASE_URL}/setup`;
+    }
+  } catch {
+    // If /setup/status fails, fall back to root; backend will redirect if needed.
+  }
 
-  // Open any external links (e.g. target=_blank) in the OS browser instead
-  // of a new Electron window.
+  mainWindow.loadURL(startUrl);
+
+  // Open external links in the OS browser, not a new Electron window.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (!url.startsWith(BASE_URL)) {
       shell.openExternal(url);
@@ -178,10 +238,17 @@ function createWindow() {
     return { action: "allow" };
   });
 
+  // Block unexpected navigation outside the local backend.
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    if (!url.startsWith(BASE_URL)) {
+      event.preventDefault();
+      shell.openExternal(url);
+    }
+  });
+
+  // Closing the window minimizes to tray instead of quitting.
   mainWindow.on("close", (event) => {
     if (!quitting) {
-      // Closing the window minimizes to tray instead of quitting, matching
-      // the previous pystray-based launcher behavior.
       event.preventDefault();
       mainWindow.hide();
     }
@@ -192,42 +259,51 @@ function createWindow() {
   });
 }
 
+// ---------------------------------------------------------------------------
+// System tray
+// ---------------------------------------------------------------------------
+
 function createTray() {
-  const iconPath = path.join(__dirname, "build", "icon.png");
-  const trayIconPath = fs.existsSync(iconPath) ? iconPath : path.join(__dirname, "build", "icon.ico");
+  const trayIconPath = getIconPath();
+  if (!trayIconPath) {
+    console.warn("[tray] No icon found — tray unavailable");
+    return;
+  }
+
   tray = new Tray(trayIconPath);
   tray.setToolTip("Soniox Live Translate");
-  tray.setContextMenu(
-    Menu.buildFromTemplate([
-      {
-        label: "Open",
-        click: () => {
-          if (mainWindow) {
-            mainWindow.show();
-            mainWindow.focus();
-          }
-        },
+
+  const contextMenu = Menu.buildFromTemplate([
+    {
+      label: "Open",
+      click: () => {
+        if (mainWindow) {
+          mainWindow.show();
+          mainWindow.focus();
+        }
       },
-      {
-        label: "Settings",
-        click: () => {
-          if (mainWindow) {
-            mainWindow.show();
-            mainWindow.focus();
-            mainWindow.loadURL(`${BASE_URL}/setup`);
-          }
-        },
+    },
+    {
+      label: "Settings",
+      click: () => {
+        if (mainWindow) {
+          mainWindow.show();
+          mainWindow.focus();
+          mainWindow.loadURL(`${BASE_URL}/setup`);
+        }
       },
-      { type: "separator" },
-      {
-        label: "Quit",
-        click: () => {
-          quitting = true;
-          app.quit();
-        },
+    },
+    { type: "separator" },
+    {
+      label: "Quit",
+      click: () => {
+        quitting = true;
+        app.quit();
       },
-    ])
-  );
+    },
+  ]);
+
+  tray.setContextMenu(contextMenu);
   tray.on("click", () => {
     if (mainWindow) {
       mainWindow.show();
@@ -235,6 +311,35 @@ function createTray() {
     }
   });
 }
+
+// ---------------------------------------------------------------------------
+// Utility
+// ---------------------------------------------------------------------------
+
+function fetchJson(url) {
+  return new Promise((resolve, reject) => {
+    const req = http.get(url, { timeout: 3000 }, (res) => {
+      let raw = "";
+      res.on("data", (chunk) => (raw += chunk));
+      res.on("end", () => {
+        try {
+          resolve(JSON.parse(raw));
+        } catch (e) {
+          reject(e);
+        }
+      });
+    });
+    req.on("error", reject);
+    req.on("timeout", () => {
+      req.destroy();
+      reject(new Error("timeout"));
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// App lifecycle
+// ---------------------------------------------------------------------------
 
 app.whenReady().then(async () => {
   registerDisplayMediaHandler();
@@ -255,14 +360,12 @@ app.whenReady().then(async () => {
     return;
   }
 
-  createWindow();
+  await createWindow();
   createTray();
 });
 
-app.on("window-all-closed", () => {
-  // Keep running in the tray on all platforms; only Tray "Quit" or
-  // app.quit() (e.g. from the OS) should actually terminate the app.
-});
+// Keep running in the tray when all windows are closed.
+app.on("window-all-closed", () => { });
 
 app.on("activate", () => {
   if (mainWindow) {

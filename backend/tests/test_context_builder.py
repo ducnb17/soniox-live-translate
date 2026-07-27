@@ -16,11 +16,17 @@ class TestBuildSttConfig:
             context=None,
         )
         assert cfg["model"] == "stt-rt-v5"
-        assert cfg["audio_format"] == "auto"
+        assert cfg["audio_format"] == "pcm_s16le"
+        assert cfg["sample_rate"] == 16000
+        assert cfg["num_channels"] == 1
         assert cfg["enable_endpoint_detection"] is True
+        # Soniox STS default: 500 ms end-of-utterance latency.
         assert cfg["max_endpoint_delay_ms"] == 500
         assert cfg["enable_speaker_diarization"] is True
         assert cfg["enable_language_identification"] is True
+        # Per Soniox real-time STT docs, language_hints is strongly
+        # recommended; auto-derived from one_way target.
+        assert cfg["language_hints"] == ["vi"]
         assert cfg["translation"] == {"type": "one_way", "target_language": "vi"}
         assert "context" not in cfg
 
@@ -36,11 +42,40 @@ class TestBuildSttConfig:
         )
         assert cfg["enable_speaker_diarization"] is False
         assert cfg["enable_language_identification"] is False
+        # Without lang_id, language_hints are not auto-derived.
+        assert "language_hints" not in cfg
         assert cfg["translation"] == {
             "type": "two_way",
             "language_a": "en",
             "language_b": "es",
         }
+
+    def test_two_way_auto_language_hints(self):
+        cfg = build_stt_config(
+            mode="two_way",
+            target_lang=None,
+            lang_a="en",
+            lang_b="es",
+            lang_id=True,
+            diarize=False,
+            context=None,
+        )
+        # Both directions should be hinted.
+        assert cfg["language_hints"] == ["en", "es"]
+
+    def test_custom_endpoint_delay(self):
+        cfg = build_stt_config(
+            mode="one_way",
+            target_lang="vi",
+            lang_a=None,
+            lang_b=None,
+            lang_id=True,
+            diarize=True,
+            context=None,
+            max_endpoint_delay_ms=2500,
+        )
+
+        assert cfg["max_endpoint_delay_ms"] == 2500
 
     def test_one_way_missing_target_raises(self):
         with pytest.raises(ValueError, match="target_lang"):

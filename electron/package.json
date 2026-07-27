@@ -1,6 +1,6 @@
 {
   "name": "soniox-live-translate-electron",
-  "version": "0.2.2",
+  "version": "0.4.7",
   "private": true,
   "description": "Standalone desktop shell for Soniox Live Translate (Electron).",
   "main": "main.js",
@@ -8,11 +8,13 @@
     "start": "electron .",
     "build:icons": "node scripts/build-icons.mjs",
     "build:backend": "node scripts/build-backend.mjs",
-    "dist:win": "node scripts/build-backend.mjs && electron-builder --win"
+    "dist:win": "node scripts/build-backend.mjs && electron-builder --win",
+    "build:all": "node scripts/build-all.mjs"
   },
+  "author": "ducnb17",
   "devDependencies": {
     "electron": "^31.7.7",
-    "electron-builder": "^24.13.3",
+    "electron-builder": "^26.15.3",
     "png-to-ico": "^2.1.8",
     "sharp": "^0.33.5"
   },
@@ -31,13 +33,23 @@
       {
         "from": "resources/backend",
         "to": "backend"
+      },
+      {
+        "from": "build/icon.ico",
+        "to": "icons/icon.ico"
+      },
+      {
+        "from": "build/icon.png",
+        "to": "icons/icon.png"
       }
     ],
     "win": {
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "icon": "build/icon.ico"
@@ -47,6 +59,14 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true
-    }
+    },
+    "publish": null
+  },
+  "allowScripts": {
+    "electron@31.7.7": true,
+    "sharp@0.33.5": true
+  },
+  "dependencies": {
+    "@sentry/electron": "^7.15.0"
   }
 }

@@ -70,8 +70,8 @@ class TestCancelOpenStreams:
         state["directions"]["en"]["current_stream_id"] = "utterance-1-en"
         state["directions"]["es"]["current_stream_id"] = "utterance-2-es"
         state["stream_id_to_direction"] = {
-            "utterance-1-en": "en",
-            "utterance-2-es": "es",
+            "utterance-1-en": {"direction": "en", "line_id": 1},
+            "utterance-2-es": {"direction": "es", "line_id": 2},
         }
         ws = FakeTtsWs()
 

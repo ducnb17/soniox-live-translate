@@ -46,6 +46,7 @@ export default defineConfig({
       "/config": "http://127.0.0.1:8765",
       "/setup": "http://127.0.0.1:8765",
       "/transcript": "http://127.0.0.1:8765",
+      "/api": "http://127.0.0.1:8765",
       "/ws": {
         target: "ws://127.0.0.1:8765",
         ws: true,

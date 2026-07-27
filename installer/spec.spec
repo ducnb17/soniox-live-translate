@@ -6,6 +6,7 @@ ROOT          = os.path.abspath(os.path.join(SPECPATH, '..'))
 BACKEND       = os.path.join(ROOT, 'backend')
 FRONTEND_DIST = os.path.join(ROOT, 'frontend', 'dist')
 LAUNCHER      = os.path.join(ROOT, 'installer', 'launcher.py')
+ICON          = os.path.join(ROOT, 'installer', 'icon.ico')
 
 # CI copies backend/app → ROOT before running PyInstaller.
 # In dev, add ROOT+BACKEND so 'import app' resolves.
@@ -18,7 +19,7 @@ a = Analysis(
     [LAUNCHER],
     pathex=[ROOT, BACKEND],
     binaries=[],
-    datas=[(FRONTEND_DIST, 'frontend/dist')],
+    datas=[(FRONTEND_DIST, 'frontend/dist'), (ICON, '.')],
     hiddenimports=[
         # uvicorn
         'uvicorn', 'uvicorn.logging',
@@ -37,13 +38,33 @@ a = Analysis(
         # http / ws
         'httpx', 'websockets', 'h11',
         # config / logging
-        'dotenv', 'structlog',
+        'dotenv', 'structlog', 'win32crypt', 'pywintypes',
         # tray / icon
         'pystray', 'PIL', 'PIL.Image', 'PIL.ImageDraw',
+        # desktop webview
+        'webview', 'webview.platforms.winforms',
+        'webview.platforms.edgechromium', 'clr',
         # app
         'app', 'app.main', 'app.config', 'app.config_store',
         'app.stt', 'app.tts', 'app.context_builder', 'app.transcript',
-        'app.logging_config',
+        'app.logging_config', 'app.db', 'app.provider_connection', 'app.version',
+        'app.stt_provider', 'app.translation_provider',
+        'app.tts_provider', 'app.external_tts',
+        'app.stt_providers', 'app.stt_providers.soniox_provider',
+        'app.stt_providers.openai_provider', 'app.stt_providers.deepgram_provider',
+        'app.stt_providers.google_provider', 'app.stt_providers.assemblyai_provider',
+        'app.translation_providers', 'app.translation_providers.soniox_provider',
+        'app.translation_providers.google_provider', 'app.translation_providers.deepl_provider',
+        'app.translation_providers.openai_provider',
+        'app.tts_providers', 'app.tts_providers.soniox_provider',
+        'app.tts_providers.google_provider', 'app.tts_providers.openai_provider',
+        'app.tts_providers.azure_provider', 'app.tts_providers.elevenlabs_provider',
+        'app.tts_providers.deepgram_provider', 'app.tts_providers.polly_provider',
+        'aiosqlite',
+        # sentry error monitoring (optional — only active when SENTRY_DSN is set)
+        'sentry_sdk', 'sentry_sdk.integrations', 'sentry_sdk.integrations.fastapi',
+        'sentry_sdk.integrations.starlette', 'sentry_sdk.integrations.logging',
+        'sentry_sdk.integrations.asyncio',
     ],
     hookspath=[],
     runtime_hooks=[],
@@ -59,7 +80,7 @@ exe = EXE(
     name='SonioxLiveTranslate',
     debug=False, strip=False, upx=True,
     console=False,
-    icon=None,
+    icon=ICON,
 )
 
 coll = COLLECT(

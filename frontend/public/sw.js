@@ -45,6 +45,7 @@ self.addEventListener("fetch", (event) => {
   if (
     event.request.url.startsWith("ws") ||
     url.pathname.startsWith("/ws/") ||
+    url.pathname.startsWith("/api/") ||
     url.pathname.startsWith("/health") ||
     url.pathname.startsWith("/config") ||
     url.pathname.startsWith("/setup") ||

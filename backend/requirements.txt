@@ -1,6 +1,14 @@
-fastapi>=0.136.1
-uvicorn>=0.46.0
-websockets>=16.0
-httpx>=0.28.1
-python-dotenv>=0.9.9
-structlog>=24.0
+fastapi==0.139.2
+uvicorn==0.51.0
+websockets==16.1.1
+httpx==0.28.1
+python-dotenv==1.2.2
+structlog==26.1.0
+aiosqlite==0.22.1
+sentry-sdk[fastapi]>=2.0,<3
+pywin32==312; sys_platform == "win32"
+pywebview==6.2.1
+pythonnet==3.0.5; sys_platform == "win32"
+google-cloud-speech>=2.27
+google-auth>=2.20
+pocket-tts==2.1.0
