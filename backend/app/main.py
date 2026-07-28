@@ -187,6 +187,12 @@ async def setup_status() -> JSONResponse:
 @app.get("/setup", include_in_schema=False)
 async def setup_page() -> FileResponse:
     setup_html = os.path.join(_static_dir, "setup.html")
+    if not os.path.isfile(setup_html) and not getattr(sys, "frozen", False):
+        # Backend tests run independently from the frontend build in CI.
+        # Serve the checked-in source page until Vite creates dist/setup.html.
+        setup_html = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "setup.html")
+        )
     return FileResponse(setup_html, media_type="text/html")
 
 
