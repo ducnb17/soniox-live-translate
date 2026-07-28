@@ -10,8 +10,6 @@ import asyncio
 import threading
 from typing import AsyncIterator
 
-import numpy as np
-
 from ..tts_provider import TTSProviderBase, Voice, TTSProviderInfo, register_provider
 from ..logging_config import get_logger
 
@@ -63,6 +61,10 @@ def _load_model_sync(language: str):
 
 
 def _generate_sync(language: str, voice_id: str, text: str) -> bytes:
+    # Pocket TTS is optional in packaged builds. Import numpy only when this
+    # provider is selected so the local TTS stack cannot block app startup.
+    import numpy as np
+
     model, lock = _load_model_sync(language)
     with lock:
         state = model.get_state_for_audio_prompt(voice_id)

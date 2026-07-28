@@ -6,7 +6,8 @@ keys — see https://soniox.com/docs/stt/concepts/context.
 
 from typing import Any
 
-from .config import MAX_ENDPOINT_DELAY_MS, SONIOX_API_KEY, STT_MODEL
+from . import config as runtime_config
+from .config import MAX_ENDPOINT_DELAY_MS, STT_MODEL
 
 
 def build_stt_config(
@@ -18,6 +19,7 @@ def build_stt_config(
     lang_id: bool,
     diarize: bool,
     context: dict[str, Any] | None,
+    api_key: str | None = None,
     max_endpoint_delay_ms: int = MAX_ENDPOINT_DELAY_MS,
     enable_translation: bool = True,
     language_hints: list[str] | None = None,
@@ -31,7 +33,10 @@ def build_stt_config(
     real-time speech-to-speech pipeline's end-to-end latency minimal.
     """
     config: dict[str, Any] = {
-        "api_key": SONIOX_API_KEY,
+        # Read the mutable runtime value instead of capturing the key at
+        # module-import time. The Settings UI can replace the key without
+        # restarting the packaged backend.
+        "api_key": api_key or runtime_config.SONIOX_API_KEY,
         "model": STT_MODEL,
         "audio_format": "pcm_s16le",
         "sample_rate": 16000,

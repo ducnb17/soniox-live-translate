@@ -1,5 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os, sys
+from PyInstaller.utils.hooks import collect_submodules
 
 # SPECPATH = installer/ (directory containing this .spec file)
 ROOT          = os.path.abspath(os.path.join(SPECPATH, '..'))
@@ -15,6 +16,8 @@ if ROOT not in sys.path:
 if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
+uvicorn_hiddenimports = collect_submodules('uvicorn')
+
 a = Analysis(
     [LAUNCHER],
     pathex=[ROOT, BACKEND],
@@ -22,14 +25,7 @@ a = Analysis(
     datas=[(FRONTEND_DIST, 'frontend/dist'), (ICON, '.')],
     hiddenimports=[
         # uvicorn
-        'uvicorn', 'uvicorn.logging',
-        'uvicorn.loops', 'uvicorn.loops.auto', 'uvicorn.loops.asyncio',
-        'uvicorn.protocols',
-        'uvicorn.protocols.http', 'uvicorn.protocols.http.auto',
-        'uvicorn.protocols.http.h11_impl',
-        'uvicorn.protocols.websockets', 'uvicorn.protocols.websockets.auto',
-        'uvicorn.protocols.websockets.websockets_impl',
-        'uvicorn.lifespan', 'uvicorn.lifespan.on', 'uvicorn.lifespan.off',
+        *uvicorn_hiddenimports,
         # web framework
         'fastapi', 'starlette', 'starlette.routing', 'starlette.staticfiles',
         'starlette.responses', 'starlette.middleware',

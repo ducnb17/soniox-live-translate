@@ -1,10 +1,42 @@
 """Tests for context_builder.build_stt_config + _normalize_context."""
 import pytest
 
+from app import config as runtime_config
 from app.context_builder import build_stt_config, _normalize_context
 
 
 class TestBuildSttConfig:
+    def test_uses_current_runtime_api_key_after_settings_save(self, monkeypatch):
+        monkeypatch.setattr(runtime_config, "SONIOX_API_KEY", "saved-after-startup")
+
+        cfg = build_stt_config(
+            mode="one_way",
+            target_lang="vi",
+            lang_a=None,
+            lang_b=None,
+            lang_id=True,
+            diarize=True,
+            context=None,
+        )
+
+        assert cfg["api_key"] == "saved-after-startup"
+
+    def test_explicit_session_api_key_takes_precedence(self, monkeypatch):
+        monkeypatch.setattr(runtime_config, "SONIOX_API_KEY", "stale-key")
+
+        cfg = build_stt_config(
+            mode="one_way",
+            target_lang="vi",
+            lang_a=None,
+            lang_b=None,
+            lang_id=True,
+            diarize=True,
+            context=None,
+            api_key="current-persisted-key",
+        )
+
+        assert cfg["api_key"] == "current-persisted-key"
+
     def test_one_way_basic(self):
         cfg = build_stt_config(
             mode="one_way",

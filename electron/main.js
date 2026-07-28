@@ -31,6 +31,7 @@ const path = require("node:path");
 const http = require("node:http");
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
+const { isLocalAppUrl: hasLocalOrigin, safeExternalHttpUrl } = require("./url-policy");
 
 const HOST = "127.0.0.1";
 const PORT = 8765;
@@ -43,6 +44,20 @@ let mainWindow = null;
 let tray = null;
 let backendProcess = null;
 let quitting = false;
+
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) {
+  app.quit();
+}
+
+function isLocalAppUrl(rawUrl) {
+  return hasLocalOrigin(rawUrl, BASE_URL);
+}
+
+function openExternalHttpUrl(rawUrl) {
+  const safeUrl = safeExternalHttpUrl(rawUrl);
+  if (safeUrl) void shell.openExternal(safeUrl);
+}
 
 // ---------------------------------------------------------------------------
 // Backend process management
@@ -170,8 +185,8 @@ function registerDisplayMediaHandler() {
   // Electron with sandbox:true may silently deny getUserMedia({audio:true}),
   // breaking microphone capture in the live translation flow.
   session.defaultSession.setPermissionRequestHandler(
-    (_webContents, permission, callback) => {
-      if (permission === "media") {
+    (webContents, permission, callback) => {
+      if (permission === "media" && isLocalAppUrl(webContents.getURL())) {
         callback(true);
       } else {
         callback(false);
@@ -231,8 +246,8 @@ async function createWindow() {
 
   // Open external links in the OS browser, not a new Electron window.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (!url.startsWith(BASE_URL)) {
-      shell.openExternal(url);
+    if (!isLocalAppUrl(url)) {
+      openExternalHttpUrl(url);
       return { action: "deny" };
     }
     return { action: "allow" };
@@ -240,9 +255,9 @@ async function createWindow() {
 
   // Block unexpected navigation outside the local backend.
   mainWindow.webContents.on("will-navigate", (event, url) => {
-    if (!url.startsWith(BASE_URL)) {
+    if (!isLocalAppUrl(url)) {
       event.preventDefault();
-      shell.openExternal(url);
+      openExternalHttpUrl(url);
     }
   });
 
@@ -342,6 +357,7 @@ function fetchJson(url) {
 // ---------------------------------------------------------------------------
 
 app.whenReady().then(async () => {
+  if (!hasSingleInstanceLock) return;
   registerDisplayMediaHandler();
   startBackend();
 
@@ -362,6 +378,13 @@ app.whenReady().then(async () => {
 
   await createWindow();
   createTray();
+});
+
+app.on("second-instance", () => {
+  if (!mainWindow) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
 });
 
 // Keep running in the tray when all windows are closed.

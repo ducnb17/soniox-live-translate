@@ -166,15 +166,18 @@ function moveSettingsContent(): void {
 
 moveSettingsContent();
 
+function activateSettingsTab(tab: string): void {
+  document.querySelectorAll<HTMLElement>("[data-settings-tab]").forEach((item) => {
+    item.classList.toggle("active", item.dataset.settingsTab === tab);
+  });
+  document.querySelectorAll<HTMLElement>("[data-settings-panel]").forEach((panel) => {
+    panel.classList.toggle("active", panel.dataset.settingsPanel === tab);
+  });
+}
+
 document.querySelectorAll<HTMLButtonElement>("[data-settings-tab]").forEach((button) => {
   button.addEventListener("click", () => {
-    const tab = button.dataset.settingsTab;
-    document.querySelectorAll<HTMLElement>("[data-settings-tab]").forEach((item) => {
-      item.classList.toggle("active", item.dataset.settingsTab === tab);
-    });
-    document.querySelectorAll<HTMLElement>("[data-settings-panel]").forEach((panel) => {
-      panel.classList.toggle("active", panel.dataset.settingsPanel === tab);
-    });
+    activateSettingsTab(button.dataset.settingsTab || "general");
   });
 });
 
@@ -1335,6 +1338,46 @@ function buildSpeechToTextConfig(): SpeechToTextConfig {
   };
 }
 
+function ensureRequiredProviderKeys(): boolean {
+  const checks = [
+    {
+      tab: "stt",
+      label: "Speech-to-Text",
+      provider: sttProviders.find((item) => item.id === $sttProvider.value),
+      input: $sttApiKey,
+      status: $sttTestStatus,
+    },
+    {
+      tab: "translation",
+      label: "Translation",
+      provider: translationProviders.find((item) => item.id === $translationProvider.value),
+      input: $translationApiKey,
+      status: $translationTestStatus,
+    },
+    {
+      tab: "tts",
+      label: "Text-to-Speech",
+      provider: textToSpeech.getState().isTtsEnabled
+        ? ttsProviders.find((item) => item.id === $ttsProvider.value)
+        : undefined,
+      input: $ttsApiKey,
+      status: $ttsTestStatus,
+    },
+  ];
+
+  for (const check of checks) {
+    const needsKey = check.provider?.id === "soniox" || check.provider?.requires_api_key;
+    if (needsKey && !check.provider?.has_api_key) {
+      activateSettingsTab(check.tab);
+      check.status.textContent = "❌ Enter your API key, then click Save or Test";
+      check.input.focus();
+      setStatus(`${check.label}: API key chưa được lưu`);
+      return false;
+    }
+  }
+  return true;
+}
+
 function sendTranscriptSnapshot(): void {
   speechToText.sendTranscriptSnapshot([...utterances, currentUtt]);
 }
@@ -1727,6 +1770,7 @@ function resetSession(): void {
 }
 
 async function start(): Promise<void> {
+  if (!ensureRequiredProviderKeys()) return;
   setState("recording");
 
   try {
@@ -1746,6 +1790,7 @@ async function playFile(): Promise<void> {
     setStatus("Enter an audio URL");
     return;
   }
+  if (!ensureRequiredProviderKeys()) return;
 
   setState("playing-file");
   fileTtsHeard = false;

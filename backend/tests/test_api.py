@@ -144,6 +144,33 @@ class SuccessfulConnectionProvider:
 
 
 @pytest.mark.parametrize(
+    ("domain", "key_getter_name"),
+    [
+        ("stt", "get_stt_api_key"),
+        ("translation", "get_translation_api_key"),
+    ],
+)
+def test_provider_config_save_persists_soniox_key_for_live_sessions(
+    client, monkeypatch, domain, key_getter_name,
+):
+    from app import config_store
+
+    runtime_setter = Mock()
+    monkeypatch.setattr(main, "set_api_key", runtime_setter)
+
+    response = client.post(
+        f"/api/{domain}/config",
+        json={"provider_id": "soniox", "api_key": "saved-live-key"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    assert getattr(config_store, key_getter_name)("soniox") == "saved-live-key"
+    assert config_store.get_api_key() == "saved-live-key"
+    runtime_setter.assert_called_once_with("saved-live-key")
+
+
+@pytest.mark.parametrize(
     ("domain", "getter_name", "key_setter_name", "provider_setter_name"),
     [
         ("tts", "get_tts_provider_instance", "set_tts_api_key", "set_tts_provider"),

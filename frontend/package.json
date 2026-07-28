@@ -1,6 +1,6 @@
 {
   "name": "soniox-live-translate-frontend",
-  "version": "0.4.6",
+  "version": "1.0.0-beta.13",
   "private": true,
   "type": "module",
   "scripts": {

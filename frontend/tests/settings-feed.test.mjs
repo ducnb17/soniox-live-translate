@@ -40,14 +40,41 @@ test("save config button is present and wired to /api/config/save", () => {
   assert.match(app, /saveConfigBtn\.addEventListener/);
 });
 
-test("changing provider auto-detects saved key and disables input", () => {
+test("provider save and test controls referenced at startup exist in the HTML", () => {
+  for (const id of [
+    "btn-save-stt-key",
+    "btn-test-stt-key",
+    "btn-save-translation-key",
+    "btn-test-translation-key",
+    "btn-save-tts-key",
+    "btn-test-tts-key",
+  ]) {
+    assert.match(html, new RegExp(`id="${id}"`));
+  }
+});
+
+test("STT start is blocked until required provider keys are saved", () => {
+  assert.match(app, /function ensureRequiredProviderKeys\(\): boolean/);
+  assert.match(app, /if \(!ensureRequiredProviderKeys\(\)\) return;/);
+  assert.match(app, /activateSettingsTab\(check\.tab\)/);
+});
+
+test("every statically referenced startup element exists in the HTML", () => {
+  const typedRefs = [...app.matchAll(/\$<[^>]+>\("([^"]+)"\)/g)].map((match) => match[1]);
+  const plainRefs = [...app.matchAll(/\$\("([^"]+)"\)/g)].map((match) => match[1]);
+  const missing = [...new Set([...typedRefs, ...plainRefs])]
+    .filter((id) => !html.includes(`id="${id}"`));
+  assert.deepEqual(missing, []);
+});
+
+test("changing provider auto-detects saved key and keeps input editable", () => {
   assert.match(app, /updateKeyInputState/);
-  assert.match(app, /\.disabled\s*=\s*true/);
-  assert.match(app, /Đã lưu key cho/);
+  assert.match(app, /input\.disabled\s*=\s*false/);
+  assert.match(app, /nhập key mới để thay đổi/);
   // Both STT and translation provider changes call updateKeyInputState.
   assert.match(app, /updateKeyInputState\(\$sttProvider,\s*sttProviders/);
   assert.match(app, /updateKeyInputState\(\$translationProvider,\s*translationProviders/);
   // TTS provider change also checks has_api_key.
   assert.match(app, /ttsHasKey/);
-  assert.match(app, /\$ttsApiKey\.disabled\s*=\s*true/);
+  assert.match(app, /\$ttsApiKey\.disabled\s*=\s*false/);
 });

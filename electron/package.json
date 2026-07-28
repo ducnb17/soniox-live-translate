@@ -1,10 +1,11 @@
 {
   "name": "soniox-live-translate-electron",
-  "version": "0.4.7",
+  "version": "1.0.0-beta.13",
   "private": true,
   "description": "Standalone desktop shell for Soniox Live Translate (Electron).",
   "main": "main.js",
   "scripts": {
+    "test": "node --test tests/*.test.cjs && node --check main.js && node --check preload.js",
     "start": "electron .",
     "build:icons": "node scripts/build-icons.mjs",
     "build:backend": "node scripts/build-backend.mjs",
@@ -13,10 +14,10 @@
   },
   "author": "ducnb17",
   "devDependencies": {
-    "electron": "^31.7.7",
+    "electron": "^43.2.0",
     "electron-builder": "^26.15.3",
-    "png-to-ico": "^2.1.8",
-    "sharp": "^0.33.5"
+    "png-to-ico": "^3.0.2",
+    "sharp": "^0.35.3"
   },
   "build": {
     "appId": "com.sonioxlivetranslate.app",
@@ -27,7 +28,8 @@
     },
     "files": [
       "main.js",
-      "preload.js"
+      "preload.js",
+      "url-policy.js"
     ],
     "extraResources": [
       {
@@ -63,10 +65,10 @@
     "publish": null
   },
   "allowScripts": {
-    "electron@31.7.7": true,
-    "sharp@0.33.5": true
+    "electron@43.2.0": true,
+    "sharp@0.35.3": true
   },
   "dependencies": {
-    "@sentry/electron": "^7.15.0"
+    "@sentry/electron": "^7.16.0"
   }
 }

@@ -36,6 +36,20 @@ async function main() {
   const venvPython = path.join(ROOT, "backend", ".venv", "Scripts", "python.exe");
   const python = (await pathExists(venvPython)) ? venvPython : "python";
 
+  console.log("[build-backend] Checking required backend modules");
+  try {
+    execFileSync(
+      python,
+      ["-c", "import fastapi, uvicorn"],
+      { cwd: ROOT, stdio: "inherit" }
+    );
+  } catch {
+    throw new Error(
+      "Backend build dependencies are missing. Install backend/requirements.txt " +
+      "in the selected Python environment before packaging."
+    );
+  }
+
   console.log("[build-backend] Running PyInstaller via", python);
   execFileSync(
     python,
