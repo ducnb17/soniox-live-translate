@@ -81,12 +81,12 @@ class AzureTTSProvider(TTSProviderBase):
             "User-Agent": "SonioxLiveTranslate",
         }
 
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-            async with client.stream("POST", url, content=ssml, headers=headers) as resp:
-                resp.raise_for_status()
-                async for chunk in resp.aiter_bytes():
-                    if chunk:
-                        yield chunk
+        client = get_http_client()
+        async with client.stream("POST", url, content=ssml, headers=headers) as resp:
+            resp.raise_for_status()
+            async for chunk in resp.aiter_bytes():
+                if chunk:
+                    yield chunk
 
     def estimate_cost(self, char_count: int) -> float:
         # Neural: ~$15/million chars

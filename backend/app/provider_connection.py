@@ -4,6 +4,8 @@ from typing import Any
 
 import httpx
 
+from .http_client import get_http_client
+
 
 def response_error(response: httpx.Response) -> str:
     try:
@@ -31,8 +33,8 @@ async def test_request(
     params: dict[str, str | int] | None = None,
 ) -> tuple[bool, str]:
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
-            response = await client.request(method, url, headers=headers, params=params)
+        client = get_http_client()
+        response = await client.request(method, url, headers=headers, params=params)
         if response.is_success:
             return True, "OK"
         return False, response_error(response)

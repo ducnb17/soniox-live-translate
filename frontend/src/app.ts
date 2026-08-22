@@ -1429,7 +1429,19 @@ function handleSttResult(data: SonioxSttResponse): void {
     }
   }
 
-  render();
+  scheduleRender();
+}
+
+// Throttle render() to one call per animation frame. STT tokens can arrive
+// many times per frame; coalescing them keeps the transcript smooth without
+// blocking the main thread.
+let _renderRaf: number | null = null;
+function scheduleRender(): void {
+  if (_renderRaf !== null) return;
+  _renderRaf = requestAnimationFrame(() => {
+    _renderRaf = null;
+    render();
+  });
 }
 
 function handleLineReady(data: SonioxSttResponse): void {
@@ -2099,6 +2111,28 @@ $actionBtn.addEventListener("click", () => {
     void playFile();
   } else {
     void start();
+  }
+});
+
+// Keyboard shortcuts: Space toggles STT, T toggles TTS. Ignored while the
+// user is typing in an input/textarea so shortcuts never fight the keyboard.
+document.addEventListener("keydown", (event) => {
+  const target = event.target as HTMLElement | null;
+  const tag = target?.tagName ?? "";
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target?.isContentEditable) {
+    return;
+  }
+  if (event.code === "Space" && !event.repeat) {
+    event.preventDefault();
+    if (state !== "idle") {
+      stop();
+    } else if (mode === "file") {
+      void playFile();
+    } else {
+      void start();
+    }
+  } else if (event.key.toLowerCase() === "t" && !event.repeat) {
+    void toggleTextToSpeech();
   }
 });
 

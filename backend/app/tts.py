@@ -116,8 +116,15 @@ async def prewarm_stream(
             "line_id": None,
         }
         d["idle_event"].clear()
-    except websockets.WebSocketException:
-        pass
+    except websockets.WebSocketException as exc:
+        # Don't swallow silently — a failed prewarm means the first spoken
+        # line will have no audio.  Log it so it's diagnosable.
+        log.warning(
+            "tts_prewarm_failed",
+            direction=direction,
+            error=str(exc),
+            stream_id=stream_id,
+        )
 
 
 async def tts_sender(
@@ -145,12 +152,15 @@ async def tts_sender(
                 # Drain any items still queued in this barge epoch, then
                 # cancel currently-open streams so Soniox stops synthesizing.
                 await _drain_queue(tts_queue)
-                my_epoch = tts_state["barge_epoch"]
+                async with tts_state["barge_lock"]:
+                    my_epoch = tts_state["barge_epoch"]
                 await _cancel_open_streams(tts_ws, tts_state)
                 continue
 
             # Drop items queued before the most recent barge-in.
-            if my_epoch != tts_state["barge_epoch"]:
+            async with tts_state["barge_lock"]:
+                current_epoch = tts_state["barge_epoch"]
+            if my_epoch != current_epoch:
                 continue
 
             if kind == TTS_TEXT:
@@ -325,7 +335,7 @@ async def pipe_tts_to_browser(
                 message = await asyncio.wait_for(tts_ws.recv(), timeout=5.0)
             except asyncio.TimeoutError:
                 # No TTS message in 5s — check if the session should be done.
-                _maybe_send_session_done_sync(tts_state)
+                _maybe_send_session_done_sync(tts_state, pending_audio_empty=not pending_audio_by_stream)
                 if tts_state.get("_session_done_sent"):
                     try:
                         await browser_ws.send_json({"session_done": True})
@@ -416,7 +426,7 @@ async def pipe_tts_to_browser(
                             d["stream_used"] = False
                         d["idle_event"].set()
 
-                _maybe_send_session_done_sync(tts_state)
+                _maybe_send_session_done_sync(tts_state, pending_audio_empty=not pending_audio_by_stream)
                 if tts_state.get("_session_done_sent"):
                     try:
                         await browser_ws.send_json({"session_done": True})
@@ -425,7 +435,7 @@ async def pipe_tts_to_browser(
                     await tts_ws.close()
                     break
             elif data.get("audio") is None and not data.get("keep_alive"):
-                _maybe_send_session_done_sync(tts_state)
+                _maybe_send_session_done_sync(tts_state, pending_audio_empty=not pending_audio_by_stream)
                 if tts_state.get("_session_done_sent"):
                     try:
                         await browser_ws.send_json({"session_done": True})
@@ -484,7 +494,7 @@ async def synthesize_soniox_text(text: str, voice: str, lang: str) -> bytes:
 # --------------------------------------------------------------------------- #
 # Session-done helper
 # --------------------------------------------------------------------------- #
-def _maybe_send_session_done_sync(tts_state: dict) -> None:
+def _maybe_send_session_done_sync(tts_state: dict, *, pending_audio_empty: bool = True) -> None:
     """Check if the session is done (STT finished + all directions idle) and
     set a flag. The caller reads the flag and sends the actual session_done
     message to the browser. Idempotent."""
@@ -496,6 +506,8 @@ def _maybe_send_session_done_sync(tts_state: dict) -> None:
         d["current_stream_id"] is None
         for d in tts_state["directions"].values()
     ):
+        return
+    if not pending_audio_empty:
         return
     # Used streams stay in this map until `terminated`, whose handler also
     # flushes the final look-ahead audio chunk. Cancelled streams are removed

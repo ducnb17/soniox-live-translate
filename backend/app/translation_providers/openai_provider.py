@@ -16,20 +16,20 @@ class OpenAITranslationProvider(TranslationProviderBase):
         if not self._api_key:
             raise ValueError("OpenAI API key is required")
         source = source_lang or "auto-detected language"
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-            response = await client.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={**self._headers(), "Content-Type": "application/json"},
-                json={
-                    "model": "gpt-5.4-nano",
-                    "temperature": 0,
-                    "messages": [
-                        {"role": "system", "content": "Translate faithfully. Return only the translation."},
-                        {"role": "user", "content": f"Translate from {source} to {target_lang}:\n{text}"},
-                    ],
-                },
-            )
-            response.raise_for_status()
+        client = get_http_client()
+        response = await client.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={**self._headers(), "Content-Type": "application/json"},
+            json={
+                "model": "gpt-5.4-nano",
+                "temperature": 0,
+                "messages": [
+                    {"role": "system", "content": "Translate faithfully. Return only the translation."},
+                    {"role": "user", "content": f"Translate from {source} to {target_lang}:\n{text}"},
+                ],
+            },
+        )
+        response.raise_for_status()
         return str(response.json()["choices"][0]["message"]["content"]).strip()
 
     async def test_connection(self) -> tuple[bool, str]:

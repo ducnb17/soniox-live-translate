@@ -96,10 +96,10 @@ class PollyProvider(TTSProviderBase):
             timestamp=timestamp, datestamp=datestamp,
         )
 
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-            resp = await client.post(endpoint, content=payload, headers=signed_headers)
-            resp.raise_for_status()
-            yield resp.content
+        client = get_http_client()
+        resp = await client.post(endpoint, content=payload, headers=signed_headers)
+        resp.raise_for_status()
+        yield resp.content
 
     def _sign_v4(self, method, endpoint, region, service, headers, payload,
                  access_key, secret_key, timestamp, datestamp):

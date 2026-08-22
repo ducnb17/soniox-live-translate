@@ -98,17 +98,17 @@ class GoogleTTSProvider(TTSProviderBase):
             },
         }
 
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-            resp = await client.post(
-                f"{GOOGLE_TTS_URL}?key={self._api_key}",
-                json=payload,
-                headers={"Content-Type": "application/json"},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            audio_b64 = data.get("audioContent", "")
-            if audio_b64:
-                yield base64.b64decode(audio_b64)
+        client = get_http_client()
+        resp = await client.post(
+            f"{GOOGLE_TTS_URL}?key={self._api_key}",
+            json=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        audio_b64 = data.get("audioContent", "")
+        if audio_b64:
+            yield base64.b64decode(audio_b64)
 
     def estimate_cost(self, char_count: int) -> float:
         # Standard voices ~$4/million, WaveNet ~$16/million, Chirp3 HD ~$32/million

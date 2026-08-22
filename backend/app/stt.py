@@ -68,26 +68,26 @@ async def stream_url_to_stt(
     loop = asyncio.get_running_loop()
     sent_end_signal = False
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=60.0)) as client:
-            async with client.stream("GET", audio_url, follow_redirects=True) as resp:
-                resp.raise_for_status()
-                content_length = int(resp.headers.get("content-length", 0))
-                byte_rate = content_length / duration if content_length else 16000
-                bytes_per_tick = max(1, int(byte_rate * 0.1))
+        client = get_http_client()
+        async with client.stream("GET", audio_url, follow_redirects=True) as resp:
+            resp.raise_for_status()
+            content_length = int(resp.headers.get("content-length", 0))
+            byte_rate = content_length / duration if content_length else 16000
+            bytes_per_tick = max(1, int(byte_rate * 0.1))
 
-                buffer = bytearray()
-                next_tick = loop.time()
-                async for chunk in resp.aiter_bytes():
-                    buffer.extend(chunk)
-                    while len(buffer) >= bytes_per_tick:
-                        await stt_ws.send(bytes(buffer[:bytes_per_tick]))
-                        del buffer[:bytes_per_tick]
-                        next_tick += 0.1
-                        delay = next_tick - loop.time()
-                        if delay > 0:
-                            await asyncio.sleep(delay)
-                if buffer:
-                    await stt_ws.send(bytes(buffer))
+            buffer = bytearray()
+            next_tick = loop.time()
+            async for chunk in resp.aiter_bytes():
+                buffer.extend(chunk)
+                while len(buffer) >= bytes_per_tick:
+                    await stt_ws.send(bytes(buffer[:bytes_per_tick]))
+                    del buffer[:bytes_per_tick]
+                    next_tick += 0.1
+                    delay = next_tick - loop.time()
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+            if buffer:
+                await stt_ws.send(bytes(buffer))
     except httpx.HTTPError as e:
         log.warning("audio_fetch_failed", url=audio_url, error=str(e))
         try:
@@ -254,11 +254,27 @@ async def handle_stt(
                             # but haven't finished yet.  Add their output to this commit batch.
                             still_running = list(ext_translate_tasks)
                             ext_translate_tasks.clear()
-                            for _sl, _tgt, _st, end_off, task in still_running:
-                                try:
-                                    xlated = await task
-                                except Exception as exc:
-                                    log.error("ext_translate_partial_failed_at_end", error=str(exc))
+                            # Translate the tail not yet covered by any task, in
+                            # parallel with the in-flight tasks (asyncio.gather).
+                            remaining_tail = current_original[ext_translate_offset:]
+                            tail_task = (
+                                asyncio.ensure_future(
+                                    translate_text(remaining_tail, current_lang, ext_target)
+                                )
+                                if remaining_tail
+                                else None
+                            )
+                            results = await asyncio.gather(
+                                *(t for *_sl, _tgt, _st, _end_off, t in still_running),
+                                *( [tail_task] if tail_task else [] ),
+                                return_exceptions=True,
+                            )
+                            res_idx = 0
+                            for _sl, _tgt, _st, end_off, _t in still_running:
+                                xlated = results[res_idx]
+                                res_idx += 1
+                                if isinstance(xlated, BaseException):
+                                    log.error("ext_translate_partial_failed_at_end", error=str(xlated))
                                     continue
                                 if not xlated:
                                     continue
@@ -280,19 +296,18 @@ async def handle_stt(
                                         is_endpoint=False,
                                     )
                                     tts_chunks.append((part, ext_target, lp))
-                            # Translate only the tail not yet covered by any task.
-                            remaining_tail = current_original[ext_translate_offset:]
-                            if remaining_tail:
-                                try:
-                                    current_translation = await translate_text(
-                                        remaining_tail, current_lang, ext_target
-                                    )
-                                    full_translation += current_translation
-                                except Exception as exc:
-                                    log.error("external_translation_failed", error=str(exc))
+                            if tail_task is not None:
+                                tail_result = results[res_idx]
+                                if isinstance(tail_result, BaseException):
+                                    log.error("external_translation_failed", error=str(tail_result))
                                     await browser_ws.send_json({
-                                        "translation_error": {"message": str(exc)}
+                                        "translation_error": {"message": str(tail_result)}
                                     })
+                                elif tail_result:
+                                    full_translation += tail_result
+                                    current_translation = tail_result
+                                else:
+                                    current_translation = ""
                             else:
                                 # All text was already translated incrementally.
                                 current_translation = ""

@@ -21,6 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import config as runtime_config
+from .http_client import close_http_client
 from .config import (
     LANGUAGES,
     MAX_ENDPOINT_DELAY_MS,
@@ -150,6 +151,7 @@ async def lifespan(app: FastAPI):
     await init_db()
     yield
     await close_db()
+    await close_http_client()
 
 
 app = FastAPI(lifespan=lifespan)

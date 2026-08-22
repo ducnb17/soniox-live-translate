@@ -21,13 +21,13 @@ class DeepLTranslationProvider(TranslationProviderBase):
         data: dict[str, object] = {"text": [text], "target_lang": target_lang.upper()}
         if source_lang:
             data["source_lang"] = source_lang.upper()
-        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
-            response = await client.post(
-                f"{self._base_url()}/v2/translate",
-                headers=self._headers(),
-                json=data,
-            )
-            response.raise_for_status()
+        client = get_http_client()
+        response = await client.post(
+            f"{self._base_url()}/v2/translate",
+            headers=self._headers(),
+            json=data,
+        )
+        response.raise_for_status()
         return str(response.json()["translations"][0]["text"])
 
     async def test_connection(self) -> tuple[bool, str]:

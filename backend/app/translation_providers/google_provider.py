@@ -15,13 +15,13 @@ class GoogleTranslationProvider(TranslationProviderBase):
         payload: dict[str, object] = {"q": text, "target": target_lang, "format": "text"}
         if source_lang:
             payload["source"] = source_lang
-        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
-            response = await client.post(
-                "https://translation.googleapis.com/language/translate/v2",
-                params={"key": self._api_key},
-                json=payload,
-            )
-            response.raise_for_status()
+        client = get_http_client()
+        response = await client.post(
+            "https://translation.googleapis.com/language/translate/v2",
+            params={"key": self._api_key},
+            json=payload,
+        )
+        response.raise_for_status()
         translations = response.json()["data"]["translations"]
         return str(translations[0]["translatedText"])
 

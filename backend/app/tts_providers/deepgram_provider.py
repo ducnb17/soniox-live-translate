@@ -53,10 +53,10 @@ class DeepgramProvider(TTSProviderBase):
             "Content-Type": "application/json",
         }
 
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-            resp = await client.post(url, json={"text": text}, headers=headers)
-            resp.raise_for_status()
-            yield resp.content
+        client = get_http_client()
+        resp = await client.post(url, json={"text": text}, headers=headers)
+        resp.raise_for_status()
+        yield resp.content
 
     def estimate_cost(self, char_count: int) -> float:
         # ~$15/million chars for Aura

@@ -52,18 +52,18 @@ class OpenAITTSProvider(TTSProviderBase):
             "speed": 1.0,
         }
 
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-            resp = await client.post(
-                OPENAI_TTS_URL,
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {self._api_key}",
-                    "Content-Type": "application/json",
-                },
-            )
-            resp.raise_for_status()
-            # OpenAI returns 24kHz pcm_s16le raw bytes directly
-            yield resp.content
+        client = get_http_client()
+        resp = await client.post(
+            OPENAI_TTS_URL,
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json",
+            },
+        )
+        resp.raise_for_status()
+        # OpenAI returns 24kHz pcm_s16le raw bytes directly
+        yield resp.content
 
     def estimate_cost(self, char_count: int) -> float:
         # tts-1: $15/million chars, tts-1-hd: $30/million chars

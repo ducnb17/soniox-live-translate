@@ -1,0 +1,6 @@
+# Optional heavy Google Cloud dependencies — only needed when the user
+# selects "Google Cloud STT V2 (Chirp 3 HD)" or Google TTS providers.
+# Install separately:  pip install -r requirements-google.txt
+# Kept out of the main requirements to keep the desktop bundle ~30-50MB smaller.
+google-cloud-speech>=2.27
+google-auth>=2.20

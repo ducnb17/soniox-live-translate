@@ -38,23 +38,23 @@ class ElevenLabsProvider(TTSProviderBase):
         if not self._api_key:
             return self._default_voices()
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
-                resp = await client.get(
-                    ELEVENLABS_VOICES_URL,
-                    headers={"xi-api-key": self._api_key},
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                voices = []
-                for v in data.get("voices", []):
-                    name = v.get("name", "Unknown")
-                    vid = v.get("voice_id", "")
-                    voices.append(Voice(
-                        id=vid, name=name,
-                        language=lang or "en", gender="neutral",
-                        provider_id="elevenlabs",
-                    ))
-                return voices
+            client = get_http_client()
+            resp = await client.get(
+                ELEVENLABS_VOICES_URL,
+                headers={"xi-api-key": self._api_key},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            voices = []
+            for v in data.get("voices", []):
+                name = v.get("name", "Unknown")
+                vid = v.get("voice_id", "")
+                voices.append(Voice(
+                    id=vid, name=name,
+                    language=lang or "en", gender="neutral",
+                    provider_id="elevenlabs",
+                ))
+            return voices
         except Exception as e:
             log.warning("elevenlabs_voice_list_failed", error=str(e))
             return self._default_voices()
@@ -83,14 +83,14 @@ class ElevenLabsProvider(TTSProviderBase):
             "output_format": "pcm_24000",
         }
 
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-            async with client.stream(
-                "POST", url, json=payload,
-                headers={"xi-api-key": self._api_key, "Content-Type": "application/json"},
-            ) as resp:
-                resp.raise_for_status()
-                async for chunk in resp.aiter_bytes():
-                    yield chunk
+        client = get_http_client()
+        async with client.stream(
+            "POST", url, json=payload,
+            headers={"xi-api-key": self._api_key, "Content-Type": "application/json"},
+        ) as resp:
+            resp.raise_for_status()
+            async for chunk in resp.aiter_bytes():
+                yield chunk
 
     def estimate_cost(self, char_count: int) -> float:
         # ~$0.18/1000 chars for Turbo v2.5 = $180/million

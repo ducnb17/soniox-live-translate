@@ -1,0 +1,11 @@
+# Server-only dependencies for Docker / headless deployment.
+# Excludes Windows-only (pywin32/pythonnet/pywebview) and optional heavy
+# Google Cloud packages — see requirements-google.txt.
+fastapi==0.139.2
+uvicorn==0.51.0
+websockets==16.1.1
+httpx==0.28.1
+python-dotenv==1.2.2
+structlog==26.1.0
+aiosqlite==0.22.1
+sentry-sdk[fastapi]>=2.0,<3

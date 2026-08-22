@@ -9,13 +9,13 @@ RUN pnpm install --frozen-lockfile
 COPY frontend/ ./
 RUN pnpm build
 
-# --- Stage 2: Backend ---
+# --- Stage 2: Backend (server-only deps — no Google/pywebview/pythonnet) ---
 FROM python:3.13-slim AS backend
 WORKDIR /app/backend
 
-# Install deps
-COPY backend/requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+# Server-only requirements (fastapi/uvicorn/httpx/websockets/structlog/aiosqlite/sentry)
+COPY backend/requirements-server.txt ./
+RUN pip install --no-cache-dir -r requirements-server.txt
 
 # Copy backend source
 COPY backend/ ./

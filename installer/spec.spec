@@ -1,6 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os, sys
-from PyInstaller.utils.hooks import collect_submodules
 
 # SPECPATH = installer/ (directory containing this .spec file)
 ROOT          = os.path.abspath(os.path.join(SPECPATH, '..'))
@@ -16,7 +15,26 @@ if ROOT not in sys.path:
 if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
-uvicorn_hiddenimports = collect_submodules('uvicorn')
+# Only the uvicorn pieces we actually use (asyncio loop) — avoids pulling
+# every loop implementation / protocol submodule into the bundle.
+uvicorn_hiddenimports = [
+    'uvicorn',
+    'uvicorn.server',
+    'uvicorn.config',
+    'uvicorn.loops',
+    'uvicorn.loops.asyncio',
+    'uvicorn.protocols',
+    'uvicorn.protocols.http',
+    'uvicorn.protocols.http.h11_impl',
+    'uvicorn.protocols.http.auto',
+    'uvicorn.protocols.websockets',
+    'uvicorn.protocols.websockets.auto',
+    'uvicorn.protocols.websockets.websockets_impl',
+    'uvicorn.lifespan',
+    'uvicorn.lifespan.on',
+    'uvicorn.middleware',
+    'uvicorn.middleware.proxy_headers',
+]
 
 a = Analysis(
     [LAUNCHER],
@@ -64,7 +82,7 @@ a = Analysis(
     ],
     hookspath=[],
     runtime_hooks=[],
-    excludes=['tkinter', 'matplotlib', 'numpy', 'scipy', 'pandas', 'pytest'],
+    excludes=['tkinter', 'matplotlib', 'scipy', 'pandas', 'pytest'],
     noarchive=False,
 )
 
