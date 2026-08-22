@@ -18,11 +18,11 @@ State
 
     tts_state = {
         "directions": {
-            "es": {"current_stream_id": None, "stream_used": False, "idle_event": <Event>},
-            "en": {"current_stream_id": None, "stream_used": False, "idle_event": <Event>},
+            "es": {"streams": {}, "prewarmed": None, "seq": 0},
+            "en": {"streams": {}, "prewarmed": None, "seq": 0},
         },
         "stream_id_to_direction": {
-            "utterance-1": {"direction": "es", "line_id": 1},
+            "utt-1-es": {"direction": "es", "line_id": 1},
             "prewarm-es": {"direction": "es", "line_id": None},
             ...,
         },
@@ -77,13 +77,23 @@ def get_tts_config(stream_id: str, voice: str, lang: str) -> dict[str, Any]:
 
 
 def new_tts_state(directions: list[str]) -> dict[str, Any]:
-    """Build a fresh, empty multi-direction TTS state."""
+    """Build a fresh, empty multi-direction TTS state.
+
+    Each direction keeps a *pool* of open stream slots instead of a single
+    stream. This lets a new sentence open a fresh stream immediately (no
+    waiting for the previous sentence to finish speaking), so TTS keeps up
+    with streaming STT+translation in real time.
+    """
     return {
         "directions": {
             d: {
-                "current_stream_id": None,
-                "stream_used": False,
-                "idle_event": asyncio.Event(),
+                # Active streams for this direction: stream_id -> line_id.
+                "streams": {},
+                # Prewarmed-but-unused stream that can be claimed by the
+                # first sentence that needs it.
+                "prewarmed": None,
+                # Count of stream ids handed out (for unique naming).
+                "seq": 0,
             }
             for d in directions
         },
@@ -104,18 +114,17 @@ async def prewarm_stream(
     """Pre-open a TTS stream for `direction` so the first utterance doesn't
     pay the round-trip for stream setup. Idempotent — skips if already open."""
     d = tts_state["directions"].get(direction)
-    if d is None or d["current_stream_id"] is not None:
+    if d is None or d["prewarmed"] is not None:
         return
     stream_id = f"{PREWARM_STREAM_ID}-{direction}"
     try:
         await tts_ws.send(json.dumps(get_tts_config(stream_id=stream_id, voice=voice, lang=direction)))
-        d["current_stream_id"] = stream_id
+        d["prewarmed"] = stream_id
         # A prewarmed stream does not belong to a line until its first text.
         tts_state["stream_id_to_direction"][stream_id] = {
             "direction": direction,
             "line_id": None,
         }
-        d["idle_event"].clear()
     except websockets.WebSocketException as exc:
         # Don't swallow silently — a failed prewarm means the first spoken
         # line will have no audio.  Log it so it's diagnosable.
@@ -172,111 +181,62 @@ async def tts_sender(
                     # lang_a/lang_b): drop silently.
                     continue
 
-                # One Soniox stream belongs to exactly one rendered line. If
-                # STT split a long utterance into multiple lines, finish the
-                # previous line before assigning a stream to the next one.
-                current_sid = d["current_stream_id"]
-                if current_sid is not None and d["stream_used"]:
-                    current_meta = tts_state["stream_id_to_direction"].get(
-                        current_sid, {}
-                    )
-                    if current_meta.get("line_id") != line_id:
-                        await tts_ws.send(
-                            json.dumps(
-                                {
-                                    "stream_id": current_sid,
-                                    "text": "",
-                                    "text_end": True,
-                                }
-                            )
-                        )
-                        d["current_stream_id"] = None
-                        d["stream_used"] = False
-
-                # Open a fresh line stream if idle.
-                if d["current_stream_id"] is None:
-                    await d["idle_event"].wait()
-                    # Skip if a barge arrived while waiting.
-                    if my_epoch != tts_state["barge_epoch"]:
-                        continue
-                    stream_counter += 1
-                    stream_id = f"utterance-{stream_counter}-{direction}"
-                    await tts_ws.send(
-                        json.dumps(
-                            get_tts_config(
-                                stream_id=stream_id,
-                                voice=direction_voices[direction],
-                                lang=direction,
-                            )
+                # Open a fresh stream for this sentence immediately — never
+                # wait for a previous sentence to finish speaking. Each
+                # sentence gets its own Soniox stream so TTS stays in lockstep
+                # with streaming STT+translation (real-time dubbing), instead
+                # of buffering a whole paragraph and reading it after STT
+                # finishes.
+                d["seq"] += 1
+                stream_id = f"utt-{d['seq']}-{direction}"
+                await tts_ws.send(
+                    json.dumps(
+                        get_tts_config(
+                            stream_id=stream_id,
+                            voice=direction_voices[direction],
+                            lang=direction,
                         )
                     )
-                    d["current_stream_id"] = stream_id
-                    tts_state["stream_id_to_direction"][stream_id] = {
-                        "direction": direction,
-                        "line_id": line_id,
-                    }
-                    d["idle_event"].clear()
-                else:
-                    # Bind a prewarmed stream to the first line that uses it.
-                    current_meta = tts_state["stream_id_to_direction"].get(
-                        d["current_stream_id"]
-                    )
-                    if current_meta is not None and current_meta.get("line_id") is None:
-                        current_meta["line_id"] = line_id
+                )
+                tts_state["stream_id_to_direction"][stream_id] = {
+                    "direction": direction,
+                    "line_id": line_id,
+                }
 
                 await tts_ws.send(
                     json.dumps(
                         {
-                            "stream_id": d["current_stream_id"],
+                            "stream_id": stream_id,
                             "text": payload,
-                            "text_end": False,
+                            "text_end": True,  # one complete sentence per stream
                         }
                     )
                 )
-                d["stream_used"] = True
                 direction_char_counts[direction] = direction_char_counts.get(direction, 0) + len(payload)
 
             elif kind == TTS_END:
                 _, direction = data
-                # direction may be None for the trailing injection from
-                # `handle_stt`'s finally; apply to any direction with an
-                # open stream in that case.
+                # With per-sentence streams, every text already carried
+                # text_end=True, so there is nothing to flush here — streams
+                # close themselves when Soniox finishes reading them. This
+                # branch only clears usage counters (and any prewarmed stream
+                # that was never claimed).
                 targets = [direction] if direction else list(tts_state["directions"])
                 for tgt in targets:
                     d = tts_state["directions"].get(tgt)
                     if d is None:
                         continue
-                    if d["current_stream_id"] is not None and d["stream_used"]:
-                        sid = d["current_stream_id"]
-                        await tts_ws.send(
-                            json.dumps(
-                                {
-                                    "stream_id": sid,
-                                    "text": "",
-                                    "text_end": True,
-                                }
+                    # Cancel a prewarmed-but-unused stream to release the slot.
+                    if d["prewarmed"] is not None:
+                        sid = d["prewarmed"]
+                        try:
+                            await tts_ws.send(
+                                json.dumps({"stream_id": sid, "cancel": True})
                             )
-                        )
-                        d["current_stream_id"] = None
-                        d["stream_used"] = False
-                        # Keep stream_id_to_direction entry — Soniox WILL send
-                        # a `terminated` event for text_end streams, which
-                        # pipe_tts_to_browser uses to fire session_done.
-                    elif d["current_stream_id"] is not None and not d["stream_used"]:
-                        # Pre-warmed stream that never received text: cancel it
-                        # to release the slot.
-                        sid = d["current_stream_id"]
-                        await tts_ws.send(
-                            json.dumps(
-                                {"stream_id": sid, "cancel": True}
-                            )
-                        )
-                        d["current_stream_id"] = None
-                        # Soniox may NOT send a `terminated` event for a
-                        # cancelled stream. Remove from the routing map so
-                        # the session_done check (which requires the map to
-                        # be empty) can fire.
+                        except websockets.WebSocketException:
+                            pass
                         tts_state["stream_id_to_direction"].pop(sid, None)
+                        d["prewarmed"] = None
                     char_count = direction_char_counts.get(tgt, 0)
                     if char_count and browser_ws is not None:
                         try:
@@ -387,10 +347,9 @@ async def pipe_tts_to_browser(
                     if direction is not None:
                         d = tts_state["directions"].get(direction)
                         if d is not None:
-                            if d["current_stream_id"] == error_stream_id:
-                                d["current_stream_id"] = None
-                                d["stream_used"] = False
-                            d["idle_event"].set()
+                            d["streams"].pop(error_stream_id, None)
+                            if d["prewarmed"] == error_stream_id:
+                                d["prewarmed"] = None
 
                 continue
 
@@ -421,10 +380,9 @@ async def pipe_tts_to_browser(
                 if direction is not None:
                     d = tts_state["directions"].get(direction)
                     if d is not None:
-                        if d["current_stream_id"] == sid:
-                            d["current_stream_id"] = None
-                            d["stream_used"] = False
-                        d["idle_event"].set()
+                        d["streams"].pop(sid, None)
+                        if d["prewarmed"] == sid:
+                            d["prewarmed"] = None
 
                 _maybe_send_session_done_sync(tts_state, pending_audio_empty=not pending_audio_by_stream)
                 if tts_state.get("_session_done_sent"):
@@ -503,7 +461,7 @@ def _maybe_send_session_done_sync(tts_state: dict, *, pending_audio_empty: bool 
     if not tts_state.get("stt_done"):
         return
     if not all(
-        d["current_stream_id"] is None
+        not d["streams"] and d["prewarmed"] is None
         for d in tts_state["directions"].values()
     ):
         return
@@ -545,17 +503,13 @@ async def _cancel_open_streams(tts_ws, tts_state: dict) -> None:
     """Send Soniox `cancel` for every currently-open TTS stream so it stops
     synthesizing immediately and frees the slot. Notifies the browser too."""
     for direction, d in tts_state["directions"].items():
-        sid = d["current_stream_id"]
-        if sid is None:
-            continue
-        try:
-            await tts_ws.send(json.dumps({"stream_id": sid, "cancel": True}))
-        except websockets.ConnectionClosedOK:
-            pass
-        # The terminated event from Soniox will come back via
-        # `pipe_tts_to_browser` and reset current_stream_id. But set it
-        # optimistically so we don't keep sending text to a cancelled stream.
-        d["current_stream_id"] = None
-        d["stream_used"] = False
+        # Cancel all active streams for this direction plus the prewarmed one.
+        for sid in list(d["streams"]) + ([d["prewarmed"]] if d["prewarmed"] else []):
+            try:
+                await tts_ws.send(json.dumps({"stream_id": sid, "cancel": True}))
+            except websockets.ConnectionClosedOK:
+                pass
+        d["streams"].clear()
+        d["prewarmed"] = None
     # Clear the reverse map; terminated events for these sids will be no-ops.
     tts_state["stream_id_to_direction"].clear()

@@ -50,19 +50,26 @@ async def test_prewarmed_stream_is_bound_to_first_text_line_id():
     await queue.put(TTS_NONE)
     await tts_sender(queue, state, tts_ws, {"vi": "Maya"})
 
-    assert state["stream_id_to_direction"]["prewarm-vi"] == {
+    # Per-sentence streams: the first text opens a fresh `utt-1-vi` stream
+    # and sends the full sentence with text_end=True. The prewarmed stream
+    # stays unclaimed (TTS_END cancels it).
+    assert state["stream_id_to_direction"]["utt-1-vi"] == {
         "direction": "vi",
         "line_id": 23,
     }
+    sent_text = [m for m in tts_ws.messages if m.get("text")]
+    assert sent_text and sent_text[0]["text"] == "xin chào"
+    assert sent_text[0]["text_end"] is True
+    # The prewarmed stream was cancelled on TTS_END.
+    assert state["stream_id_to_direction"].get("prewarm-vi") is None
 
 
 async def test_audio_meta_immediately_precedes_binary_and_routes_terminated_stream():
     first_audio = b"pcm-audio-1"
     final_audio = b"pcm-audio-2"
-    stream_id = "utterance-1-vi"
+    stream_id = "utt-1-vi"
     state = new_tts_state(["vi"])
-    state["directions"]["vi"]["current_stream_id"] = stream_id
-    state["directions"]["vi"]["stream_used"] = True
+    state["directions"]["vi"]["streams"] = {stream_id: 17}
     state["stream_id_to_direction"][stream_id] = {
         "direction": "vi",
         "line_id": 17,
@@ -107,5 +114,5 @@ async def test_audio_meta_immediately_precedes_binary_and_routes_terminated_stre
         ("bytes", final_audio),
     ]
     assert stream_id not in state["stream_id_to_direction"]
-    assert state["directions"]["vi"]["current_stream_id"] is None
-    assert state["directions"]["vi"]["idle_event"].is_set()
+    assert state["directions"]["vi"]["streams"] == {}
+    assert state["directions"]["vi"]["prewarmed"] is None

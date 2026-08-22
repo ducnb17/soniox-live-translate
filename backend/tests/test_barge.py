@@ -67,8 +67,8 @@ class TestDrainQueue:
 class TestCancelOpenStreams:
     async def test_cancel_sends_cancel_for_each_open_stream(self):
         state = new_tts_state(["en", "es"])
-        state["directions"]["en"]["current_stream_id"] = "utterance-1-en"
-        state["directions"]["es"]["current_stream_id"] = "utterance-2-es"
+        state["directions"]["en"]["streams"] = {"utterance-1-en": 1}
+        state["directions"]["es"]["streams"] = {"utterance-2-es": 2}
         state["stream_id_to_direction"] = {
             "utterance-1-en": {"direction": "en", "line_id": 1},
             "utterance-2-es": {"direction": "es", "line_id": 2},
@@ -84,8 +84,8 @@ class TestCancelOpenStreams:
         assert cancel_ids == {"utterance-1-en", "utterance-2-es"}
 
         # State cleared
-        assert state["directions"]["en"]["current_stream_id"] is None
-        assert state["directions"]["es"]["current_stream_id"] is None
+        assert state["directions"]["en"]["streams"] == {}
+        assert state["directions"]["es"]["streams"] == {}
         assert state["stream_id_to_direction"] == {}
 
     async def test_cancel_no_open_streams_is_noop(self):
