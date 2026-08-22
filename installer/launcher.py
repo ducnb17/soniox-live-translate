@@ -83,7 +83,9 @@ if _saved_api_key:
 
 
 HOST = "127.0.0.1"
-PORT = int(_cfg.get("PORT", 8765))
+# 8766: not 8765 — WSL2 (wslrelay) forwards 127.0.0.1:8765 to the HF
+# speech-to-speech server; keep the Windows app backend on its own port.
+PORT = int(_cfg.get("PORT", 8766))
 BASE_URL = f"http://{HOST}:{PORT}"
 
 

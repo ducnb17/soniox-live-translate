@@ -23,7 +23,9 @@ from typing import Any
 APP_NAME = "SonioxLiveTranslate"
 
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 8765
+# 8766: not 8765 — WSL2 (wslrelay) forwards 127.0.0.1:8765 to the HF
+# speech-to-speech server; keep the Windows app backend on its own port.
+DEFAULT_PORT = 8766
 DPAPI_PREFIX = "dpapi:v1:"
 CRYPTPROTECT_UI_FORBIDDEN = 0x1
 

@@ -34,7 +34,9 @@ const fs = require("node:fs");
 const { isLocalAppUrl: hasLocalOrigin, safeExternalHttpUrl } = require("./url-policy");
 
 const HOST = "127.0.0.1";
-const PORT = 8765;
+// 8766: not 8765 — WSL2 (wslrelay) forwards 127.0.0.1:8765 to the HF
+// speech-to-speech server, so the Windows backend could never bind it.
+const PORT = 8766;
 const BASE_URL = `http://${HOST}:${PORT}`;
 const HEALTH_URL = `${BASE_URL}/health`;
 const SETUP_STATUS_URL = `${BASE_URL}/setup/status`;

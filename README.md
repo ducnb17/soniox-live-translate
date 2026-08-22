@@ -89,7 +89,7 @@ FastAPI /ws/translate ──► Soniox STT+translation (wss://stt-rt.soniox.com)
 ### Development (hot reload)
 
 Two terminals — Vite dev server (frontend, port 5173) proxies to FastAPI
-(backend, port 8765):
+(backend, port 8766):
 
 #### Terminal 1 — backend
 
@@ -102,7 +102,7 @@ py -3.13 -m venv .venv
 python -m pip install -r requirements.txt
 Copy-Item .env.example .env
 # Edit .env and replace your_key_here with your SONIOX_API_KEY.
-python -m uvicorn app.main:app --reload --port 8765
+python -m uvicorn app.main:app --reload --port 8766
 ```
 
 macOS/Linux:
@@ -114,13 +114,13 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt
 cp .env.example .env
 # Edit .env and replace your_key_here with your SONIOX_API_KEY.
-python -m uvicorn app.main:app --reload --port 8765
+python -m uvicorn app.main:app --reload --port 8766
 ```
 
 Confirm the backend before starting Vite:
 
 ```text
-http://127.0.0.1:8765/health  →  {"status":"ok"}
+http://127.0.0.1:8766/health  →  {"status":"ok"}
 ```
 
 #### Terminal 2 — frontend
@@ -134,7 +134,7 @@ pnpm run dev
 ```
 
 Open <http://127.0.0.1:5173>. Vite proxies `/health`, `/config`, `/setup`,
-`/transcript`, `/api`, and `/ws` to the backend on port 8765, so setup,
+`/transcript`, `/api`, and `/ws` to the backend on port 8766, so setup,
 history, retention, multi-TTS, and live translation use the same backend.
 
 On Windows, the `/setup` page can save keys into the DPAPI-encrypted user
@@ -148,10 +148,10 @@ cd frontend
 pnpm install
 pnpm run build   # tsc --noEmit + Vite → frontend/dist/
 cd ../backend
-python -m uvicorn app.main:app --port 8765
+python -m uvicorn app.main:app --port 8766
 ```
 
-Open <http://127.0.0.1:8765>. The production server serves the compiled
+Open <http://127.0.0.1:8766>. The production server serves the compiled
 `frontend/dist/`; run the frontend build before starting it.
 
 For mic mode: click the mode-toggle (bottom-left) to switch from "Play audio

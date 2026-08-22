@@ -42,13 +42,13 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/health": "http://127.0.0.1:8765",
-      "/config": "http://127.0.0.1:8765",
-      "/setup": "http://127.0.0.1:8765",
-      "/transcript": "http://127.0.0.1:8765",
-      "/api": "http://127.0.0.1:8765",
+      "/health": "http://127.0.0.1:8766",
+      "/config": "http://127.0.0.1:8766",
+      "/setup": "http://127.0.0.1:8766",
+      "/transcript": "http://127.0.0.1:8766",
+      "/api": "http://127.0.0.1:8766",
       "/ws": {
-        target: "ws://127.0.0.1:8765",
+        target: "ws://127.0.0.1:8766",
         ws: true,
       },
     },
