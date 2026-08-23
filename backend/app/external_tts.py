@@ -53,16 +53,18 @@ async def external_tts_sender(
     states: dict[str, DirectionState] = {d: DirectionState() for d in direction_voices}
 
     async def synthesize_one(direction: str, text: str, seq: int, line_id: int, state: DirectionState) -> None:
+        # Synthesize FIRST, then register the result — avoids race where
+        # playback_loop awaits a future that is not yet scheduled.
+        try:
+            audio = await _run_synthesize(browser_ws, provider, provider_id, direction_voices[direction], direction, text, fallback_synthesize)
+        except Exception:
+            audio = b""
         fut: asyncio.Future[bytes] = asyncio.get_running_loop().create_future()
+        fut.set_result(audio)
         async with state.cv:
             state.pending[seq] = (line_id, fut)
-            state.cv.notify()
-        try:
-            audio = await _run_synthesize(browser_ws, provider, provider_id, direction_voices[direction], direction, text)
-        except Exception:
-            fut.set_result(b"")
-        else:
-            fut.set_result(audio)
+            in_flight[direction] -= 1
+            state.cv.notify_all()
 
     async def playback_loop(direction: str, state: DirectionState) -> None:
         while True:
@@ -78,24 +80,29 @@ async def external_tts_sender(
                 audio = b""
             if audio:
                 try:
-                    await browser_ws.send_json(
-                        {
-                            "type": "audio_chunk_meta",
-                            "line_id": line_id,
-                            "byte_length": len(audio),
-                            "line_audio_end": True,
-                        }
-                    )
+                    await browser_ws.send_json({
+                        "type": "audio_chunk_meta",
+                        "line_id": line_id,
+                        "byte_length": len(audio),
+                        "line_audio_end": True,
+                    })
                     await browser_ws.send_bytes(audio)
                 except Exception:
-                    return
+                    pass  # log but NEVER return — keep the loop alive for next sentences
             async with state.cv:
                 state.next_seq = seq + 1
+                state.cv.notify_all()
+
+    # Global seq counter per direction — must be incremented atomically under cv.
+    direction_seq: dict[str, int] = {d: 0 for d in direction_voices}
+    in_flight: dict[str, int] = {d: 0 for d in direction_voices}
 
     async def handle_text(direction: str, text: str, line_id: int) -> None:
         state = states[direction]
         async with state.cv:
-            seq = state.next_seq + len(state.pending)
+            seq = direction_seq[direction]
+            direction_seq[direction] += 1
+            in_flight[direction] += 1
         asyncio.create_task(synthesize_one(direction, text, seq, line_id, state))
 
     controllers = {
@@ -107,27 +114,25 @@ async def external_tts_sender(
         while True:
             data = await tts_queue.get()
             if data is TTS_NONE:
-                # Let in-flight synthesis finish and drain the ordered queue
-                # before signaling the end of the session.
-                for state in states.values():
+                # Wait for all in-flight synthesis tasks to finish and
+                # playback controllers to drain their pending queues.
+                for direction, state in states.items():
                     async with state.cv:
-                        while state.next_seq in state.pending:
-                            state.cv.notify()
-                    while True:
-                        async with state.cv:
-                            if state.next_seq not in state.pending and state.next_seq > 0:
-                                break
-                        await asyncio.sleep(0.01)
+                        await state.cv.wait_for(
+                            lambda d=direction, s=state: in_flight[d] == 0 and not s.pending
+                        )
                 await _safe_json(browser_ws, {"session_done": True})
                 return
             kind = data[0]
             if kind == TTS_BARGE:
-                for state in states.values():
+                for direction, state in states.items():
                     async with state.cv:
-                        for fut in list(state.pending.values()):
+                        for _, fut in list(state.pending.values()):
                             fut.cancel()
                         state.pending.clear()
                         state.next_seq = 0
+                        direction_seq[direction] = 0
+                        in_flight[direction] = 0
                         state.cv.notify_all()
                 my_epoch = tts_state["barge_epoch"]
                 continue
@@ -151,6 +156,7 @@ async def _run_synthesize(
     voice_id: str,
     direction: str,
     text: str,
+    fallback_synthesize: Callable[[str, str, str], Awaitable[bytes]] = synthesize_soniox_text,
 ) -> bytes:
     cache_hit = False
     used_provider = provider_id
@@ -163,7 +169,9 @@ async def _run_synthesize(
         try:
             if provider is None:
                 raise ValueError(f"Unknown TTS provider: {provider_id}")
-            chunks = [chunk async for chunk in provider.synthesize_stream(text, voice_id, direction)]
+            chunks: list[bytes] = []
+            async for chunk in provider.synthesize_stream(text, voice_id, direction):
+                chunks.append(chunk)
             audio = b"".join(chunks)
             if not audio:
                 raise RuntimeError(f"{provider_id} returned no audio")
@@ -183,7 +191,7 @@ async def _run_synthesize(
             audio = tts_cache.get(text, "Maya", "soniox")
             if audio is None:
                 try:
-                    audio = await synthesize_soniox_text(text, "Maya", direction)
+                    audio = await fallback_synthesize(text, "Maya", direction)
                     tts_cache.set(text, "Maya", "soniox", audio)
                 except Exception as fallback_exc:
                     await _safe_json(browser_ws, {
@@ -194,14 +202,13 @@ async def _run_synthesize(
                     })
                     return b""
 
-    if used_provider == provider_id and not cache_hit:
-        await _safe_json(browser_ws, {
-            "tts_usage": {
-                "provider_id": used_provider,
-                "voice_id": voice_id,
-                "characters": len(text),
-                "estimated_cost_usd": estimated_cost,
-                "cache_hit": cache_hit,
-            }
-        })
+    await _safe_json(browser_ws, {
+        "tts_usage": {
+            "provider_id": used_provider,
+            "voice_id": voice_id,
+            "characters": len(text),
+            "estimated_cost_usd": 0.0 if cache_hit else estimated_cost,
+            "cache_hit": cache_hit,
+        }
+    })
     return audio

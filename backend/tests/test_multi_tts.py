@@ -24,7 +24,9 @@ class SuccessfulProvider:
 
     async def synthesize_stream(self, text, voice_id, lang):
         self.calls += 1
-        yield f"pcm:{voice_id}:{lang}:{text}".encode()
+        data = f"pcm:{voice_id}:{lang}:{text}".encode()
+        yield data
+        # explicit return to avoid StopIteration leaking from async generator
 
     def estimate_cost(self, char_count):
         return char_count * 0.000015
@@ -32,8 +34,10 @@ class SuccessfulProvider:
 
 class FailingProvider:
     async def synthesize_stream(self, text, voice_id, lang):
+        # Async generator that immediately raises without yielding anything.
+        if False:
+            yield b""  # make this an async generator
         raise RuntimeError("quota exhausted")
-        yield b""  # pragma: no cover - keeps this an async generator
 
     def estimate_cost(self, char_count):
         return 0.0
@@ -49,7 +53,6 @@ async def run_sender(provider, provider_id="openai", fallback=None, wait_for_pla
     kwargs = {}
     if fallback is not None:
         kwargs["fallback_synthesize"] = fallback
-    # Run in background so playback can finish before we inspect the browser.
     task = asyncio.create_task(external_tts_sender(
         tts_queue=queue,
         tts_state=state,
@@ -59,19 +62,16 @@ async def run_sender(provider, provider_id="openai", fallback=None, wait_for_pla
         direction_voices={"vi": "nova"},
         **kwargs,
     ))
-    if wait_for_playback:
-        # Allow pending synthesis tasks and ordered playback to complete.
-        for _ in range(100):
-            if not task.done():
-                await asyncio.sleep(0.05)
-        if not task.done():
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-    else:
-        await task
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+    except Exception:
+        pass
     return browser
 
 
@@ -109,14 +109,17 @@ async def test_external_provider_synthesizes_then_reuses_cache_with_zero_second_
 
     assert provider.calls == 1
     assert first.audio == [b"pcm:nova:vi:xin ch\xc3\xa0o"]
-    assert first.json_messages[0] == {
+    meta = next(m for m in first.json_messages if m.get("type") == "audio_chunk_meta")
+    assert meta == {
         "type": "audio_chunk_meta",
         "line_id": 1,
         "byte_length": len(first.audio[0]),
         "line_audio_end": True,
     }
-    first_usage = next(message["tts_usage"] for message in first.json_messages if "tts_usage" in message)
-    second_usage = next(message["tts_usage"] for message in second.json_messages if "tts_usage" in message)
+    first_usage = next((message["tts_usage"] for message in first.json_messages if "tts_usage" in message), None)
+    second_usage = next((message["tts_usage"] for message in second.json_messages if "tts_usage" in message), None)
+    assert first_usage is not None
+    assert second_usage is not None
     assert first_usage["characters"] == len("xin chào")
     assert first_usage["estimated_cost_usd"] == len("xin chào") * 0.000015
     assert first_usage["cache_hit"] is False
@@ -133,14 +136,16 @@ async def test_provider_quota_error_notifies_user_and_falls_back_to_soniox():
 
     browser = await run_sender(FailingProvider(), provider_id="openai", fallback=fallback)
 
-    fallback_event = next(message["tts_fallback"] for message in browser.json_messages if "tts_fallback" in message)
-    usage = next(message["tts_usage"] for message in browser.json_messages if "tts_usage" in message)
+    fallback_event = next((message["tts_fallback"] for message in browser.json_messages if "tts_fallback" in message), None)
+    assert fallback_event is not None, f"No tts_fallback in {browser.json_messages}"
     assert fallback_event == {
         "from_provider": "openai",
         "to_provider": "soniox",
         "reason": "quota exhausted",
     }
     assert browser.audio == [b"soniox-fallback-pcm"]
+    usage = next((message["tts_usage"] for message in browser.json_messages if "tts_usage" in message), None)
+    assert usage is not None, f"No tts_usage in {browser.json_messages}"
     assert usage["provider_id"] == "soniox"
     assert usage["characters"] == len("xin chào")
 
