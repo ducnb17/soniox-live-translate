@@ -37,16 +37,18 @@ class TestNewTtsState:
     def test_one_direction(self):
         state = new_tts_state(["es"])
         assert "es" in state["directions"]
-        assert state["directions"]["es"]["current_stream_id"] is None
-        assert state["directions"]["es"]["stream_used"] is False
+        assert state["directions"]["es"]["streams"] == {}
+        assert state["directions"]["es"]["prewarmed"] is None
+        assert state["directions"]["es"]["seq"] == 0
         assert state["stt_done"] is False
         assert state["barge_epoch"] == 0
 
     def test_two_directions(self):
         state = new_tts_state(["en", "es"])
         assert set(state["directions"]) == {"en", "es"}
-        # Each direction gets its own idle_event
-        assert state["directions"]["en"]["idle_event"] is not state["directions"]["es"]["idle_event"]
+        # Each direction gets its own streams dict / prewarmed slot
+        assert state["directions"]["en"]["streams"] is not state["directions"]["es"]["streams"]
+        assert state["directions"]["en"]["prewarmed"] is state["directions"]["es"]["prewarmed"] is None
 
 
 class TestDrainQueue:

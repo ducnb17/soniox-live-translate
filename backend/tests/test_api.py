@@ -123,7 +123,7 @@ class TestSetupPost:
 
 class TestTtsProviderApi:
     expected_providers = {
-        "soniox", "google", "openai", "azure", "elevenlabs", "deepgram", "polly", "pocket_tts",
+        "soniox", "google", "openai", "azure", "elevenlabs", "deepgram", "polly", "pocket_tts", "edge_tts",
     }
 
     def test_lists_all_eight_provider_choices(self, client):

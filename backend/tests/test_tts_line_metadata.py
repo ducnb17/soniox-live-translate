@@ -2,8 +2,19 @@ import asyncio
 import base64
 import json
 
+import pytest
+
 from app.stt import TTS_END, TTS_NONE, TTS_TEXT
+from app import config_store
+from app import tts as tts_module
 from app.tts import new_tts_state, pipe_tts_to_browser, prewarm_stream, tts_sender
+
+
+@pytest.fixture(autouse=True)
+def _no_dpapi(monkeypatch):
+    """Avoid Windows DPAPI requirement when reading TTS keys on Linux."""
+    monkeypatch.setattr(config_store, "get_tts_api_key", lambda provider_id: None)
+    monkeypatch.setattr(tts_module, "get_tts_api_key", lambda provider_id: None)
 
 
 class FakeTtsWs:

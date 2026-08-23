@@ -54,6 +54,7 @@ from .config import (
     TTS_SAMPLE_RATE,
 )
 from . import config as runtime_config
+from .config_store import get_tts_api_key
 from .logging_config import get_logger
 from .stt import TTS_END, TTS_NONE, TTS_TEXT
 
@@ -65,8 +66,10 @@ PREWARM_STREAM_ID = "prewarm"
 
 
 def get_tts_config(stream_id: str, voice: str, lang: str) -> dict[str, Any]:
+    # Prefer the per-provider saved TTS key; fall back to the global Soniox key.
+    soniox_key = get_tts_api_key("soniox") or runtime_config.SONIOX_API_KEY
     return {
-        "api_key": runtime_config.SONIOX_API_KEY,
+        "api_key": soniox_key,
         "stream_id": stream_id,
         "model": TTS_MODEL,
         "voice": voice,

@@ -167,3 +167,4 @@ from .tts_providers.elevenlabs_provider import ElevenLabsProvider  # noqa: E402
 from .tts_providers.deepgram_provider import DeepgramProvider  # noqa: E402
 from .tts_providers.polly_provider import PollyProvider  # noqa: E402
 from .tts_providers.pocket_tts_provider import PocketTTSProvider  # noqa: E402
+from .tts_providers.edge_provider import EdgeTTSProvider  # noqa: E402
