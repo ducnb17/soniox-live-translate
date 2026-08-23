@@ -102,20 +102,74 @@ class EdgeTTSProvider(TTSProviderBase):
 
         voice = voice_id or FALLBACK_VOICES.get(_edge_lang(lang), FALLBACK_VOICES["en"])[0][0]
         communicate = edge_tts.Communicate(text=text, voice=voice)
-        # edge-tts yields mp3 chunks; we re-encode to PCM s16le 24kHz via ffmpeg.
-        # Collect mp3 bytes first (small utterances), then convert once.
-        mp3_chunks: list[bytes] = []
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                mp3_chunks.append(chunk["data"])
 
-        if not mp3_chunks:
-            return
+        # Run the edge-tts producer and the ffmpeg consumer concurrently on a
+        # streaming pipe. We write mp3 chunks to ffmpeg as they arrive, and yield
+        # decoded PCM chunks as they come out -- no wait for the full utterance.
+        mp3_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
 
-        mp3_data = b"".join(mp3_chunks)
-        pcm = await asyncio.get_running_loop().run_in_executor(None, _mp3_to_pcm24k, mp3_data)
-        if pcm:
-            yield pcm
+        async def producer() -> None:
+            try:
+                async for chunk in communicate.stream():
+                    if chunk["type"] == "audio":
+                        await mp3_queue.put(chunk["data"])
+            finally:
+                await mp3_queue.put(None)
+
+        producer_task = asyncio.create_task(producer())
+        try:
+            ffmpeg_proc: asyncio.subprocess.Process = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-i", "pipe:0",
+                "-f", "s16le", "-ac", "1", "-ar", "24000",
+                "-",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            assert ffmpeg_proc.stdin is not None
+            assert ffmpeg_proc.stdout is not None
+            assert ffmpeg_proc.stderr is not None
+
+            async def feed_ffmpeg() -> None:
+                try:
+                    while True:
+                        mp3 = await mp3_queue.get()
+                        if mp3 is None:
+                            break
+                        ffmpeg_proc.stdin.write(mp3)
+                        await ffmpeg_proc.stdin.drain()
+                finally:
+                    try:
+                        ffmpeg_proc.stdin.close()
+                        await ffmpeg_proc.stdin.wait_closed()
+                    except Exception:
+                        pass
+
+            feed_task = asyncio.create_task(feed_ffmpeg())
+
+            try:
+                while True:
+                    pcm = await ffmpeg_proc.stdout.read(4096)
+                    if not pcm:
+                        break
+                    yield pcm
+            finally:
+                feed_task.cancel()
+                try:
+                    await feed_task
+                except asyncio.CancelledError:
+                    pass
+                returncode = await ffmpeg_proc.wait()
+                if returncode not in (0, -13, -15, 255):
+                    err = (await ffmpeg_proc.stderr.read()).decode(errors="replace")[:200]
+                    raise RuntimeError(f"ffmpeg streaming failed ({returncode}): {err}")
+        finally:
+            producer_task.cancel()
+            try:
+                await producer_task
+            except asyncio.CancelledError:
+                pass
 
     def estimate_cost(self, char_count: int) -> float:
         return 0.0
@@ -135,23 +189,3 @@ class EdgeTTSProvider(TTSProviderBase):
             pricing_url="",
             approximate_cost_per_1m_chars=0.0,
         )
-
-
-def _mp3_to_pcm24k(mp3_data: bytes) -> bytes:
-    """Convert mp3 bytes to PCM s16le mono at 24000 Hz using ffmpeg."""
-    import subprocess
-
-    proc = subprocess.run(
-        [
-            "ffmpeg", "-hide_banner", "-loglevel", "error",
-            "-i", "pipe:0",
-            "-f", "s16le", "-ac", "1", "-ar", "24000",
-            "pipe:1",
-        ],
-        input=mp3_data,
-        capture_output=True,
-        timeout=120,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(f"ffmpeg mp3->pcm failed: {proc.stderr.decode(errors='replace')[:200]}")
-    return proc.stdout

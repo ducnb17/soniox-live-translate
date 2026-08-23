@@ -1,0 +1,203 @@
+"""Queue consumer for non-Soniox TTS providers with cache and fallback.
+
+Optimization goals for real-time dubbing:
+1. Minimal latency: start synthesizing as soon as a translated chunk arrives,
+   not when the whole utterance finishes (TTS_END).
+2. Concurrency: many sentences can be synthesized in parallel.
+3. Ordering: audio is emitted in the original line order so the listener hears
+   a coherent stream, even if shorter later sentences finish synthesizing first.
+4. Low overhead: the provider yields PCM chunks as they are produced so we can
+   forward them to the browser without waiting for the whole utterance.
+"""
+
+import asyncio
+from collections.abc import Awaitable, Callable
+
+from fastapi import WebSocket
+
+from .logging_config import get_logger
+from .stt import TTS_END, TTS_NONE, TTS_TEXT
+from .tts import TTS_BARGE, synthesize_soniox_text
+from .tts_provider import TTSProviderBase, tts_cache
+
+log = get_logger("external_tts")
+
+
+async def _safe_json(browser_ws: WebSocket, payload: dict) -> None:
+    try:
+        await browser_ws.send_json(payload)
+    except Exception:
+        pass
+
+
+async def external_tts_sender(
+    tts_queue: asyncio.Queue,
+    tts_state: dict,
+    browser_ws: WebSocket,
+    provider_id: str,
+    provider: TTSProviderBase | None,
+    direction_voices: dict[str, str],
+    fallback_voice: str = "Maya",
+    fallback_synthesize: Callable[[str, str, str], Awaitable[bytes]] = synthesize_soniox_text,
+) -> None:
+    """Synthesize translated text chunks as soon as they arrive.
+
+    Each TTS_TEXT is enqueued into an ordered per-direction queue and immediately
+    submitted to a worker pool so synthesis starts without waiting for TTS_END.
+    A playback controller emits completed audio in line order, preserving the
+    natural flow of the conversation.
+    """
+    my_epoch = tts_state["barge_epoch"]
+
+    # Ordered sequence numbers per direction used to serialize playback.
+    seq_lock = asyncio.Lock()
+    next_seq: dict[str, int] = {direction: 0 for direction in direction_voices}
+    pending: dict[str, dict[int, asyncio.Future[bytes]]] = {
+        direction: {} for direction in direction_voices
+    }
+
+    async def synthesize_line(direction: str, text: str, line_id: int, seq: int) -> bytes:
+        """Synthesize a single line and return its full PCM audio."""
+        voice_id = direction_voices[direction]
+        cache_hit = False
+        used_provider = provider_id
+        estimated_cost = 0.0
+
+        audio = tts_cache.get(text, voice_id, provider_id)
+        if audio is not None:
+            cache_hit = True
+        else:
+            try:
+                if provider is None:
+                    raise ValueError(f"Unknown TTS provider: {provider_id}")
+                chunks = [chunk async for chunk in provider.synthesize_stream(text, voice_id, direction)]
+                audio = b"".join(chunks)
+                if not audio:
+                    raise RuntimeError(f"{provider_id} returned no audio")
+                tts_cache.set(text, voice_id, provider_id, audio)
+                estimated_cost = provider.estimate_cost(len(text))
+            except Exception as exc:
+                reason = str(exc) or type(exc).__name__
+                log.warning("tts_provider_fallback", provider=provider_id, reason=reason)
+                await _safe_json(browser_ws, {
+                    "tts_fallback": {
+                        "from_provider": provider_id,
+                        "to_provider": "soniox",
+                        "reason": reason[:240],
+                    }
+                })
+                used_provider = "soniox"
+                voice_id = fallback_voice
+                audio = tts_cache.get(text, voice_id, "soniox")
+                cache_hit = audio is not None
+                if audio is None:
+                    try:
+                        audio = await fallback_synthesize(text, voice_id, direction)
+                        tts_cache.set(text, voice_id, "soniox", audio)
+                    except Exception as fallback_exc:
+                        await _safe_json(browser_ws, {
+                            "tts_error": {
+                                "provider_id": provider_id,
+                                "message": str(fallback_exc)[:240],
+                            }
+                        })
+                        return b""
+
+        if used_provider == provider_id and not cache_hit:
+            await _safe_json(browser_ws, {
+                "tts_usage": {
+                    "provider_id": used_provider,
+                    "voice_id": voice_id,
+                    "characters": len(text),
+                    "estimated_cost_usd": estimated_cost,
+                    "cache_hit": cache_hit,
+                }
+            })
+        return audio
+
+    async def playback_controller(direction: str) -> None:
+        """Emit synthesized audio for a direction in strict line order."""
+        while True:
+            async with seq_lock:
+                seq = next_seq[direction]
+                future = pending[direction].pop(seq, None)
+            if future is None:
+                # No work at this sequence yet; wait a bit and retry.
+                await asyncio.sleep(0.02)
+                continue
+            try:
+                audio = await future
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                continue
+            if audio:
+                try:
+                    await browser_ws.send_json(
+                        {
+                            "type": "audio_chunk_meta",
+                            "line_id": seq,
+                            "byte_length": len(audio),
+                            "line_audio_end": True,
+                        }
+                    )
+                    await browser_ws.send_bytes(audio)
+                except Exception:
+                    break
+            async with seq_lock:
+                next_seq[direction] = seq + 1
+
+    # Start one playback controller per direction.
+    controllers = {
+        direction: asyncio.create_task(playback_controller(direction))
+        for direction in direction_voices
+    }
+
+    try:
+        while True:
+            data = await tts_queue.get()
+            if data is TTS_NONE:
+                await _safe_json(browser_ws, {"session_done": True})
+                return
+            kind = data[0]
+            if kind == TTS_BARGE:
+                # Cancel in-flight work and reset order state.
+                for fut_dict in pending.values():
+                    for fut in list(fut_dict.values()):
+                        fut.cancel()
+                    fut_dict.clear()
+                async with seq_lock:
+                    for direction in next_seq:
+                        next_seq[direction] = 0
+                my_epoch = tts_state["barge_epoch"]
+                continue
+            if my_epoch != tts_state["barge_epoch"]:
+                continue
+            if kind == TTS_TEXT:
+                _, payload, direction, line_id = data
+                if direction in pending:
+                    fut: asyncio.Future[bytes] = asyncio.get_running_loop().create_future()
+                    async with seq_lock:
+                        # Map the incoming line to the next free sequence slot so we
+                        # synthesize in order without blocking on earlier slots.
+                        seq = next_seq[direction] + len(pending[direction])
+                        pending[direction][seq] = fut
+                    asyncio.create_task(
+                        _resolve_future(fut, synthesize_line, direction, payload, line_id, seq)
+                    )
+            elif kind == TTS_END:
+                # Nothing extra needed: playback_controller continues until TTS_NONE.
+                pass
+    finally:
+        for task in controllers.values():
+            task.cancel()
+
+
+async def _resolve_future(fut: asyncio.Future, coro, *args) -> None:
+    try:
+        result = await coro(*args)
+        fut.set_result(result)
+    except asyncio.CancelledError:
+        fut.cancel()
+    except Exception as exc:
+        fut.set_exception(exc)

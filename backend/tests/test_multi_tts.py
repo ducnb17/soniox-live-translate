@@ -39,7 +39,7 @@ class FailingProvider:
         return 0.0
 
 
-async def run_sender(provider, provider_id="openai", fallback=None):
+async def run_sender(provider, provider_id="openai", fallback=None, wait_for_playback=True):
     queue = asyncio.Queue()
     state = new_tts_state(["vi"])
     browser = FakeBrowser()
@@ -49,7 +49,8 @@ async def run_sender(provider, provider_id="openai", fallback=None):
     kwargs = {}
     if fallback is not None:
         kwargs["fallback_synthesize"] = fallback
-    await external_tts_sender(
+    # Run in background so playback can finish before we inspect the browser.
+    task = asyncio.create_task(external_tts_sender(
         tts_queue=queue,
         tts_state=state,
         browser_ws=browser,
@@ -57,7 +58,20 @@ async def run_sender(provider, provider_id="openai", fallback=None):
         provider=provider,
         direction_voices={"vi": "nova"},
         **kwargs,
-    )
+    ))
+    if wait_for_playback:
+        # Allow pending synthesis tasks and ordered playback to complete.
+        for _ in range(100):
+            if not task.done():
+                await asyncio.sleep(0.05)
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+    else:
+        await task
     return browser
 
 
