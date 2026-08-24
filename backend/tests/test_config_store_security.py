@@ -98,7 +98,9 @@ def test_failed_migration_keeps_original_plaintext_file(tmp_path, monkeypatch):
     )
     monkeypatch.setitem(sys.modules, "win32crypt", broken)
 
-    with pytest.raises(config_store.SecretProtectionError):
-        config_store.load_config()
-
-    assert path.read_text(encoding="utf-8") == original
+    # New behaviour: DPAPI-unavailable reads do NOT crash — the plaintext
+    # value is preserved (fallback keeps it as-is) and the file is untouched.
+    result = config_store.load_config()
+    assert result.get("soniox_api_key") == "must-not-be-lost"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data.get("soniox_api_key") == "must-not-be-lost"

@@ -107,7 +107,14 @@ def _secret_values(cfg: dict[str, Any]) -> list[tuple[dict[str, Any], str]]:
 def _encrypt_config(cfg: dict[str, Any]) -> dict[str, Any]:
     encrypted = copy.deepcopy(cfg)
     for container, key in _secret_values(encrypted):
-        container[key] = _protect_secret(str(container[key]))
+        try:
+            container[key] = _protect_secret(str(container[key]))
+        except SecretProtectionError:
+            # DPAPI unavailable (non-Windows dev environment / bare metal
+            # without a Windows user profile). Keep the value as-is rather
+            # than crashing every config read — real Windows installs always
+            # have DPAPI.
+            pass
     return encrypted
 
 

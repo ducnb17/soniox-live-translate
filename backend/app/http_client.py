@@ -18,10 +18,18 @@ def get_http_client() -> httpx.AsyncClient:
     """Return the shared AsyncClient, creating it on first use."""
     global _client
     if _client is None:
+        # http2 requires the optional 'h2' package. If it's missing, fall
+        # back to HTTP/1.1 so provider calls (Test key etc.) never 500.
+        http2 = False
+        try:
+            import h2  # noqa: F401
+            http2 = True
+        except ImportError:
+            pass
         _client = httpx.AsyncClient(
             timeout=httpx.Timeout(30.0, connect=10.0),
             limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
-            http2=True,
+            http2=http2,
             follow_redirects=True,
         )
     return _client
