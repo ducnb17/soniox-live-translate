@@ -333,6 +333,9 @@ $inputDevice.addEventListener("change", () => {
 $outputDevice.addEventListener("change", () => {
   saveDeviceId(OUTPUT_DEVICE_KEY, $outputDevice.value);
   textToSpeech.updateConfig({ outputDevice: $outputDevice.value });
+  // Re-evaluate whether capture needs hard-muting: the mute decision depends
+  // on the output device (loopback output → loop, real speaker → parallel).
+  startTtsMuteCheck();
   setStatus(`Speaker set to ${$outputDevice.selectedOptions[0]?.textContent || "System Default"}`);
 });
 
@@ -1756,14 +1759,23 @@ async function startRecorder(): Promise<void> {
 function startTtsMuteCheck(): void {
   stopTtsMuteCheck();
   const isTabCapture = $audioSource() === "tab";
-  // Virtual loopback behaves like tab capture: TTS audio is a clean digital
-  // copy of the captured stream — no AEC is available, so hard-mute is the
-  // only way to prevent Soniox from "hearing" its own TTS output.
-  const shouldHardMute = isTabCapture || isVirtualLoopbackInput;
+
+  // A virtual-loopback INPUT only feeds TTS back into the capture stream when
+  // the TTS OUTPUT is *also* routed to a loopback device (VB-Cable output,
+  // Stereo Mix, VoiceMeeter). If output is a real speaker/headphone, the TTS
+  // audio never reaches the capture stream, so hard-muting would needlessly
+  // stop STT+translation while TTS reads. Only mute when both sides are
+  // virtual-loopback (or tab capture, where echo cancellation is impossible).
+  const outputIsLoopback = isLikelyVirtualLoopbackDevice({
+    label: $outputDevice.selectedOptions[0]?.textContent?.trim() || "",
+  });
+  const shouldHardMute = isTabCapture || (isVirtualLoopbackInput && outputIsLoopback);
 
   // Microphone mode: browser echoCancellation handles speaker→mic feedback.
   // Do NOT duck or mute — STT runs at full gain while TTS plays so that
   // translate + display continue in real time alongside TTS playback.
+  // Same for loopback-input → real-speaker-output: TTS never loops back, so
+  // keep capture live (full parallel STT + TTS).
   if (!shouldHardMute) return;
 
   ttsMuteCheckInterval = setInterval(() => {
@@ -1773,8 +1785,8 @@ function startTtsMuteCheck(): void {
       captureWorklet?.port.postMessage({ type: "mute", value: shouldAttenuate });
       console.log(
         shouldAttenuate
-          ? "[audio-input] TTS audible → muting tab/loopback capture to prevent self-hearing"
-          : "[audio-input] TTS silent → resuming tab/loopback capture",
+          ? "[audio-input] TTS audible → muting loopback capture to prevent self-hearing"
+          : "[audio-input] TTS silent → resuming loopback capture",
       );
     }
   }, 50);
