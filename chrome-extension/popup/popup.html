@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Soniox Live Translate</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 380px;
+      min-height: 480px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+    }
+    .header {
+      background: linear-gradient(135deg, #1d4ed8, #7c3aed);
+      padding: 16px 20px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .logo { width: 32px; height: 32px; }
+    .header h1 { font-size: 16px; font-weight: 700; letter-spacing: -0.3px; }
+    .header p { font-size: 11px; color: #bfdbfe; margin-top: 1px; }
+    .section { padding: 16px 20px; border-bottom: 1px solid #1e293b; }
+    .section:last-child { border-bottom: none; }
+    label { font-size: 11px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; display: block; }
+    select, input {
+      width: 100%; padding: 8px 12px; border-radius: 8px;
+      background: #1e293b; border: 1px solid #334155; color: #e2e8f0;
+      font-size: 13px; outline: none; appearance: none;
+    }
+    select:focus, input:focus { border-color: #3b82f6; }
+    input[type="password"] { font-family: monospace; letter-spacing: 1px; }
+    .row { display: flex; gap: 8px; align-items: center; }
+    .row select { flex: 1; }
+    .swap-btn {
+      background: #1e293b; border: 1px solid #334155; color: #94a3b8;
+      padding: 8px 10px; border-radius: 8px; cursor: pointer; font-size: 16px;
+      transition: all .15s;
+    }
+    .swap-btn:hover { color: #e2e8f0; border-color: #3b82f6; }
+    .btn {
+      width: 100%; padding: 12px; border-radius: 10px; border: none;
+      font-size: 14px; font-weight: 600; cursor: pointer; transition: all .15s;
+    }
+    .btn-start {
+      background: linear-gradient(135deg, #1d4ed8, #7c3aed);
+      color: white;
+    }
+    .btn-start:hover { opacity: 0.9; transform: translateY(-1px); }
+    .btn-start:active { transform: none; }
+    .btn-start:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+    .btn-stop {
+      background: #991b1b; color: white;
+    }
+    .status-bar {
+      display: flex; align-items: center; gap: 8px;
+      padding: 10px 20px; background: #1e293b; font-size: 12px;
+    }
+    .dot {
+      width: 8px; height: 8px; border-radius: 50%; background: #4b5563;
+      flex-shrink: 0;
+    }
+    .dot.active { background: #22c55e; box-shadow: 0 0 6px #22c55e80; animation: pulse 1.5s infinite; }
+    .dot.error { background: #ef4444; }
+    @keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:0.4 } }
+    .transcript {
+      background: #1e293b; border-radius: 8px; padding: 10px 12px;
+      font-size: 12px; color: #94a3b8; min-height: 50px; max-height: 80px;
+      overflow-y: auto; line-height: 1.5;
+    }
+    .transcript .original { color: #64748b; margin-bottom: 4px; }
+    .transcript .translated { color: #a5f3fc; font-weight: 500; }
+    .tts-row { display: flex; gap: 8px; }
+    .tts-row select { flex: 1; }
+    .voice-select { flex: 1.2; }
+    .api-key-row { display: flex; gap: 6px; align-items: center; }
+    .api-key-row input { flex: 1; }
+    .save-btn {
+      padding: 8px 12px; border-radius: 8px; background: #1d4ed8;
+      color: white; border: none; cursor: pointer; font-size: 12px;
+      white-space: nowrap;
+    }
+    .save-btn:hover { background: #2563eb; }
+    .footer { padding: 10px 20px; text-align: center; }
+    .footer a { color: #3b82f6; font-size: 11px; text-decoration: none; }
+    .footer a:hover { text-decoration: underline; }
+    .hidden { display: none !important; }
+    .badge {
+      font-size: 10px; padding: 2px 6px; border-radius: 4px;
+      background: #166534; color: #86efac; font-weight: 600;
+    }
+    .badge.paid { background: #1e3a5f; color: #93c5fd; }
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <svg class="logo" viewBox="0 0 32 32" fill="none">
+    <circle cx="16" cy="12" r="7" stroke="white" stroke-width="2.5"/>
+    <rect x="14" y="19" width="4" height="6" rx="2" fill="white"/>
+    <path d="M8 20 Q16 28 24 20" stroke="white" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+    <line x1="16" y1="26" x2="16" y2="30" stroke="white" stroke-width="2.5"/>
+    <line x1="12" y1="30" x2="20" y2="30" stroke="white" stroke-width="2.5"/>
+  </svg>
+  <div>
+    <h1>Soniox Live Translate</h1>
+    <p>Real-time speech-to-speech translation</p>
+  </div>
+</div>
+
+<!-- Status bar -->
+<div class="status-bar">
+  <div class="dot" id="statusDot"></div>
+  <span id="statusText">Ready — configure API key below</span>
+</div>
+
+<!-- API Key -->
+<div class="section">
+  <label>Soniox API Key <a href="https://console.soniox.com" target="_blank" style="color:#3b82f6;text-decoration:none;font-size:10px;">(Get free key)</a></label>
+  <div class="api-key-row">
+    <input type="password" id="apiKey" placeholder="soniox_..." autocomplete="off" />
+    <button class="save-btn" id="saveKeyBtn">Save</button>
+  </div>
+</div>
+
+<!-- Language pair -->
+<div class="section">
+  <label>Translation direction</label>
+  <div class="row">
+    <select id="srcLang">
+      <option value="en">🇬🇧 English</option>
+      <option value="vi">🇻🇳 Vietnamese</option>
+      <option value="ja">🇯🇵 Japanese</option>
+      <option value="zh">🇨🇳 Chinese</option>
+      <option value="ko">🇰🇷 Korean</option>
+      <option value="fr">🇫🇷 French</option>
+      <option value="de">🇩🇪 German</option>
+      <option value="es">🇪🇸 Spanish</option>
+    </select>
+    <button class="swap-btn" id="swapBtn" title="Swap languages">⇆</button>
+    <select id="tgtLang">
+      <option value="vi" selected>🇻🇳 Vietnamese</option>
+      <option value="en">🇬🇧 English</option>
+      <option value="ja">🇯🇵 Japanese</option>
+      <option value="zh">🇨🇳 Chinese</option>
+      <option value="ko">🇰🇷 Korean</option>
+      <option value="fr">🇫🇷 French</option>
+      <option value="de">🇩🇪 German</option>
+      <option value="es">🇪🇸 Spanish</option>
+    </select>
+  </div>
+</div>
+
+<!-- TTS -->
+<div class="section">
+  <label>TTS voice <span class="badge" id="ttsBadge">FREE</span></label>
+  <div class="tts-row">
+    <select id="ttsProvider">
+      <option value="edge" data-free="true">Edge TTS (free)</option>
+      <option value="soniox">Soniox (credit)</option>
+    </select>
+    <select id="ttsVoice" class="voice-select">
+      <option value="vi-VN-HoaiMyNeural">HoaiMy (female)</option>
+      <option value="vi-VN-NamMinhNeural">NamMinh (male)</option>
+    </select>
+  </div>
+</div>
+
+<!-- Live transcript -->
+<div class="section">
+  <label>Live transcript</label>
+  <div class="transcript" id="transcript">
+    <div style="color:#4b5563;font-style:italic;">Start translation to see live transcript…</div>
+  </div>
+</div>
+
+<!-- Start/Stop button -->
+<div class="section">
+  <button class="btn btn-start" id="mainBtn">▶ Start Translation</button>
+</div>
+
+<div class="footer">
+  <a href="https://github.com/ducnb17/soniox-live-translate" target="_blank">GitHub</a>
+  &nbsp;·&nbsp;
+  <a href="https://console.soniox.com" target="_blank">Soniox Console</a>
+</div>
+
+<script src="popup.js"></script>
+</body>
+</html>

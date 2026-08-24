@@ -1,0 +1,41 @@
+{
+  "manifest_version": 3,
+  "name": "Soniox Live Translate",
+  "version": "1.0.0",
+  "description": "Real-time speech-to-speech translation powered by Soniox — speak in one language, hear it in another instantly.",
+  "permissions": [
+    "microphone",
+    "storage",
+    "tabCapture",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://stt-rt.soniox.com/*",
+    "https://tts-rt.soniox.com/*"
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    },
+    "default_title": "Soniox Live Translate"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content/inject.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "minimum_chrome_version": "116"
+}

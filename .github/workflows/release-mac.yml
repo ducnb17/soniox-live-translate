@@ -1,0 +1,109 @@
+name: Release macOS Package
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    timeout-minutes: 60
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────
+      - uses: actions/checkout@v4
+
+      # ── 2. Node + frontend build ─────────────────────────────────────────
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install pnpm
+        run: npm install -g pnpm@9.12.0
+
+      - name: Install frontend deps
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frontend
+        working-directory: frontend
+        run: pnpm run build
+
+      # ── 3. Python + deps ─────────────────────────────────────────────────
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Python deps
+        run: |
+          pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install packaging pyinstaller
+
+      # ── 4. PyInstaller ───────────────────────────────────────────────────
+      - name: Extract version from tag
+        id: version
+        run: |
+          TAG="${{ github.ref_name }}"
+          VER="${TAG#v}"
+          echo "version=$VER" >> $GITHUB_OUTPUT
+
+      - name: Copy backend/app to root
+        run: |
+          cp -r backend/app app
+          echo "app/ contents: $(ls app/)"
+
+      - name: Build with PyInstaller
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python -m PyInstaller installer/spec_mac.spec \
+            --distpath dist_mac \
+            --workpath build_mac \
+            --noconfirm \
+            --log-level WARN
+
+      - name: Verify .app bundle
+        run: |
+          APP="dist_mac/SonioxLiveTranslate.app"
+          if [ -d "$APP" ]; then
+            SIZE=$(du -sh "$APP" | cut -f1)
+            echo "OK: SonioxLiveTranslate.app ($SIZE)"
+          else
+            echo "ERROR: .app not found. dist_mac contents:"
+            ls -la dist_mac/ || true
+            exit 1
+          fi
+
+      # ── 5. Build .pkg installer ──────────────────────────────────────────
+      - name: Build .pkg
+        run: |
+          VER="${{ steps.version.outputs.version }}"
+          PKG_NAME="SonioxLiveTranslate-$VER.pkg"
+
+          # Stage the .app into a payload directory
+          mkdir -p pkg_stage/Applications
+          cp -r dist_mac/SonioxLiveTranslate.app pkg_stage/Applications/
+
+          # Build the component package
+          pkgbuild \
+            --root pkg_stage \
+            --identifier com.sonioxlivetranslate.app \
+            --version "$VER" \
+            --install-location / \
+            "dist_mac/$PKG_NAME"
+
+          echo "PKG_NAME=$PKG_NAME" >> $GITHUB_ENV
+          SIZE=$(du -sh "dist_mac/$PKG_NAME" | cut -f1)
+          echo "Built: $PKG_NAME ($SIZE)"
+
+      # ── 6. Upload to Release ─────────────────────────────────────────────
+      - name: Upload .pkg to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          files: dist_mac/SonioxLiveTranslate-*.pkg
