@@ -445,6 +445,10 @@ async def api_save_config(payload: dict = Body(...)) -> JSONResponse:
 @app.post("/api/tts/providers/{provider_id}/test")
 async def api_test_tts_provider(provider_id: str, payload: dict = Body(...)) -> JSONResponse:
     key = str(payload.get("api_key") or "").strip()
+    # If no new key was typed, fall back to the stored key for this provider
+    # so "Test" works on an already-saved key without re-entering it.
+    if not key:
+        key = _tts_key_for(provider_id)
     provider = get_tts_provider_instance(provider_id, api_key=key or None)
     if provider is None:
         return JSONResponse({"ok": False, "message": f"Unknown provider: {provider_id}"}, status_code=404)
@@ -452,6 +456,7 @@ async def api_test_tts_provider(provider_id: str, payload: dict = Body(...)) -> 
     if ok:
         if key:
             _save_provider_api_key("tts", provider_id, key)
+            await upsert_provider_credential("tts", str(provider_id), key)
         set_tts_provider(provider_id)
     return JSONResponse({"ok": ok, "message": message})
 
@@ -569,6 +574,37 @@ async def api_set_translation_config(payload: dict = Body(...)) -> JSONResponse:
         _save_provider_api_key("translation", provider_id, key)
     set_translation_provider(provider_id)
     return JSONResponse({"ok": True})
+
+
+def _resolve_direction_voices(
+    mode: str,
+    target_lang: str,
+    lang_a: str | None,
+    lang_b: str | None,
+    voice: str,
+    voice_b: str | None,
+    tts_provider: str,
+) -> tuple[list[str], dict[str, str]]:
+    """Resolve the TTS voice for each direction.
+
+    Prefers the voice saved per-provider (get_tts_voice) so each API provider
+    keeps its own voice; falls back to the request's voice param. This fixes
+    'switched voice but spoken voice didn't change' for non-Soniox providers.
+    """
+    saved_voice = get_tts_voice(tts_provider) or voice
+
+    if mode == "two_way":
+        directions = [lang_a or "", lang_b or ""]
+        # Direction = target language. Speaker A (lang_a) is heard in the
+        # lang_b voice; speaker B (lang_b) is heard in the lang_a voice.
+        direction_voices = {
+            lang_a or "": voice_b or saved_voice,
+            lang_b or "": saved_voice,
+        }
+    else:
+        directions = [target_lang]
+        direction_voices = {target_lang: saved_voice}
+    return directions, direction_voices
 
 
 @app.websocket("/ws/translate")
@@ -707,14 +743,15 @@ async def translation_websocket(
             )
             await browser_ws.close()
             return
-        directions = [lang_a, lang_b]
-        direction_voices = {
-            lang_a: voice_b or voice,
-            lang_b: voice,
-        }
-    else:
-        directions = [target_lang]
-        direction_voices = {target_lang: voice}
+    directions, direction_voices = _resolve_direction_voices(
+        mode=mode,
+        target_lang=target_lang,
+        lang_a=lang_a,
+        lang_b=lang_b,
+        voice=voice,
+        voice_b=voice_b,
+        tts_provider=tts_provider,
+    )
 
     session = transcript_store.new()
     await browser_ws.send_json({"session_id": session.id})
