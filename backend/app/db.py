@@ -72,6 +72,11 @@ async def init_db() -> None:
         current_version = 2
         log.info("db_migrated", version=2)
 
+    if current_version < 3:
+        await _migrate_v3(db)
+        current_version = 3
+        log.info("db_migrated", version=3)
+
     await db.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (current_version,))
     await db.commit()
 
@@ -112,7 +117,17 @@ async def _create_v1(db: aiosqlite.Connection) -> None:
             started_at_ms INTEGER,
             ended_at_ms INTEGER,
             is_final INTEGER DEFAULT 0,
-            audio_clip_path TEXT
+            audio_clip_path TEXT,
+            tts_provider TEXT,
+            tts_voice TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS provider_credentials (
+            domain TEXT NOT NULL,
+            provider_id TEXT NOT NULL,
+            key_encrypted TEXT,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (domain, provider_id)
         );
 
         CREATE INDEX IF NOT EXISTS idx_segments_conversation
@@ -150,6 +165,29 @@ async def _migrate_v2(db: aiosqlite.Connection) -> None:
 
         INSERT INTO segments_fts(segments_fts) VALUES ('rebuild');
     """)
+
+
+async def _migrate_v3(db: aiosqlite.Connection) -> None:
+    """Add per-segment TTS provider/voice columns + provider_credentials table
+    (per-provider API keys stored in the database, one row per provider)."""
+    # ALTER TABLE is not idempotent — guard against existing columns.
+    cursor = await db.execute("PRAGMA table_info(segments)")
+    columns = {row[1] for row in await cursor.fetchall()}
+    if "tts_provider" not in columns:
+        await db.execute("ALTER TABLE segments ADD COLUMN tts_provider TEXT")
+    if "tts_voice" not in columns:
+        await db.execute("ALTER TABLE segments ADD COLUMN tts_voice TEXT")
+
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS provider_credentials (
+            domain TEXT NOT NULL,
+            provider_id TEXT NOT NULL,
+            key_encrypted TEXT,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (domain, provider_id)
+        )
+    """)
+    await db.commit()
 
 
 async def close_db() -> None:
@@ -336,6 +374,8 @@ async def add_segment(
     ended_at_ms: int | None = None,
     is_final: bool = False,
     audio_clip_path: str | None = None,
+    tts_provider: str | None = None,
+    tts_voice: str | None = None,
 ) -> int:
     if not is_final:
         raise ValueError("only final segments may be persisted")
@@ -345,10 +385,12 @@ async def add_segment(
             cursor = await db.execute(
                 """INSERT INTO segments
                    (conversation_id, speaker_label, source_lang, original_text,
-                    translated_text, started_at_ms, ended_at_ms, is_final, audio_clip_path)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)""",
+                    translated_text, started_at_ms, ended_at_ms, is_final, audio_clip_path,
+                    tts_provider, tts_voice)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)""",
                 (conversation_id, speaker_label, source_lang, original_text,
-                 translated_text, started_at_ms, ended_at_ms, audio_clip_path),
+                 translated_text, started_at_ms, ended_at_ms, audio_clip_path,
+                 tts_provider, tts_voice),
             )
             await db.commit()
             return cursor.lastrowid
@@ -372,6 +414,8 @@ async def add_segments_batch(segments: list[dict]) -> int:
             seg.get("started_at_ms"),
             seg.get("ended_at_ms"),
             seg.get("audio_clip_path"),
+            seg.get("tts_provider"),
+            seg.get("tts_voice"),
         )
         for seg in final_segments
     ]
@@ -381,8 +425,9 @@ async def add_segments_batch(segments: list[dict]) -> int:
             await db.executemany(
                 """INSERT INTO segments
                    (conversation_id, speaker_label, source_lang, original_text,
-                    translated_text, started_at_ms, ended_at_ms, is_final, audio_clip_path)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)""",
+                    translated_text, started_at_ms, ended_at_ms, is_final, audio_clip_path,
+                    tts_provider, tts_voice)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)""",
                 rows,
             )
             await db.commit()
@@ -498,3 +543,58 @@ async def get_db_stats() -> dict:
     path = db_path()
     size_mb = path.stat().st_size / (1024 * 1024) if path.exists() else 0
     return {"conversations": conv_count, "segments": seg_count, "db_size_mb": round(size_mb, 2)}
+
+
+# ── Provider credentials (per-provider API keys in DB) ──
+
+async def upsert_provider_credential(domain: str, provider_id: str, key: str) -> None:
+    """Store (or replace) one provider's API key in the database.
+
+    The key travels from the request and mirrors config.json; SQLite rows are
+    per (domain, provider_id) so every provider keeps its own key entry.
+    """
+    db = await get_db()
+    async with _write_lock:
+        try:
+            await db.execute(
+                """INSERT INTO provider_credentials (domain, provider_id, key_encrypted, updated_at)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(domain, provider_id) DO UPDATE SET
+                     key_encrypted = excluded.key_encrypted,
+                     updated_at = excluded.updated_at""",
+                (domain, provider_id, key, int(time.time() * 1000)),
+            )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
+
+
+async def get_provider_credential(domain: str, provider_id: str) -> str | None:
+    db = await get_db()
+    cursor = await db.execute(
+        "SELECT key_encrypted FROM provider_credentials WHERE domain = ? AND provider_id = ?",
+        (domain, provider_id),
+    )
+    row = await cursor.fetchone()
+    return row[0] if row else None
+
+
+async def list_provider_credentials(domain: str) -> dict[str, str]:
+    """Return {provider_id: key_encrypted} for a credential domain."""
+    db = await get_db()
+    cursor = await db.execute(
+        "SELECT provider_id, key_encrypted FROM provider_credentials WHERE domain = ?",
+        (domain,),
+    )
+    return {row[0]: row[1] for row in await cursor.fetchall()}
+
+
+async def delete_provider_credential(domain: str, provider_id: str) -> None:
+    db = await get_db()
+    async with _write_lock:
+        await db.execute(
+            "DELETE FROM provider_credentials WHERE domain = ? AND provider_id = ?",
+            (domain, provider_id),
+        )
+        await db.commit()

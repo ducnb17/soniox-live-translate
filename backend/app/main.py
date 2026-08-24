@@ -102,6 +102,7 @@ from .db import (
     export_conversation_json,
     cleanup_old_conversations,
     get_db_stats,
+    upsert_provider_credential,
 )
 
 load_dotenv(override=True)
@@ -155,6 +156,18 @@ def _save_provider_api_key(domain: str, provider_id: str, key: str) -> None:
         cfg["soniox_api_key"] = key
         save_config(cfg)
         set_api_key(key)
+
+
+async def _tts_key_encrypted(provider_id: str) -> str | None:
+    """Return the DPAPI-encrypted form of a provider's saved TTS key for DB
+    storage — config.json keeps plaintext-decrypted values, the DB keeps the
+    same DPAPI blob so keys are never stored in the clear in SQLite."""
+    from app.config_store import _protect_secret, load_config
+    cfg = load_config()
+    keys = cfg.get("tts_api_keys")
+    if isinstance(keys, dict) and keys.get(provider_id):
+        return str(_protect_secret(str(keys[provider_id])))
+    return None
 
 
 @asynccontextmanager
@@ -341,6 +354,8 @@ async def api_tts_config(payload: dict = Body(...)) -> JSONResponse:
     api_key = payload.get("api_key", "").strip()
     if provider_id and api_key:
         _save_provider_api_key("tts", provider_id, api_key)
+        # Mirror the key into the provider_credentials DB table (encrypted).
+        await upsert_provider_credential("tts", str(provider_id), api_key)
     if provider_id:
         set_tts_provider(provider_id)
     if "voice" in payload and provider_id:
@@ -722,7 +737,16 @@ async def translation_websocket(
     segment_batch_size = 10
 
     async def on_final_segment(seg: dict) -> None:
-        pending_segments.append({"conversation_id": conv_id, "is_final": True, **seg})
+        # Record which TTS provider + voice was active for this segment so
+        # history shows exactly how each line was spoken (text-only — audio
+        # is never stored in the database).
+        pending_segments.append({
+            "conversation_id": conv_id,
+            "is_final": True,
+            "tts_provider": tts_provider,
+            "tts_voice": get_tts_voice(tts_provider) or voice,
+            **seg,
+        })
         if len(pending_segments) >= segment_batch_size:
             batch = pending_segments[:]
             pending_segments.clear()
