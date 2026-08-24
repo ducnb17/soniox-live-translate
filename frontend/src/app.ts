@@ -309,6 +309,22 @@ function onDeviceChange(): void {
   void refreshDeviceList();
 }
 
+// Refresh button: request mic permission first so enumerateDevices() returns
+// full device labels (VB-Cable, Stereo Mix, etc.) instead of "Device xxxx".
+async function refreshDevicesWithPermission(): Promise<void> {
+  setStatus("Đang lấy danh sách thiết bị…");
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    // Stop all tracks immediately — we only need the permission grant so the
+    // next enumerateDevices() exposes friendly labels.
+    stream.getTracks().forEach((track) => track.stop());
+  } catch {
+    // Permission denied — enumerate anyway, labels may stay generic.
+  }
+  await refreshDeviceList();
+  setStatus("Đã làm mới danh sách thiết bị");
+}
+
 $inputDevice.addEventListener("change", () => {
   saveDeviceId(INPUT_DEVICE_KEY, $inputDevice.value);
   setStatus(`Microphone set to ${$inputDevice.selectedOptions[0]?.textContent || "System Default"}`);
@@ -398,6 +414,9 @@ function stopTestMic(): void {
 
 $btnTestInput.addEventListener("click", startTestMic);
 $btnStopTestInput.addEventListener("click", stopTestMic);
+$<HTMLButtonElement>("btn-refresh-devices").addEventListener("click", () => {
+  void refreshDevicesWithPermission();
+});
 
 type SinkRoutableAudioContext = AudioContext & {
   setSinkId?: (sinkId: string) => Promise<void>;
