@@ -52,7 +52,7 @@ async def external_tts_sender(
 
     states: dict[str, DirectionState] = {d: DirectionState() for d in direction_voices}
 
-    async def synthesize_one(direction: str, text: str, seq: int, line_id: int, state: DirectionState) -> None:
+    async def synthesize_one(direction: str, text: str, seq: int, line_id: int, state: DirectionState, epoch: int) -> None:
         # Synthesize FIRST, then register the result — avoids race where
         # playback_loop awaits a future that is not yet scheduled.
         try:
@@ -62,6 +62,16 @@ async def external_tts_sender(
         fut: asyncio.Future[bytes] = asyncio.get_running_loop().create_future()
         fut.set_result(audio)
         async with state.cv:
+            # If a barge-in fired while we were synthesizing, our seq belongs
+            # to the OLD epoch and `direction_seq`/`next_seq` were reset.
+            # Drop the audio instead of polluting the new epoch's pending
+            # map — otherwise playback_loop would wait forever for seq 0
+            # while an entry with a stale seq occupies the map, and the
+            # TTS_NONE drain (in_flight == 0 and not pending) deadlocks.
+            if epoch != direction_epoch[direction]:
+                in_flight[direction] -= 1
+                state.cv.notify_all()
+                return
             state.pending[seq] = (line_id, fut)
             in_flight[direction] -= 1
             state.cv.notify_all()
@@ -89,6 +99,18 @@ async def external_tts_sender(
                     await browser_ws.send_bytes(audio)
                 except Exception:
                     pass  # log but NEVER return — keep the loop alive for next sentences
+            else:
+                # Even on synthesis failure/empty audio we must still emit an
+                # end-of-line marker: the frontend StrictLineAudioQueue only
+                # marks a line `done` on `line_audio_end`, and without it the
+                # line would hold the queue head forever → "TTS chỉ đọc 1 câu
+                # rồi dừng".
+                await _safe_json(browser_ws, {
+                    "type": "audio_chunk_meta",
+                    "line_id": line_id,
+                    "byte_length": 0,
+                    "line_audio_end": True,
+                })
             async with state.cv:
                 state.next_seq = seq + 1
                 state.cv.notify_all()
@@ -96,6 +118,10 @@ async def external_tts_sender(
     # Global seq counter per direction — must be incremented atomically under cv.
     direction_seq: dict[str, int] = {d: 0 for d in direction_voices}
     in_flight: dict[str, int] = {d: 0 for d in direction_voices}
+    # Barge epoch per direction: bumped whenever a barge-in resets the ordered
+    # playback state so in-flight synthesis results from before the barge can
+    # be recognized as stale and dropped.
+    direction_epoch: dict[str, int] = {d: 0 for d in direction_voices}
 
     # Sentence-grouping buffers: group short translation fragments into
     # complete sentences (ending in . ! ? …) before synthesizing. This gives
@@ -125,7 +151,7 @@ async def external_tts_sender(
         seq = direction_seq[direction]
         direction_seq[direction] += 1
         in_flight[direction] += 1
-        asyncio.create_task(synthesize_one(direction, text, seq, line_id, states[direction]))
+        asyncio.create_task(synthesize_one(direction, text, seq, line_id, states[direction], direction_epoch[direction]))
 
     async def handle_text(direction: str, text: str, line_id: int) -> None:
         state = states[direction]
@@ -188,8 +214,18 @@ async def external_tts_sender(
                         state.pending.clear()
                         state.next_seq = 0
                         direction_seq[direction] = 0
-                        in_flight[direction] = 0
+                        # Bump the epoch so in-flight synthesize_one tasks
+                        # started before the barge drop their audio instead of
+                        # registering stale seqs into the fresh pending map.
+                        direction_epoch[direction] += 1
                         state.cv.notify_all()
+                    # Wait for pre-barge in-flight synthesis tasks to wind
+                    # down: they decrement in_flight under cv, so the TTS_NONE
+                    # drain below never sees a false "busy" state.
+                    async with state.cv:
+                        await state.cv.wait_for(
+                            lambda d=direction: in_flight[d] == 0
+                        )
                 my_epoch = tts_state["barge_epoch"]
                 continue
             if my_epoch != tts_state["barge_epoch"]:
