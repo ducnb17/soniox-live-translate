@@ -128,6 +128,17 @@ def _mask_key(key: str) -> str:
     return "****"
 
 
+def _tts_key_for(provider_id: str) -> str:
+    """Resolve the effective TTS API key for a provider (Soniox falls back
+    to the shared runtime key)."""
+    key = get_tts_api_key(provider_id)
+    if key:
+        return str(key)
+    if provider_id == "soniox":
+        return str(get_api_key() or "")
+    return ""
+
+
 def _save_provider_api_key(domain: str, provider_id: str, key: str) -> None:
     """Persist a provider key and keep the shared Soniox runtime key in sync."""
     if domain == "tts":
@@ -302,6 +313,9 @@ async def api_tts_providers() -> JSONResponse:
             "pricing_url": p.pricing_url,
             "approximate_cost_per_1m_chars": p.approximate_cost_per_1m_chars,
             "has_api_key": bool(get_tts_api_key(p.id)) or (p.id == "soniox" and bool(get_api_key())),
+            "key_masked": _mask_key(
+                _tts_key_for(p.id)
+            ),
         }
         for p in providers
     ]

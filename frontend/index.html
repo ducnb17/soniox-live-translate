@@ -223,6 +223,12 @@
             <label for="tts-voice-select">Voice</label>
             <select id="tts-voice-select"></select>
           </div>
+          <details class="section collapsible" id="tts-keys-block" style="margin-top:8px">
+            <summary>🔑 API keys riêng từng provider (9 mục độc lập)</summary>
+            <p class="hint">Mỗi nhà cung cấp có mục lưu key riêng — không dùng chung một khung.
+              Chọn provider ở trên để dùng; key của provider nào thì điền vào hàng đó.</p>
+            <div id="tts-keys-list" style="display:grid;gap:8px;margin-top:8px"></div>
+          </details>
           <div class="device-row">
             <label for="stt-delay-seconds">
               Độ trễ nhận diện (giây): <span id="stt-delay-seconds-value">1.5</span>

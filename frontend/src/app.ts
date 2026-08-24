@@ -472,6 +472,7 @@ interface TtsProviderInfo {
   pricing_url: string;
   approximate_cost_per_1m_chars: number;
   has_api_key: boolean;
+  key_masked?: string;
 }
 
 interface ProviderInfo {
@@ -580,6 +581,7 @@ async function loadTtsProviders(): Promise<void> {
     const resp = await fetch("/api/tts/providers");
     ttsProviders = await resp.json();
     populateTtsProviderSelect();
+    renderPerProviderTtsKeys();
     // Also load config
     const cfgResp = await fetch("/api/tts/config");
     const cfg = await cfgResp.json() as {
@@ -609,6 +611,88 @@ function populateTtsProviderSelect(): void {
     opt.value = p.id;
     opt.textContent = `${p.name}${p.has_api_key ? " [key]" : ""}`;
     $ttsProvider.appendChild(opt);
+  }
+}
+
+/** Render one independent API-key row per TTS provider. */
+function renderPerProviderTtsKeys(): void {
+  const list = document.getElementById("tts-keys-list");
+  if (!list) return;
+  list.innerHTML = "";
+  for (const p of ttsProviders) {
+    const row = document.createElement("div");
+    row.className = "device-row";
+    row.style.cssText = "display:flex;align-items:center;gap:8px;flex-wrap:wrap;";
+
+    const label = document.createElement("label");
+    label.textContent = p.name;
+    label.style.cssText = "flex:0 0 150px;font-size:12px;margin:0;";
+
+    const input = document.createElement("input");
+    input.type = "password";
+    input.className = "audio-url-input";
+    input.dataset.provider = p.id;
+    input.style.cssText = "flex:1;min-width:180px;";
+    if (p.requires_api_key) {
+      input.placeholder = p.key_masked ? `✓ Đã lưu: ${p.key_masked}` : "Enter API key...";
+    } else {
+      input.placeholder = "Không cần key (miễn phí)";
+      input.disabled = true;
+    }
+
+    const saveBtn = document.createElement("button");
+    saveBtn.type = "button";
+    saveBtn.className = "test-btn";
+    saveBtn.textContent = "Save";
+    saveBtn.style.cssText = "flex:0 0 auto;";
+    if (p.requires_api_key) {
+      saveBtn.addEventListener("click", () => {
+        const key = input.value.trim();
+        if (!key) return;
+        fetch("/api/tts/config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ provider_id: p.id, api_key: key }),
+        }).then((r) => r.json()).then((res: { ok?: boolean }) => {
+          if (res.ok) {
+            saveBtn.textContent = "✓ Lưu";
+            setTimeout(() => { saveBtn.textContent = "Save"; }, 1500);
+            input.placeholder = "✓ Đã lưu";
+            input.value = "";
+          }
+        }).catch(() => undefined);
+      });
+    } else {
+      saveBtn.disabled = true;
+    }
+
+    const testBtn = document.createElement("button");
+    testBtn.type = "button";
+    testBtn.className = "test-btn";
+    testBtn.textContent = "Test";
+    testBtn.style.cssText = "flex:0 0 auto;";
+    if (p.requires_api_key) {
+      testBtn.addEventListener("click", () => {
+        const key = input.value.trim();
+        testBtn.textContent = "Testing...";
+        fetch(`/api/tts/providers/${p.id}/test`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ api_key: key }),
+        }).then((r) => r.json()).then((res: { ok?: boolean; message?: string }) => {
+          testBtn.textContent = res.ok ? `✅ ${res.message || "OK"}` : `❌ ${res.message || "Failed"}`;
+          setTimeout(() => { testBtn.textContent = "Test"; }, 2500);
+        }).catch(() => {
+          testBtn.textContent = "❌ Lỗi";
+          setTimeout(() => { testBtn.textContent = "Test"; }, 2500);
+        });
+      });
+    } else {
+      testBtn.disabled = true;
+    }
+
+    row.append(label, input, saveBtn, testBtn);
+    list.appendChild(row);
   }
 }
 
