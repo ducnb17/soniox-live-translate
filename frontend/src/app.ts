@@ -487,6 +487,7 @@ interface ProviderInfo {
 
 let ttsProviders: TtsProviderInfo[] = [];
 let currentTtsProvider = "soniox";
+let configuredTtsVoices: Record<string, string> = {};
 let ttsSessionUsage = emptyTtsUsage();
 const STT_DELAY_SECONDS_KEY = "sttDelaySeconds";
 const TTS_DELAY_SECONDS_KEY = "ttsDelaySeconds";
@@ -585,10 +586,14 @@ async function loadTtsProviders(): Promise<void> {
       current_provider?: string;
       current_voice?: string;
       current_provider_key_masked?: string;
+      configured_voices?: Record<string, string>;
     };
+    // Keep every provider's saved voice so switching provider restores its
+    // own saved voice (each provider keeps an independent voice choice).
+    configuredTtsVoices = cfg.configured_voices || {};
     currentTtsProvider = cfg.current_provider || "soniox";
     $ttsProvider.value = currentTtsProvider;
-    await onTtsProviderChange(cfg.current_voice || "");
+    await onTtsProviderChange(configuredTtsVoices[currentTtsProvider] || cfg.current_voice || "");
     if (cfg.current_provider_key_masked) {
       $ttsApiKey.placeholder = `✓ Đã lưu: ${cfg.current_provider_key_masked} — nhập key mới để thay đổi`;
     }
@@ -664,11 +669,16 @@ async function saveTtsSelection(): Promise<void> {
     body: JSON.stringify({ provider_id: $ttsProvider.value, voice: $ttsVoice.value }),
   });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  if ($ttsVoice.value) {
+    configuredTtsVoices[$ttsProvider.value] = $ttsVoice.value;
+  }
 }
 
 $ttsProvider.addEventListener("change", () => {
   void (async () => {
-    await onTtsProviderChange();
+    // Restore that provider's own saved voice (independent per provider).
+    const saved = configuredTtsVoices[$ttsProvider.value] || "";
+    await onTtsProviderChange(saved);
     await saveTtsSelection();
   })().catch((error: unknown) => setStatus(`Không thể lưu TTS provider: ${(error as Error).message}`));
 });

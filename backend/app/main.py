@@ -340,10 +340,14 @@ async def api_get_tts_config() -> JSONResponse:
     and whether a key is already stored for each."""
     providers = get_available_tts_providers()
     tts_provider_keys = {}
+    tts_provider_voices = {}
     for p in providers:
         key = get_tts_api_key(p.id)
         if key:
             tts_provider_keys[p.id] = _mask_key(key)
+        voice = get_tts_voice(p.id)
+        if voice:
+            tts_provider_voices[p.id] = voice
 
     current_stt = get_stt_provider()
     stt_key = get_stt_api_key(current_stt) or (
@@ -361,6 +365,7 @@ async def api_get_tts_config() -> JSONResponse:
         "current_provider": get_tts_provider(),
         "current_voice": get_tts_voice(get_tts_provider()),
         "configured_providers": tts_provider_keys,
+        "configured_voices": tts_provider_voices,
         "selected_stt_provider": current_stt,
         "stt_api_key_present": stt_api_key_present,
         "stt_api_key_masked": _mask_key(stt_key) if stt_key else "",
