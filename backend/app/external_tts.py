@@ -97,13 +97,60 @@ async def external_tts_sender(
     direction_seq: dict[str, int] = {d: 0 for d in direction_voices}
     in_flight: dict[str, int] = {d: 0 for d in direction_voices}
 
+    # Sentence-grouping buffers: group short translation fragments into
+    # complete sentences (ending in . ! ? …) before synthesizing. This gives
+    # the TTS engine real sentence context — natural prosody, intonation and
+    # pauses — instead of chopping speech into flat robotic fragments.
+    group_buffers: dict[str, str] = {d: "" for d in direction_voices}
+    group_line_ids: dict[str, int] = {d: 0 for d in direction_voices}
+    group_timers: dict[str, asyncio.Task | None] = {d: None for d in direction_voices}
+    GROUP_MAX_WORDS = 34           # hard cap: never wait longer than this
+    GROUP_MAX_CHARS = 180
+    GROUP_FLUSH_SECONDS = 1.1      # flush partial buffer after this silence gap
+
+    async def _timer_flush(direction: str) -> None:
+        await asyncio.sleep(GROUP_FLUSH_SECONDS)
+        _flush_group(direction)
+
+    def _flush_group(direction: str) -> None:
+        """Flush the grouped sentence buffer into a synthesis task.
+
+        Sync: only touches event-loop state (no blocking, no awaits).
+        """
+        text = group_buffers[direction]
+        line_id = group_line_ids[direction]
+        group_buffers[direction] = ""
+        if not text.strip():
+            return
+        seq = direction_seq[direction]
+        direction_seq[direction] += 1
+        in_flight[direction] += 1
+        asyncio.create_task(synthesize_one(direction, text, seq, line_id, states[direction]))
+
     async def handle_text(direction: str, text: str, line_id: int) -> None:
         state = states[direction]
-        async with state.cv:
-            seq = direction_seq[direction]
-            direction_seq[direction] += 1
-            in_flight[direction] += 1
-        asyncio.create_task(synthesize_one(direction, text, seq, line_id, state))
+        # Append incoming fragment to the sentence-group buffer.
+        group_buffers[direction] += text
+        group_line_ids[direction] = line_id  # label the group with the last fragment's line
+        buf = group_buffers[direction]
+
+        # Cancel any pending flush timer — a new fragment arrived.
+        timer = group_timers.get(direction)
+        if timer and not timer.done():
+            timer.cancel()
+        group_timers[direction] = None
+
+        # Heuristic: only flush when the buffer looks like a complete
+        # sentence (terminal punctuation) or hits the size caps.
+        stripped = buf.rstrip()
+        ends_sentence = stripped and stripped[-1] in ".!?…。！？"
+        over_cap = len(stripped.split()) >= GROUP_MAX_WORDS or len(stripped) >= GROUP_MAX_CHARS
+        if ends_sentence or over_cap:
+            _flush_group(direction)
+        else:
+            # Start a short timer: if no more text arrives, flush anyway so
+            # a standalone short utterance is not swallowed forever.
+            group_timers[direction] = asyncio.create_task(_timer_flush(direction))
 
     controllers = {
         direction: asyncio.create_task(playback_loop(direction, state))
@@ -114,6 +161,13 @@ async def external_tts_sender(
         while True:
             data = await tts_queue.get()
             if data is TTS_NONE:
+                # Flush any grouped sentence text first so the last short
+                # utterance is not swallowed by the session end.
+                for direction in states:
+                    _flush_group(direction)
+                    timer = group_timers.get(direction)
+                    if timer and not timer.done():
+                        timer.cancel()
                 # Wait for all in-flight synthesis tasks to finish and
                 # playback controllers to drain their pending queues.
                 for direction, state in states.items():
@@ -126,6 +180,8 @@ async def external_tts_sender(
             kind = data[0]
             if kind == TTS_BARGE:
                 for direction, state in states.items():
+                    # Flush any grouped text immediately, then reset order state.
+                    _flush_group(direction)
                     async with state.cv:
                         for _, fut in list(state.pending.values()):
                             fut.cancel()
@@ -143,7 +199,12 @@ async def external_tts_sender(
                 if direction in states:
                     await handle_text(direction, payload, line_id)
             elif kind == TTS_END:
-                pass
+                # Sentence boundary — flush any partial grouped text now.
+                _, direction = data
+                targets = [direction] if direction else list(states)
+                for tgt in targets:
+                    if tgt in states:
+                        _flush_group(tgt)
     finally:
         for task in controllers.values():
             task.cancel()
@@ -175,6 +236,9 @@ async def _run_synthesize(
             audio = b"".join(chunks)
             if not audio:
                 raise RuntimeError(f"{provider_id} returned no audio")
+            # Trim leading/trailing silence so consecutive utterances join
+            # seamlessly — this is the main cause of jerky, stuttering speech.
+            audio = _trim_pcm_silence(audio)
             tts_cache.set(text, voice_id, provider_id, audio)
             estimated_cost = provider.estimate_cost(len(text))
         except Exception as exc:
@@ -212,3 +276,44 @@ async def _run_synthesize(
         }
     })
     return audio
+
+
+def _trim_pcm_silence(audio: bytes, sample_rate: int = 24000, keep_ms: int = 20) -> bytes:
+    """Trim leading/trailing silence from a PCM s16le stream.
+
+    Consecutive TTS utterances each carry engine-added silence at both ends.
+    When played back-to-back those pauses stack into a jerky, stuttering
+    rhythm. We cut all but a tiny 20 ms cushion on each side so sentences
+    flow into each other smoothly while still breathing naturally.
+    """
+    if len(audio) < 4:
+        return audio
+    samples = memoryview(audio).cast("h")
+    keep = max(0, int(sample_rate * keep_ms / 1000))
+
+    def _is_silence(i: int) -> bool:
+        # Amplitude below ~2.5% of full scale on a small window.
+        start = max(0, i - 2)
+        end = min(len(samples), i + 3)
+        window = samples[start:end]
+        return max((abs(s) for s in window), default=0) < 800
+
+    # Scan start
+    start_idx = 0
+    while start_idx < len(samples) - keep:
+        if not _is_silence(start_idx):
+            break
+        start_idx += 1
+    start_idx = max(0, start_idx - keep)
+
+    # Scan end
+    end_idx = len(samples)
+    while end_idx > start_idx + keep:
+        if not _is_silence(end_idx - 1):
+            break
+        end_idx -= 1
+    end_idx = min(len(samples), end_idx + keep)
+
+    if end_idx <= start_idx:
+        return audio
+    return bytes(memoryview(samples)[start_idx:end_idx].cast("B"))

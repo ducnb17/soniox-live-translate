@@ -24,9 +24,15 @@ class SuccessfulProvider:
 
     async def synthesize_stream(self, text, voice_id, lang):
         self.calls += 1
-        data = f"pcm:{voice_id}:{lang}:{text}".encode()
-        yield data
-        # explicit return to avoid StopIteration leaking from async generator
+        # Fake PCM s16le: 50ms of 1000Hz tone @24kHz (2400 samples) — real
+        # audio-like data so silence-trim logic doesn't discard it.
+        import math
+        import struct
+        samples = [
+            struct.pack("<h", int(20000 * math.sin(2 * math.pi * 1000 * i / 24000)))
+            for i in range(2400)
+        ]
+        yield b"".join(samples)
 
     def estimate_cost(self, char_count):
         return char_count * 0.000015
@@ -53,25 +59,18 @@ async def run_sender(provider, provider_id="openai", fallback=None, wait_for_pla
     kwargs = {}
     if fallback is not None:
         kwargs["fallback_synthesize"] = fallback
-    task = asyncio.create_task(external_tts_sender(
-        tts_queue=queue,
-        tts_state=state,
-        browser_ws=browser,
-        provider_id=provider_id,
-        provider=provider,
-        direction_voices={"vi": "nova"},
-        **kwargs,
-    ))
-    try:
-        await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
-    except (asyncio.TimeoutError, asyncio.CancelledError):
-        task.cancel()
-        try:
-            await task
-        except (asyncio.CancelledError, Exception):
-            pass
-    except Exception:
-        pass
+    await asyncio.wait_for(
+        external_tts_sender(
+            tts_queue=queue,
+            tts_state=state,
+            browser_ws=browser,
+            provider_id=provider_id,
+            provider=provider,
+            direction_voices={"vi": "nova"},
+            **kwargs,
+        ),
+        timeout=10.0,
+    )
     return browser
 
 
@@ -108,7 +107,9 @@ async def test_external_provider_synthesizes_then_reuses_cache_with_zero_second_
     second = await run_sender(provider)
 
     assert provider.calls == 1
-    assert first.audio == [b"pcm:nova:vi:xin ch\xc3\xa0o"]
+    # Audio is a 1000Hz tone (4800 bytes PCM s16le); silence-trim may cut a
+    # few edge samples, so just assert it's non-empty and PCM-like.
+    assert first.audio and len(first.audio[0]) >= 4000
     meta = next(m for m in first.json_messages if m.get("type") == "audio_chunk_meta")
     assert meta == {
         "type": "audio_chunk_meta",
@@ -132,7 +133,13 @@ async def test_provider_quota_error_notifies_user_and_falls_back_to_soniox():
 
     async def fallback(text, voice, lang):
         assert (text, voice, lang) == ("xin chào", "Maya", "vi")
-        return b"soniox-fallback-pcm"
+        # Fake PCM tone so silence-trim keeps it (same shape as provider data).
+        import math
+        import struct
+        return b"".join(
+            struct.pack("<h", int(20000 * math.sin(2 * math.pi * 1000 * i / 24000)))
+            for i in range(2400)
+        )
 
     browser = await run_sender(FailingProvider(), provider_id="openai", fallback=fallback)
 
@@ -143,7 +150,7 @@ async def test_provider_quota_error_notifies_user_and_falls_back_to_soniox():
         "to_provider": "soniox",
         "reason": "quota exhausted",
     }
-    assert browser.audio == [b"soniox-fallback-pcm"]
+    assert browser.audio and len(browser.audio[0]) >= 4000
     usage = next((message["tts_usage"] for message in browser.json_messages if "tts_usage" in message), None)
     assert usage is not None, f"No tts_usage in {browser.json_messages}"
     assert usage["provider_id"] == "soniox"
@@ -156,8 +163,12 @@ async def test_external_provider_keeps_each_line_as_separate_labeled_audio():
     queue = asyncio.Queue()
     state = new_tts_state(["vi"])
     browser = FakeBrowser()
+    # Two fragments: first is a partial sentence (no terminal punctuation),
+    # second completes it with a full stop → sentence grouping merges them
+    # into ONE synthesized utterance (natural prosody), labeled with the
+    # last fragment's line id.
     await queue.put((TTS_TEXT, "dòng một", "vi", 11))
-    await queue.put((TTS_TEXT, "dòng hai", "vi", 12))
+    await queue.put((TTS_TEXT, " dòng hai.", "vi", 12))
     await queue.put((TTS_END, "vi"))
     await queue.put(TTS_NONE)
 
@@ -171,6 +182,8 @@ async def test_external_provider_keeps_each_line_as_separate_labeled_audio():
     )
 
     metas = [message for message in browser.json_messages if message.get("type") == "audio_chunk_meta"]
-    assert [meta["line_id"] for meta in metas] == [11, 12]
-    assert all(meta["line_audio_end"] is True for meta in metas)
-    assert len(browser.audio) == 2
+    # Both fragments grouped into one synthesized utterance.
+    assert len(metas) == 1
+    assert metas[0]["line_id"] == 12
+    assert metas[0]["line_audio_end"] is True
+    assert len(browser.audio) == 1

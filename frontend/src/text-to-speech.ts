@@ -3,7 +3,6 @@
 import { TTS_SAMPLE_RATE } from "./types";
 import { StrictLineAudioQueue } from "./tts-line-queue";
 import { resolveTtsChunkSchedule } from "./tts-playback";
-import { stretchSamples } from "./audio-stretch";
 
 export interface TextToSpeechConfig {
   outputDevice: string;
@@ -25,7 +24,7 @@ export interface TextToSpeechState {
   queuedLineCount: number;
 }
 
-const FADE_MS = 8;
+const FADE_MS = 4;
 
 export class TextToSpeech {
   private audioCtx: AudioContext | null = null;
@@ -320,26 +319,18 @@ export class TextToSpeech {
     }
 
     const rate = this.config.playbackRate;
-    const useStretch = Math.abs(rate - 1) > 1e-6;
-    const rendered = useStretch ? stretchSamples(pcm, rate) : pcm;
+    // Native pitch-preserving speed change (YouTube-style): play the buffer
+    // faster/slower with playbackRate and compensate the pitch shift with
+    // detune so the voice stays natural. detune = 1200 * log2(1/rate):
+    // rate 1.5 -> -702 cents, cancelling the +702 cent shift exactly.
+    const clampedRate = Math.min(4, Math.max(0.25, rate));
+    const buffer = this.audioCtx.createBuffer(1, pcm.length, TTS_SAMPLE_RATE);
+    buffer.getChannelData(0).set(pcm);
 
-    const buffer = this.audioCtx.createBuffer(1, rendered.length, TTS_SAMPLE_RATE);
-    buffer.getChannelData(0).set(rendered);
     const source = this.audioCtx.createBufferSource();
     source.buffer = buffer;
-
-    if (useStretch) {
-      // Time-stretched audio — pitch already preserved; play at normal rate.
-      source.playbackRate.value = 1;
-      source.detune.value = 0;
-    } else {
-      source.playbackRate.value = rate;
-      // Compensate pitch shift caused by playbackRate so the voice stays natural
-      // even at higher speeds. detune = 1200 * log2(1 / rate) restores the
-      // original pitch: a rate of 2.0 shifts pitch +1 octave (+1200 cents),
-      // and detune -1200 cancels it exactly.
-      source.detune.value = 1200 * Math.log2(1 / rate);
-    }
+    source.playbackRate.value = clampedRate;
+    source.detune.value = 1200 * Math.log2(1 / clampedRate);
 
     const gain = this.audioCtx.createGain();
     source.connect(gain);
@@ -354,7 +345,7 @@ export class TextToSpeech {
     );
     if (schedule.isNewLine) this.lastScheduledLineId = schedule.currentLineId;
     const startAt = schedule.startAt;
-    const duration = buffer.duration;
+    const duration = buffer.duration / clampedRate;
     const endAt = startAt + duration;
     const fadeDuration = Math.min(FADE_MS / 1000, duration / 2);
     if (fadeDuration > 0) {

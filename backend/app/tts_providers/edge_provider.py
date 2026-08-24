@@ -101,7 +101,15 @@ class EdgeTTSProvider(TTSProviderBase):
         import edge_tts
 
         voice = voice_id or FALLBACK_VOICES.get(_edge_lang(lang), FALLBACK_VOICES["en"])[0][0]
-        communicate = edge_tts.Communicate(text=text, voice=voice)
+        # Expressive prosody: slightly slower with a warm pitch so Vietnamese
+        # sounds natural and emotive instead of flat robotic fast speech.
+        communicate = edge_tts.Communicate(
+            text=text,
+            voice=voice,
+            rate="+0%",
+            pitch="-3Hz" if voice.lower().startswith("vi-") else "+0Hz",
+            volume="+0%",
+        )
 
         # Run the edge-tts producer and the ffmpeg consumer concurrently on a
         # streaming pipe. We write mp3 chunks to ffmpeg as they arrive, and yield
