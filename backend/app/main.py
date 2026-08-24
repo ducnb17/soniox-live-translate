@@ -587,23 +587,36 @@ def _resolve_direction_voices(
 ) -> tuple[list[str], dict[str, str]]:
     """Resolve the TTS voice for each direction.
 
-    Prefers the voice saved per-provider (get_tts_voice) so each API provider
-    keeps its own voice; falls back to the request's voice param. This fixes
-    'switched voice but spoken voice didn't change' for non-Soniox providers.
+    The frontend `voice` param is the user's LIVE selection in the TTS voice
+    dropdown — trust it. The persisted per-provider voice (get_tts_voice) is
+    only a fallback for when the param is empty, or is the Soniox default
+    "Maya" leaking through the legacy $voice select when no per-provider
+    voice has been picked yet (e.g. non-Soniox provider with empty voice).
     """
     saved_voice = get_tts_voice(tts_provider) or voice
+
+    def pick(value: str | None, fallback: str) -> str:
+        if not value:
+            return fallback
+        if tts_provider != "soniox" and value == "Maya":
+            # "Maya" is a Soniox-only voice. For other providers it means the
+            # legacy select fell back — use the saved voice instead.
+            return fallback or value
+        return value
+
+    resolved = pick(voice, saved_voice)
 
     if mode == "two_way":
         directions = [lang_a or "", lang_b or ""]
         # Direction = target language. Speaker A (lang_a) is heard in the
         # lang_b voice; speaker B (lang_b) is heard in the lang_a voice.
         direction_voices = {
-            lang_a or "": voice_b or saved_voice,
-            lang_b or "": saved_voice,
+            lang_a or "": pick(voice_b, saved_voice),
+            lang_b or "": resolved,
         }
     else:
         directions = [target_lang]
-        direction_voices = {target_lang: saved_voice}
+        direction_voices = {target_lang: resolved}
     return directions, direction_voices
 
 

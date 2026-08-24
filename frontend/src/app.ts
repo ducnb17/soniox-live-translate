@@ -1430,7 +1430,10 @@ function buildSpeechToTextConfig(): SpeechToTextConfig {
     }
   }
 
-  const ttsVoice = $ttsVoice.value || $voice.value;
+  // Voice for the active TTS provider: prefer the per-provider dropdown.
+  // Only fall back to the legacy Soniox $voice select when the provider is
+  // Soniox (its voices live there) — never leak "Maya" into other providers.
+  const ttsVoice = $ttsVoice.value || (currentTtsProvider === "soniox" ? $voice.value : "");
   return {
     mode: $mode(),
     targetLang: $targetLang.value,
