@@ -75,7 +75,7 @@ async def run_sender(provider, provider_id="openai", fallback=None, wait_for_pla
 
 
 async def test_all_providers_are_registered_and_have_voices():
-    expected = {"soniox", "google", "openai", "azure", "elevenlabs", "deepgram", "polly", "pocket_tts", "edge_tts", "piper_gpu"}
+    expected = {"soniox", "google", "openai", "azure", "elevenlabs", "deepgram", "polly", "pocket_tts", "edge_tts", "piper_gpu", "vieneu_tts", "vixtts"}
     infos = get_available_providers()
     assert {info.id for info in infos} == expected
     assert {info.tier for info in infos} <= {"free", "cheap", "premium"}
@@ -83,7 +83,8 @@ async def test_all_providers_are_registered_and_have_voices():
     for provider_id in expected:
         provider = get_provider(provider_id)
         assert provider is not None
-        assert await provider.list_voices(lang="vi" if provider_id == "piper_gpu" else "en")
+        lang = "vi" if provider_id in {"piper_gpu", "vieneu_tts", "vixtts"} else "en"
+        assert await provider.list_voices(lang=lang)
 
 
 async def test_piper_gpu_offers_three_labeled_vietnamese_voices():
