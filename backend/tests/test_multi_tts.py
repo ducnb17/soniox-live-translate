@@ -163,12 +163,11 @@ async def test_external_provider_keeps_each_line_as_separate_labeled_audio():
     queue = asyncio.Queue()
     state = new_tts_state(["vi"])
     browser = FakeBrowser()
-    # Two fragments: first is a partial sentence (no terminal punctuation),
-    # second completes it with a full stop → sentence grouping merges them
-    # into ONE synthesized utterance (natural prosody), labeled with the
-    # last fragment's line id.
-    await queue.put((TTS_TEXT, "dòng một", "vi", 11))
-    await queue.put((TTS_TEXT, " dòng hai.", "vi", 12))
+    # Each rendered translation line must be synthesized with its own line ID.
+    # Otherwise the frontend's strict ordered queue waits forever on the first
+    # registered line, while audio is incorrectly labelled as a later line.
+    await queue.put((TTS_TEXT, "dòng một.", "vi", 11))
+    await queue.put((TTS_TEXT, "dòng hai.", "vi", 12))
     await queue.put((TTS_END, "vi"))
     await queue.put(TTS_NONE)
 
@@ -182,8 +181,6 @@ async def test_external_provider_keeps_each_line_as_separate_labeled_audio():
     )
 
     metas = [message for message in browser.json_messages if message.get("type") == "audio_chunk_meta"]
-    # Both fragments grouped into one synthesized utterance.
-    assert len(metas) == 1
-    assert metas[0]["line_id"] == 12
-    assert metas[0]["line_audio_end"] is True
-    assert len(browser.audio) == 1
+    assert [meta["line_id"] for meta in metas] == [11, 12]
+    assert all(meta["line_audio_end"] is True for meta in metas)
+    assert len(browser.audio) == 2

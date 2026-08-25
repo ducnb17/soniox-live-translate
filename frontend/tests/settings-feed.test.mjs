@@ -25,6 +25,12 @@ test("frontend consumes backend line_ready as the final display boundary", () =>
   assert.match(app, /onLineReady: handleLineReady/);
 });
 
+test("each line_ready remains a separate sentence in the live feed", () => {
+  assert.match(app, /utterances\.push\(\{/);
+  assert.match(app, /Preserve that boundary in\s+\/\/ the feed/);
+  assert.doesNotMatch(app, /shouldAppendToPrevious/);
+});
+
 test("STT and TTS expose independent controls and state", () => {
   assert.match(html, /id="action"/);
   assert.match(html, /id="action-tts"[^>]*aria-pressed="false"/);

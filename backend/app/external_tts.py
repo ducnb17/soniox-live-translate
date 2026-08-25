@@ -123,60 +123,24 @@ async def external_tts_sender(
     # be recognized as stale and dropped.
     direction_epoch: dict[str, int] = {d: 0 for d in direction_voices}
 
-    # Sentence-grouping buffers: group short translation fragments into
-    # complete sentences (ending in . ! ? …) before synthesizing. This gives
-    # the TTS engine real sentence context — natural prosody, intonation and
-    # pauses — instead of chopping speech into flat robotic fragments.
-    group_buffers: dict[str, str] = {d: "" for d in direction_voices}
-    group_line_ids: dict[str, int] = {d: 0 for d in direction_voices}
-    group_timers: dict[str, asyncio.Task | None] = {d: None for d in direction_voices}
-    GROUP_MAX_WORDS = 34           # hard cap: never wait longer than this
-    GROUP_MAX_CHARS = 180
-    GROUP_FLUSH_SECONDS = 1.1      # flush partial buffer after this silence gap
+    def enqueue_line(direction: str, text: str, line_id: int) -> None:
+        """Queue exactly one synthesis job for exactly one rendered line.
 
-    async def _timer_flush(direction: str) -> None:
-        await asyncio.sleep(GROUP_FLUSH_SECONDS)
-        _flush_group(direction)
-
-    def _flush_group(direction: str) -> None:
-        """Flush the grouped sentence buffer into a synthesis task.
-
-        Sync: only touches event-loop state (no blocking, no awaits).
+        The frontend audio queue advances by ``line_id``. Grouping multiple
+        rendered lines into one audio item and labelling it with the final ID
+        leaves the earlier registered line with no audio/end marker, so the
+        queue blocks after the first spoken item. Keep this mapping 1:1.
         """
-        text = group_buffers[direction]
-        line_id = group_line_ids[direction]
-        group_buffers[direction] = ""
         if not text.strip():
             return
         seq = direction_seq[direction]
         direction_seq[direction] += 1
         in_flight[direction] += 1
-        asyncio.create_task(synthesize_one(direction, text, seq, line_id, states[direction], direction_epoch[direction]))
-
-    async def handle_text(direction: str, text: str, line_id: int) -> None:
-        state = states[direction]
-        # Append incoming fragment to the sentence-group buffer.
-        group_buffers[direction] += text
-        group_line_ids[direction] = line_id  # label the group with the last fragment's line
-        buf = group_buffers[direction]
-
-        # Cancel any pending flush timer — a new fragment arrived.
-        timer = group_timers.get(direction)
-        if timer and not timer.done():
-            timer.cancel()
-        group_timers[direction] = None
-
-        # Heuristic: only flush when the buffer looks like a complete
-        # sentence (terminal punctuation) or hits the size caps.
-        stripped = buf.rstrip()
-        ends_sentence = stripped and stripped[-1] in ".!?…。！？"
-        over_cap = len(stripped.split()) >= GROUP_MAX_WORDS or len(stripped) >= GROUP_MAX_CHARS
-        if ends_sentence or over_cap:
-            _flush_group(direction)
-        else:
-            # Start a short timer: if no more text arrives, flush anyway so
-            # a standalone short utterance is not swallowed forever.
-            group_timers[direction] = asyncio.create_task(_timer_flush(direction))
+        asyncio.create_task(
+            synthesize_one(
+                direction, text, seq, line_id, states[direction], direction_epoch[direction]
+            )
+        )
 
     controllers = {
         direction: asyncio.create_task(playback_loop(direction, state))
@@ -187,13 +151,6 @@ async def external_tts_sender(
         while True:
             data = await tts_queue.get()
             if data is TTS_NONE:
-                # Flush any grouped sentence text first so the last short
-                # utterance is not swallowed by the session end.
-                for direction in states:
-                    _flush_group(direction)
-                    timer = group_timers.get(direction)
-                    if timer and not timer.done():
-                        timer.cancel()
                 # Wait for all in-flight synthesis tasks to finish and
                 # playback controllers to drain their pending queues.
                 for direction, state in states.items():
@@ -206,8 +163,6 @@ async def external_tts_sender(
             kind = data[0]
             if kind == TTS_BARGE:
                 for direction, state in states.items():
-                    # Flush any grouped text immediately, then reset order state.
-                    _flush_group(direction)
                     async with state.cv:
                         for _, fut in list(state.pending.values()):
                             fut.cancel()
@@ -233,14 +188,11 @@ async def external_tts_sender(
             if kind == TTS_TEXT:
                 _, payload, direction, line_id = data
                 if direction in states:
-                    await handle_text(direction, payload, line_id)
+                    enqueue_line(direction, payload, line_id)
             elif kind == TTS_END:
-                # Sentence boundary — flush any partial grouped text now.
-                _, direction = data
-                targets = [direction] if direction else list(states)
-                for tgt in targets:
-                    if tgt in states:
-                        _flush_group(tgt)
+                # Each TTS_TEXT is already a complete display/audio line.
+                # The marker only preserves compatibility with the queue protocol.
+                continue
     finally:
         for task in controllers.values():
             task.cancel()

@@ -1224,7 +1224,6 @@ async function viewConversation(id: string): Promise<void> {
         };
       });
     currentUtt = newUtt();
-    displayUtteranceOpen = false;
     // A history selection replaces the entire model, not merely appends to it.
     renderedFinalCount = Number.POSITIVE_INFINITY;
     render();
@@ -1309,10 +1308,6 @@ let mode: AppMode = "file";
 let state: AppState = "idle";
 let utterances: Utterance[] = [];
 let currentUtt = newUtt();
-// A false `is_endpoint` line_ready is an early TTS buffering chunk, not a
-// display boundary. This tracks the one transcript block that may receive
-// more chunks until Soniox sends its actual `<end>` endpoint.
-let displayUtteranceOpen = false;
 let fileAudio: HTMLAudioElement | null = null;
 let fileTtsHeard = false;
 let feedAutoScroll = true;
@@ -1572,33 +1567,17 @@ function handleLineReady(data: SonioxSttResponse): void {
     textToSpeech.registerLine(data.line_id);
   }
 
-  const nextSpeaker = data.speaker ?? null;
-  const nextLanguage = data.lang || null;
-  const previous = utterances[utterances.length - 1];
-  const shouldAppendToPrevious =
-    displayUtteranceOpen &&
-    previous != null &&
-    previous.speaker === nextSpeaker;
-
-  if (shouldAppendToPrevious) {
-    previous.originalFinal += original;
-    previous.translationFinal += translated;
-    if (nextLanguage) previous.language = nextLanguage;
-  } else {
-    utterances.push({
-      speaker: nextSpeaker,
-      language: nextLanguage,
-      originalFinal: original,
-      originalPartial: "",
-      translationFinal: translated,
-      translationPartial: "",
-    });
-  }
-
-  // `line_ready` text is already committed to the final display line above.
-  // Only Soniox's endpoint closes that line; earlier chunks remain eligible
-  // for coalescing so TTS can stream without fragmenting the transcript.
-  displayUtteranceOpen = !data.is_endpoint;
+  // A backend `line_ready` represents one complete translation sentence (or
+  // a safe short split of an unusually long one). Preserve that boundary in
+  // the feed instead of appending same-speaker lines into a paragraph.
+  utterances.push({
+    speaker: data.speaker ?? null,
+    language: data.lang || null,
+    originalFinal: original,
+    originalPartial: "",
+    translationFinal: translated,
+    translationPartial: "",
+  });
   currentUtt = newUtt();
 
   render();
@@ -1899,7 +1878,6 @@ function resetSession(): void {
   textToSpeech.resetSession();
   utterances = [];
   currentUtt = newUtt();
-  displayUtteranceOpen = false;
   feedAutoScroll = true;
   renderedFinalCount = 0;
   interimFeedLine = null;

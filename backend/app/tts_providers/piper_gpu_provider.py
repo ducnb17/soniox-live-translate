@@ -23,6 +23,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import struct
+import wave
+from io import BytesIO
 from typing import AsyncIterator
 
 import httpx
@@ -57,6 +60,28 @@ _VOICES_BY_LANG: dict[str, list[tuple[str, str, str]]] = {
 
 def _base_url() -> str:
     return os.environ.get("PIPER_GPU_URL", _DEFAULT_BASE_URL).rstrip("/")
+
+
+def _resample_s16le_mono(pcm: bytes, source_rate: int, target_rate: int) -> bytes:
+    """Linearly resample signed 16-bit mono PCM without an external binary."""
+    if source_rate <= 0 or target_rate <= 0:
+        raise ValueError("sample rates must be positive")
+    if len(pcm) % 2:
+        raise ValueError("16-bit PCM must contain complete samples")
+    if source_rate == target_rate:
+        return pcm
+    samples = struct.unpack(f"<{len(pcm) // 2}h", pcm)
+    if len(samples) < 2:
+        return pcm
+    output_count = round(len(samples) * target_rate / source_rate)
+    output: list[int] = []
+    for index in range(output_count):
+        position = index * source_rate / target_rate
+        left = min(int(position), len(samples) - 1)
+        right = min(left + 1, len(samples) - 1)
+        fraction = position - left
+        output.append(round(samples[left] + (samples[right] - samples[left]) * fraction))
+    return struct.pack(f"<{len(output)}h", *output)
 
 
 @register_provider
@@ -130,62 +155,27 @@ class PiperGPUProvider(TTSProviderBase):
         if not wav_bytes:
             raise RuntimeError("[piper_gpu] Empty WAV response from GPU server")
 
-        # Pipe the WAV through ffmpeg to get raw PCM s16le 24 kHz mono.
-        # We write all WAV bytes to stdin in one shot, then read PCM chunks
-        # from stdout as they emerge — same pattern as EdgeTTSProvider.
-        ffmpeg_proc: asyncio.subprocess.Process = await asyncio.create_subprocess_exec(
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-i",
-            "pipe:0",
-            "-f",
-            "s16le",
-            "-ac",
-            "1",
-            "-ar",
-            "24000",
-            "-",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        assert ffmpeg_proc.stdin is not None
-        assert ffmpeg_proc.stdout is not None
-        assert ffmpeg_proc.stderr is not None
-
-        # Write WAV to ffmpeg stdin in a background task, then stream PCM out.
-        async def _write_stdin() -> None:
-            try:
-                ffmpeg_proc.stdin.write(wav_bytes)
-                await ffmpeg_proc.stdin.drain()
-            finally:
-                try:
-                    ffmpeg_proc.stdin.close()
-                    await ffmpeg_proc.stdin.wait_closed()
-                except Exception:
-                    pass
-
-        write_task = asyncio.create_task(_write_stdin())
+        # Decode/resample in-process.  The former ffmpeg subprocess made every
+        # Piper request depend on a binary that the packaged Windows backend did
+        # not include; its FileNotFoundError was swallowed by the async sender,
+        # leaving a registered line with no usable audio and stalling playback.
         try:
-            while True:
-                pcm = await ffmpeg_proc.stdout.read(4096)
-                if not pcm:
-                    break
-                yield pcm
-        finally:
-            write_task.cancel()
-            try:
-                await write_task
-            except asyncio.CancelledError:
-                pass
-            returncode = await ffmpeg_proc.wait()
-            if returncode not in (0, -13, -15, 255):
-                err = (await ffmpeg_proc.stderr.read()).decode(errors="replace")[:300]
-                raise RuntimeError(
-                    f"[piper_gpu] ffmpeg exited {returncode}: {err}"
-                )
+            with wave.open(BytesIO(wav_bytes), "rb") as reader:
+                channels = reader.getnchannels()
+                sample_width = reader.getsampwidth()
+                sample_rate = reader.getframerate()
+                frames = reader.readframes(reader.getnframes())
+        except (wave.Error, EOFError) as exc:
+            raise RuntimeError(f"[piper_gpu] Invalid WAV response: {exc}") from exc
+        if channels != 1 or sample_width != 2:
+            raise RuntimeError(
+                f"[piper_gpu] Expected 16-bit mono WAV, got {sample_width * 8}-bit/{channels}ch"
+            )
+        pcm = _resample_s16le_mono(frames, sample_rate, 24000)
+        if not pcm:
+            raise RuntimeError("[piper_gpu] WAV response contained no PCM frames")
+        for offset in range(0, len(pcm), 4096):
+            yield pcm[offset:offset + 4096]
 
     # ── cost / metadata ───────────────────────────────────────────────────────
 
