@@ -74,7 +74,7 @@ async def run_sender(provider, provider_id="openai", fallback=None, wait_for_pla
     return browser
 
 
-async def test_all_eight_providers_are_registered_and_have_voices():
+async def test_all_providers_are_registered_and_have_voices():
     expected = {"soniox", "google", "openai", "azure", "elevenlabs", "deepgram", "polly", "pocket_tts", "edge_tts", "piper_gpu"}
     infos = get_available_providers()
     assert {info.id for info in infos} == expected
@@ -83,7 +83,19 @@ async def test_all_eight_providers_are_registered_and_have_voices():
     for provider_id in expected:
         provider = get_provider(provider_id)
         assert provider is not None
-        assert await provider.list_voices(lang="en")
+        assert await provider.list_voices(lang="vi" if provider_id == "piper_gpu" else "en")
+
+
+async def test_piper_gpu_offers_three_labeled_vietnamese_voices():
+    provider = get_provider("piper_gpu")
+    assert provider is not None
+    voices = await provider.list_voices(lang="vi")
+    assert [(voice.id, voice.gender) for voice in voices] == [
+        ("vi_VN-vais1000-medium", "female"),
+        ("vi_VN-25hours_single-low", "female"),
+        ("vi_VN-vivos-x_low", "male"),
+    ]
+    assert all("GPU" in voice.name for voice in voices)
 
 
 def test_tts_cache_is_true_lru_and_bounded_by_entries_and_bytes():

@@ -1,17 +1,9 @@
 """Local Piper GPU TTS provider.
 
-Connects to the GPU inference server running on the local network (default:
-http://localhost:8767). The server exposes:
-
-  POST /tts  {"text": "...", "voice_id": "<optional>", "rate": <optional float>}
-             → audio/wav (Piper GPU synthesised)
-
-  GET  /health → {"ok": true, ...}
-
-This provider downloads the WAV, strips the 44-byte header, resamples to
-PCM s16le 24 kHz mono via ffmpeg (same pipeline as EdgeTTSProvider), and
-yields chunks so the TTS pipeline can start playback before the full
-utterance is received.
+Connects to the local GPU inference server (default: http://localhost:8767).
+It sends each sentence with its selected Vietnamese Piper ``voice_id``, receives
+WAV audio, resamples it to the application's PCM s16le/24 kHz contract, and
+yields chunks for sentence-by-sentence playback.
 
 Configuration
 -------------
@@ -37,25 +29,16 @@ log = get_logger("piper_gpu_tts")
 
 _DEFAULT_BASE_URL = "http://localhost:8767"
 
-# Vietnamese voices served by the Piper GPU backend.
-# voice_id is passed verbatim to POST /tts as "voice_id".
+# Vietnamese voices installed on the local GPU server. voice_id is forwarded
+# verbatim to POST /tts. The labels describe each actual model rather than
+# implying multiple speakers inside a single Piper checkpoint.
 _VI_VOICES: list[tuple[str, str, str]] = [
-    ("vi_VN-vais1000-medium", "Vais1000 (Nữ, GPU)", "female"),
-    ("vi_VN-25hours_single-low", "25hours Single (Nữ, GPU)", "female"),
+    ("vi_VN-vais1000-medium", "Vais1000 — Nữ, rõ ràng (GPU)", "female"),
+    ("vi_VN-25hours_single-low", "25hours Single — Nữ, nhẹ nhàng (GPU)", "female"),
+    ("vi_VN-vivos-x_low", "Vivos — Nam, nhanh gọn (GPU)", "male"),
 ]
 
-# Generic English fallback voices (Piper ships these by default).
-_EN_VOICES: list[tuple[str, str, str]] = [
-    ("en_US-lessac-medium", "Lessac (Female, US, GPU)", "female"),
-    ("en_US-ryan-high", "Ryan (Male, US, GPU)", "male"),
-]
-
-_VOICES_BY_LANG: dict[str, list[tuple[str, str, str]]] = {
-    "vi": _VI_VOICES,
-    "en": _EN_VOICES,
-    "en_us": _EN_VOICES,
-    "en_gb": _EN_VOICES,
-}
+_VOICES_BY_LANG: dict[str, list[tuple[str, str, str]]] = {"vi": _VI_VOICES}
 
 
 def _base_url() -> str:
@@ -190,7 +173,7 @@ class PiperGPUProvider(TTSProviderBase):
             description=(
                 "Local Piper TTS running on a dedicated GPU server "
                 f"({_base_url()}). No API key, no cost, low latency on LAN. "
-                "Best for Vietnamese and English voices."
+                "Vietnamese-only voice pack: two female voices and one male voice."
             ),
             requires_api_key=False,
             supports_streaming=True,
