@@ -15,6 +15,7 @@ EXPECTED_PROVIDERS = {
     "deepgram",
     "google_v2",
     "assemblyai",
+    "local_whisper_gpu",
 }
 
 
@@ -28,6 +29,11 @@ def test_all_stt_providers_are_registered_with_explicit_capabilities():
 
     whisper = next(info for info in infos if info.id == "openai")
     assert whisper.supports_streaming is False
+
+    local_whisper = next(info for info in infos if info.id == "local_whisper_gpu")
+    assert local_whisper.requires_api_key is False
+    assert local_whisper.supports_streaming is True
+    assert local_whisper.approximate_cost_per_hour == 0.0
 
     realtime_translators = [
         info.id for info in infos if info.supports_realtime_translation
@@ -49,7 +55,7 @@ def test_stt_provider_tier_rejects_unknown_badge():
         )
 
 
-@pytest.mark.parametrize("provider_id", sorted(EXPECTED_PROVIDERS - {"soniox", "google_v2"}))
+@pytest.mark.parametrize("provider_id", sorted(EXPECTED_PROVIDERS - {"soniox", "google_v2", "local_whisper_gpu"}))
 async def test_external_provider_connection_check_rejects_missing_key(provider_id):
     provider = get_provider(provider_id)
 

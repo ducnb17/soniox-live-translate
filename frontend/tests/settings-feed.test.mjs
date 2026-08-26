@@ -67,6 +67,11 @@ test("STT start is blocked until required provider keys are saved", () => {
   assert.match(app, /activateSettingsTab\(check\.tab\)/);
 });
 
+test("keyless local STT hides the credential field", () => {
+  assert.match(app, /keyRow\.classList\.toggle\("hidden", !provider\?\.requires_api_key\)/);
+  assert.match(app, /Không cần key \(chạy local\)/);
+});
+
 test("every statically referenced startup element exists in the HTML", () => {
   const typedRefs = [...app.matchAll(/\$<[^>]+>\("([^"]+)"\)/g)].map((match) => match[1]);
   const plainRefs = [...app.matchAll(/\$\("([^"]+)"\)/g)].map((match) => match[1]);

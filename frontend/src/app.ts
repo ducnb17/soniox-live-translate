@@ -872,7 +872,7 @@ function showProviderMeta(
   link: HTMLAnchorElement,
 ): void {
   const provider = providers.find((item) => item.id === select.value);
-  keyRow.classList.remove("hidden");
+  keyRow.classList.toggle("hidden", !provider?.requires_api_key);
   keyRow.classList.toggle("provider-no-key", !provider?.requires_api_key);
   badge.textContent = provider?.tier || "";
   badge.dataset.tier = provider?.tier || "";
@@ -931,7 +931,14 @@ function updateKeyInputState(
   maskedKey = "",
 ): void {
   const provider = providers.find((p) => p.id === select.value);
-  const hasKey = provider?.has_api_key ?? false;
+  if (!provider?.requires_api_key) {
+    input.value = "";
+    input.disabled = true;
+    input.placeholder = "Không cần key (chạy local)";
+    status.textContent = "";
+    return;
+  }
+  const hasKey = provider.has_api_key ?? false;
   input.disabled = false;
   if (hasKey) {
     input.placeholder = maskedKey

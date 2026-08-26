@@ -79,6 +79,7 @@ from .stt_provider import (
     get_available_providers as get_available_stt_providers,
 )
 from .stt_providers.google_provider import GoogleSttStream
+from .stt_providers.local_whisper_provider import LocalWhisperSttStream
 from .translation_provider import (
     get_provider as get_translation_provider_instance,
     get_available_providers as get_available_translation_providers,
@@ -668,7 +669,7 @@ async def translation_websocket(
         # started. Synchronize all legacy Soniox STT/TTS consumers in-process.
         set_api_key(soniox_api_key)
 
-    if stt_provider not in ("soniox", "google_v2"):
+    if stt_provider not in ("soniox", "google_v2", "local_whisper_gpu"):
         provider = get_stt_provider_instance(
             stt_provider, api_key=get_stt_api_key(stt_provider)
         )
@@ -680,7 +681,9 @@ async def translation_websocket(
         await browser_ws.close()
         return
 
-    # Validate Google V2 credentials early
+    # Validate adapters that run outside the established Soniox WebSocket.
+    google_provider = None
+    local_whisper_provider = None
     if stt_provider == "google_v2":
         google_provider = get_stt_provider_instance(
             "google_v2", api_key=get_stt_api_key("google_v2")
@@ -697,6 +700,16 @@ async def translation_websocket(
             await browser_ws.send_json({
                 "error_code": "google_v2_credentials",
                 "error_message": f"Google Cloud credentials check failed: {google_msg}",
+            })
+            await browser_ws.close()
+            return
+    elif stt_provider == "local_whisper_gpu":
+        local_whisper_provider = get_stt_provider_instance("local_whisper_gpu")
+        local_ok, local_msg = await local_whisper_provider.test_connection() if local_whisper_provider else (False, "provider could not be initialised")
+        if not local_ok:
+            await browser_ws.send_json({
+                "error_code": "local_whisper_unavailable",
+                "error_message": local_msg,
             })
             await browser_ws.close()
             return
@@ -902,10 +915,16 @@ async def translation_websocket(
         stt_finished_event = asyncio.Event()
 
         try:
-            # Connect to Soniox STT (or Google V2 adapter)
+            # Connect to Soniox STT, Google V2, or the local faster-whisper bridge.
             use_google_v2 = stt_provider == "google_v2"
+            use_local_whisper = stt_provider == "local_whisper_gpu"
             if use_google_v2:
+                assert google_provider is not None
                 stt_ws = GoogleSttStream(google_provider, language_hints)
+                await stt_ws.open()
+            elif use_local_whisper:
+                assert local_whisper_provider is not None
+                stt_ws = LocalWhisperSttStream(local_whisper_provider, language_hints)
                 await stt_ws.open()
             else:
                 stt_ws = await websockets.connect(
@@ -1003,7 +1022,7 @@ async def translation_websocket(
                         translate_text=translate_text,
                     )
                 )
-                tg.create_task(stt_keepalive(stt_ws)) if not use_google_v2 else None
+                tg.create_task(stt_keepalive(stt_ws)) if not (use_google_v2 or use_local_whisper) else None
                 if tts and not use_external_tts:
                     tg.create_task(
                         tts_sender(

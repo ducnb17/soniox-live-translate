@@ -97,3 +97,4 @@ from .stt_providers.openai_provider import OpenAIWhisperProvider  # noqa: E402
 from .stt_providers.deepgram_provider import DeepgramSTTProvider  # noqa: E402
 from .stt_providers.google_provider import GoogleSTTProvider  # noqa: E402
 from .stt_providers.assemblyai_provider import AssemblyAISTTProvider  # noqa: E402
+from .stt_providers.local_whisper_provider import LocalWhisperGPUProvider  # noqa: E402
