@@ -1558,6 +1558,16 @@ function scheduleRender(): void {
   });
 }
 
+// Display commits are intentionally stricter than TTS chunks: a translated
+// line stays in the live preview until it ends with a comma or full stop.
+// This prevents the feed from breaking a natural phrase solely because the
+// backend emitted a short audio chunk for low-latency playback.
+let pendingDisplayLine: Utterance | null = null;
+
+function endsDisplayLine(text: string): boolean {
+  return /[,.]\s*$/.test(text);
+}
+
 function handleLineReady(data: SonioxSttResponse): void {
   const original = data.original_text || "";
   const translated = data.translated_text || "";
@@ -1567,18 +1577,30 @@ function handleLineReady(data: SonioxSttResponse): void {
     textToSpeech.registerLine(data.line_id);
   }
 
-  // A backend `line_ready` represents one complete translation sentence (or
-  // a safe short split of an unusually long one). Preserve that boundary in
-  // the feed instead of appending same-speaker lines into a paragraph.
-  utterances.push({
-    speaker: data.speaker ?? null,
-    language: data.lang || null,
-    originalFinal: original,
-    originalPartial: "",
-    translationFinal: translated,
-    translationPartial: "",
-  });
-  currentUtt = newUtt();
+  if (!pendingDisplayLine) {
+    pendingDisplayLine = {
+      speaker: data.speaker ?? null,
+      language: data.lang || null,
+      originalFinal: "",
+      originalPartial: "",
+      translationFinal: "",
+      translationPartial: "",
+    };
+  }
+  pendingDisplayLine.originalFinal += original;
+  pendingDisplayLine.translationFinal += translated;
+  if (data.speaker != null) pendingDisplayLine.speaker = data.speaker;
+  if (data.lang) pendingDisplayLine.language = data.lang;
+
+  // Only create a permanent feed row after visible punctuation. Translation is
+  // the primary display text; fall back to source text when no translation was
+  // provided for the chunk.
+  const visibleText = pendingDisplayLine.translationFinal || pendingDisplayLine.originalFinal;
+  if (endsDisplayLine(visibleText)) {
+    utterances.push(pendingDisplayLine);
+    pendingDisplayLine = null;
+    currentUtt = newUtt();
+  }
 
   render();
 }

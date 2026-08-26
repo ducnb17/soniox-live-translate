@@ -25,10 +25,12 @@ test("frontend consumes backend line_ready as the final display boundary", () =>
   assert.match(app, /onLineReady: handleLineReady/);
 });
 
-test("each line_ready remains a separate sentence in the live feed", () => {
-  assert.match(app, /utterances\.push\(\{/);
-  assert.match(app, /Preserve that boundary in\s+\/\/ the feed/);
-  assert.doesNotMatch(app, /shouldAppendToPrevious/);
+test("live feed commits a line only after comma or full stop", () => {
+  assert.match(app, /function endsDisplayLine\(text: string\): boolean/);
+  assert.match(app, /\/\[,.\]\\s\*\$\//);
+  assert.match(app, /pendingDisplayLine\.translationFinal \+= translated/);
+  assert.match(app, /if \(endsDisplayLine\(visibleText\)\) \{/);
+  assert.match(app, /utterances\.push\(pendingDisplayLine\)/);
 });
 
 test("STT and TTS expose independent controls and state", () => {
