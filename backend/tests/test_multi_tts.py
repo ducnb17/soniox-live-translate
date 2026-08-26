@@ -87,6 +87,14 @@ async def test_all_providers_are_registered_and_have_voices():
         assert await provider.list_voices(lang=lang)
 
 
+async def test_vieneu_fallback_catalog_has_all_twenty_preset_voices():
+    provider = get_provider("vieneu_tts")
+    assert provider is not None
+    catalog = getattr(provider, "fallback_voices", ())
+    assert len(catalog) == 20
+    assert {voice_id for voice_id, _ in catalog} >= {"Minh Đức", "Mai Anh", "Adam"}
+
+
 async def test_piper_gpu_offers_three_labeled_vietnamese_voices():
     provider = get_provider("piper_gpu")
     assert provider is not None

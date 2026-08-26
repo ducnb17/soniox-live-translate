@@ -136,7 +136,30 @@ class VieNeuTTSProvider(_LocalVietnameseBase):
     env_name = "VIENEU_TTS_URL"
     default_url = "http://localhost:8768"
     description = "Vietnamese neural voices from a local VieNeu-TTS v3 Turbo GPU bridge; no API key or per-character cost."
-    fallback_voices = (("Minh Đức", "Minh Đức — Nam · Bắc · Phong cách tin tức"),)
+    # Keep the selector useful even if the local bridge is restarting. This
+    # mirrors VieNeu v3 Turbo's complete preset catalog (id, visible label).
+    fallback_voices = (
+        ("Minh Đức", "Minh Đức — Nam · Bắc · Phong cách tin tức"),
+        ("Phạm Tuyên", "Phạm Tuyên — Nam · Bắc · Phong cách tự nhiên"),
+        ("Thái Sơn", "Thái Sơn — Nam · Nam · Phong cách kể chuyện"),
+        ("Xuân Vĩnh", "Xuân Vĩnh — Nam · Nam · Phong cách tự nhiên"),
+        ("Thanh Bình", "Thanh Bình — Nam · Bắc · Phong cách kể chuyện"),
+        ("Trúc Ly", "Trúc Ly — Nữ · Bắc · Phong cách tự nhiên"),
+        ("Ngọc Linh", "Ngọc Linh — Nữ · Bắc · Phong cách kể chuyện"),
+        ("Đoan Trang", "Đoan Trang — Nữ · Bắc · Phong cách tự nhiên"),
+        ("Mai Anh", "Mai Anh — Nữ · Bắc · Phong cách tin tức"),
+        ("Thục Đoan", "Thục Đoan — Nữ · Nam · Phong cách kể chuyện"),
+        ("Minh Triết", "Minh Triết — Nam · Nam · Phong cách tin tức"),
+        ("Thùy Dung", "Thùy Dung — Nữ · Nam · Phong cách tin tức"),
+        ("Quang Sơn", "Quang Sơn — Nam · Trung · Phong cách tự nhiên"),
+        ("Ngọc Trân", "Ngọc Trân — Nữ · Trung · Phong cách tự nhiên"),
+        ("Mỹ Duyên", "Mỹ Duyên — Nữ · Nam · Phong cách đọc truyện"),
+        ("Quỳnh Anh", "Quỳnh Anh — Nữ · Bắc · Phong cách đọc truyện"),
+        ("Đức Trí", "Đức Trí — Nam · Nam · Phong cách đọc truyện"),
+        ("Kim Thanh", "Kim Thanh — Nữ · Nam · Phong cách đọc truyện"),
+        ("Ngọc Huyền", "Ngọc Huyền — Nữ · Bắc · Giọng đọc tự nhiên"),
+        ("Adam", "Adam — Nam · Nam · Giọng đọc tự nhiên"),
+    )
 
 
 @register_provider
